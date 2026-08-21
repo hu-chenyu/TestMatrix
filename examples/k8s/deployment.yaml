@@ -1,0 +1,70 @@
+# ==============================================================================
+# TestMatrix Web平台Kubernetes部署示例（非核心Demo，体现云原生认知）
+# 使用方式: kubectl apply -f examples/k8s/deployment.yaml
+# 前置条件: 镜像testmatrix:latest已推送到集群可达的镜像仓库
+# ==============================================================================
+
+# ------------------------------ Web平台无状态部署 ------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: testmatrix-web
+  namespace: testmatrix
+  labels:
+    app: testmatrix-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: testmatrix-web
+  template:
+    metadata:
+      labels:
+        app: testmatrix-web
+    spec:
+      containers:
+        - name: testmatrix-web
+          image: testmatrix:latest
+          ports:
+            - containerPort: 5000
+          env:
+            - name: TM_ENV
+              value: "prod"
+            - name: TM_DB_TYPE
+              value: "mysql"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # 存活探针: 服务假死自动重启（接口由第二阶段Web平台实现）
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          # 就绪探针: 就绪后才接收流量
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+
+---
+# ------------------------------ 集群内访问入口 ------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: testmatrix-web-svc
+  namespace: testmatrix
+spec:
+  selector:
+    app: testmatrix-web
+  ports:
+    - port: 80
+      targetPort: 5000
+  type: ClusterIP

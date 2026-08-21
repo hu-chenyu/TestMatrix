@@ -1,0 +1,32 @@
+# ==============================================================================
+# 用户查询接口测试数据（数据驱动）
+# 消费用例: tests/api_demo/test_api_user_query.py
+# 字段说明:
+#   case_id           用例编号
+#   name              用例名称
+#   query_user_id     查询的目标用户ID
+#   expected_status   期望HTTP状态码
+#   expected_code     期望业务码（0=成功 / 2002=用户不存在）
+#   expected_username 期望返回的用户名（存在时校验，缺省则跳过用户信息断言）
+# ==============================================================================
+
+user_query_cases:
+  - case_id: TM-API-0101
+    name: 合法令牌查询管理员用户信息
+    query_user_id: 1
+    expected_status: 200
+    expected_code: 0
+    expected_username: admin
+
+  - case_id: TM-API-0102
+    name: 合法令牌查询测试用户信息
+    query_user_id: 2
+    expected_status: 200
+    expected_code: 0
+    expected_username: tester
+
+  - case_id: TM-API-0103
+    name: 合法令牌查询不存在用户返回业务错误码
+    query_user_id: 999
+    expected_status: 200
+    expected_code: 2002
