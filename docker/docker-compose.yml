@@ -1,0 +1,57 @@
+# ==============================================================================
+# TestMatrix 一键编排启动配置
+# 使用方式（在项目根目录执行）:
+#   启动测试执行容器:       docker compose -f docker/docker-compose.yml up test-runner
+#   启动MySQL模式联调:      docker compose -f docker/docker-compose.yml --profile mysql up -d
+#     （MySQL模式下需设置环境变量 TM_DB_TYPE=mysql 再启动test-runner）
+# ==============================================================================
+
+services:
+  # ------------------------------ 测试执行器 ------------------------------
+  # 容器内运行pytest测试套件，测试产物挂载到宿主机output/目录
+  test-runner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: testmatrix:latest
+    container_name: testmatrix-runner
+    environment:
+      # 运行环境与日志级别
+      TM_ENV: test
+      TM_LOG_LEVEL: INFO
+      # 数据库模式: sqlite（默认本地文件）/ mysql（配合mysql服务联调）
+      TM_DB_TYPE: ${TM_DB_TYPE:-sqlite}
+      # MySQL连接配置（仅TM_DB_TYPE=mysql时生效）
+      TM_DB_MYSQL_HOST: mysql
+      TM_DB_MYSQL_PORT: "3306"
+      TM_DB_MYSQL_USER: ${TM_DB_MYSQL_USER:-testmatrix}
+      TM_DB_MYSQL_PASSWORD: ${TM_DB_MYSQL_PASSWORD:-testmatrix123}
+      TM_DB_MYSQL_DATABASE: ${TM_DB_MYSQL_DATABASE:-testmatrix}
+    volumes:
+      # 测试产物（日志/Allure结果）挂载宿主机，便于本机查看报告
+      - ../output:/app/output
+
+  # ------------------------------ MySQL数据库 ------------------------------
+  # 默认不启动，追加 --profile mysql 启用，用于MySQL模式联调验证
+  mysql:
+    image: mysql:8.0
+    container_name: testmatrix-mysql
+    profiles: ["mysql"]
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: testmatrix
+      MYSQL_USER: testmatrix
+      MYSQL_PASSWORD: testmatrix123
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mysql_data:

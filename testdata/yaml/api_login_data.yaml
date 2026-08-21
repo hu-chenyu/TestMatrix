@@ -1,0 +1,49 @@
+# ==============================================================================
+# 用户登录接口测试数据（数据驱动）
+# 消费用例: tests/api_demo/test_api_login.py
+# 字段说明:
+#   case_id           用例编号（Allure报告与日志追踪标识）
+#   name              用例名称（参数化ID展示）
+#   username/password 登录账密（密码必须加引号，防止YAML解析为数值）
+#   expected_status   期望HTTP状态码
+#   expected_code     期望业务码（0=成功 / 1001=参数缺失 / 1002=账密错误）
+#   expected_msg      期望业务消息
+#   expect_token      是否期望签发Token
+# ==============================================================================
+
+login_cases:
+  - case_id: TM-API-0001
+    name: 管理员正确账密登录成功
+    username: admin
+    password: "123456"
+    expected_status: 200
+    expected_code: 0
+    expected_msg: success
+    expect_token: true
+
+  - case_id: TM-API-0002
+    name: 密码错误登录失败
+    username: admin
+    password: "wrong_password"
+    expected_status: 200
+    expected_code: 1002
+    expected_msg: 用户名或密码错误
+    expect_token: false
+
+  - case_id: TM-API-0003
+    name: 不存在的用户登录失败
+    username: ghost_user
+    password: "123456"
+    expected_status: 200
+    expected_code: 1002
+    expected_msg: 用户名或密码错误
+    expect_token: false
+
+  - case_id: TM-API-0004
+    name: 缺少密码参数请求被拒绝
+    username: admin
+    password: ""
+    expected_status: 400
+    expected_code: 1001
+    expected_msg: 用户名或密码参数缺失
+    expect_token: false
