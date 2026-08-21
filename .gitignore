@@ -1,0 +1,79 @@
+# ==============================================================================
+# TestMatrix 项目 Git 忽略配置
+# ==============================================================================
+
+# ------------------------------ Python运行产物 ------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+man/
+
+# ------------------------------ 虚拟环境 ------------------------------
+venv/
+env/
+ENV/
+.venv/
+.env
+.venv*
+
+# ------------------------------ 测试与覆盖率产物 ------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+output/allure_results/
+output/reports/
+output/logs/
+*.log
+
+# ------------------------------ 本地敏感配置（不入库） ------------------------------
+.env
+.env.local
+.env.dev
+.env.test
+.env.prod
+
+# ------------------------------ IDE与编辑器 ------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ------------------------------ 操作系统文件 ------------------------------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ------------------------------ 数据库文件 ------------------------------
+*.db
+*.sqlite
+*.sqlite3
+
+# ------------------------------ Allure工具与临时文件 ------------------------------
+allure-commandline/
+allure-report/
+.tmp/
