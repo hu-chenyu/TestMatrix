@@ -1,0 +1,297 @@
+bulk_query_cases:
+- case_id: TM-BULK-Y01
+  name: 批量01-令牌查询管理员信息成功
+  module: 用户管理
+  priority: P0
+  tags: &id001
+  - smoke
+  - api
+  request:
+    token_required: true
+    query_user_id: 1
+  expected:
+    status: 200
+    code: 0
+    username: admin
+- case_id: TM-BULK-Y02
+  name: 批量02-令牌查询测试账号信息成功
+  module: 订单管理
+  priority: P1
+  tags: &id002
+  - regression
+  request:
+    token_required: true
+    query_user_id: 2
+  expected:
+    status: 200
+    code: 0
+    username: tester
+- case_id: TM-BULK-Y03
+  name: 批量03-令牌查询不存在用户1003返回业务错误码
+  module: 系统监控
+  priority: P2
+  tags: &id003
+  - api
+  - regression
+  request:
+    token_required: true
+    query_user_id: 1003
+  expected:
+    status: 200
+    code: 2002
+- case_id: TM-BULK-Y04
+  name: 批量04-无令牌查询用户被拒绝
+  module: 数据报表
+  priority: P3
+  tags: &id004
+  - security
+  request:
+    token_required: false
+    query_user_id: 1
+  expected:
+    status: 401
+    code: 2001
+- case_id: TM-BULK-Y05
+  name: 批量05-令牌查询管理员信息成功
+  module: 用户管理
+  priority: P0
+  tags: &id005
+  - smoke
+  - regression
+  request:
+    token_required: true
+    query_user_id: 1
+  expected:
+    status: 200
+    code: 0
+    username: admin
+- case_id: TM-BULK-Y06
+  name: 批量06-令牌查询测试账号信息成功
+  module: 订单管理
+  priority: P1
+  tags: *id001
+  request:
+    token_required: true
+    query_user_id: 2
+  expected:
+    status: 200
+    code: 0
+    username: tester
+- case_id: TM-BULK-Y07
+  name: 批量07-令牌查询不存在用户1007返回业务错误码
+  module: 系统监控
+  priority: P2
+  tags: *id002
+  request:
+    token_required: true
+    query_user_id: 1007
+  expected:
+    status: 200
+    code: 2002
+- case_id: TM-BULK-Y08
+  name: 批量08-无令牌查询用户被拒绝
+  module: 数据报表
+  priority: P3
+  tags: *id003
+  request:
+    token_required: false
+    query_user_id: 1
+  expected:
+    status: 401
+    code: 2001
+- case_id: TM-BULK-Y09
+  name: 批量09-令牌查询管理员信息成功
+  module: 用户管理
+  priority: P0
+  tags: *id004
+  request:
+    token_required: true
+    query_user_id: 1
+  expected:
+    status: 200
+    code: 0
+    username: admin
+- case_id: TM-BULK-Y10
+  name: 批量10-令牌查询测试账号信息成功
+  module: 订单管理
+  priority: P1
+  tags: *id005
+  request:
+    token_required: true
+    query_user_id: 2
+  expected:
+    status: 200
+    code: 0
+    username: tester
+- case_id: TM-BULK-Y11
+  name: 批量11-令牌查询不存在用户1011返回业务错误码
+  module: 系统监控
+  priority: P2
+  tags: *id001
+  request:
+    token_required: true
+    query_user_id: 1011
+  expected:
+    status: 200
+    code: 2002
+- case_id: TM-BULK-Y12
+  name: 批量12-无令牌查询用户被拒绝
+  module: 数据报表
+  priority: P3
+  tags: *id002
+  request:
+    token_required: false
+    query_user_id: 1
+  expected:
+    status: 401
+    code: 2001
+- case_id: TM-BULK-Y13
+  name: 批量13-令牌查询管理员信息成功
+  module: 用户管理
+  priority: P0
+  tags: *id003
+  request:
+    token_required: true
+    query_user_id: 1
+  expected:
+    status: 200
+    code: 0
+    username: admin
+- case_id: TM-BULK-Y14
+  name: 批量14-令牌查询测试账号信息成功
+  module: 订单管理
+  priority: P1
+  tags: *id004
+  request:
+    token_required: true
+    query_user_id: 2
+  expected:
+    status: 200
+    code: 0
+    username: tester
+- case_id: TM-BULK-Y15
+  name: 批量15-令牌查询不存在用户1015返回业务错误码
+  module: 系统监控
+  priority: P2
+  tags: *id005
+  request:
+    token_required: true
+    query_user_id: 1015
+  expected:
+    status: 200
+    code: 2002
+- case_id: TM-BULK-Y16
+  name: 批量16-无令牌查询用户被拒绝
+  module: 数据报表
+  priority: P3
+  tags: *id001
+  request:
+    token_required: false
+    query_user_id: 1
+  expected:
+    status: 401
+    code: 2001
+- case_id: TM-BULK-Y17
+  name: 批量17-令牌查询管理员信息成功
+  module: 用户管理
+  priority: P0
+  tags: *id002
+  request:
+    token_required: true
+    query_user_id: 1
+  expected:
+    status: 200
+    code: 0
+    username: admin
+- case_id: TM-BULK-Y18
+  name: 批量18-令牌查询测试账号信息成功
+  module: 订单管理
+  priority: P1
+  tags: *id003
+  request:
+    token_required: true
+    query_user_id: 2
+  expected:
+    status: 200
+    code: 0
+    username: tester
+- case_id: TM-BULK-Y19
+  name: 批量19-令牌查询不存在用户1019返回业务错误码
+  module: 系统监控
+  priority: P2
+  tags: *id004
+  request:
+    token_required: true
+    query_user_id: 1019
+  expected:
+    status: 200
+    code: 2002
+- case_id: TM-BULK-Y20
+  name: 批量20-无令牌查询用户被拒绝
+  module: 数据报表
+  priority: P3
+  tags: *id005
+  request:
+    token_required: false
+    query_user_id: 1
+  expected:
+    status: 401
+    code: 2001
+- case_id: TM-BULK-Y21
+  name: 批量21-令牌查询管理员信息成功
+  module: 用户管理
+  priority: P0
+  tags: *id001
+  request:
+    token_required: true
+    query_user_id: 1
+  expected:
+    status: 200
+    code: 0
+    username: admin
+- case_id: TM-BULK-Y22
+  name: 批量22-令牌查询测试账号信息成功
+  module: 订单管理
+  priority: P1
+  tags: *id002
+  request:
+    token_required: true
+    query_user_id: 2
+  expected:
+    status: 200
+    code: 0
+    username: tester
+- case_id: TM-BULK-Y23
+  name: 批量23-令牌查询不存在用户1023返回业务错误码
+  module: 系统监控
+  priority: P2
+  tags: *id003
+  request:
+    token_required: true
+    query_user_id: 1023
+  expected:
+    status: 200
+    code: 2002
+- case_id: TM-BULK-Y24
+  name: 批量24-无令牌查询用户被拒绝
+  module: 数据报表
+  priority: P3
+  tags: *id004
+  request:
+    token_required: false
+    query_user_id: 1
+  expected:
+    status: 401
+    code: 2001
+- case_id: TM-BULK-Y25
+  name: 批量25-令牌查询管理员信息成功
+  module: 用户管理
+  priority: P0
+  tags: *id005
+  request:
+    token_required: true
+    query_user_id: 1
+  expected:
+    status: 200
+    code: 0
+    username: admin
