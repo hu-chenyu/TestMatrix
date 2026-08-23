@@ -1,0 +1,57 @@
+# ==============================================================================
+# 用户查询接口数据驱动演示数据（标准字段格式，DataDriver引擎消费）
+# 消费用例: tests/api_demo/test_data_driver_demo.py
+# 标准字段说明:
+#   case_id        用例编号（必填，唯一标识）
+#   name           用例名称（必填）
+#   module         所属模块（必填，筛选维度）
+#   priority       优先级P0-P3（必填，筛选维度）
+#   tags           标签列表（可选，筛选维度，支持YAML列表或逗号分隔字符串）
+# 业务扩展字段:
+#   token_required 是否需要携带有效令牌（true=登录后携带Token，false=裸请求）
+#   query_user_id  查询的目标用户ID
+#   expected_status/expected_code/expected_username 断言预期值
+# ==============================================================================
+
+query_cases:
+  - case_id: TM-API-0201
+    name: 管理员令牌查询用户信息成功
+    module: 用户管理
+    priority: P0
+    tags: [smoke, api]
+    token_required: true
+    query_user_id: 1
+    expected_status: 200
+    expected_code: 0
+    expected_username: admin
+
+  - case_id: TM-API-0202
+    name: 测试账号令牌查询用户信息成功
+    module: 用户管理
+    priority: P1
+    tags: [api, regression]
+    token_required: true
+    query_user_id: 2
+    expected_status: 200
+    expected_code: 0
+    expected_username: tester
+
+  - case_id: TM-API-0203
+    name: 无令牌查询用户被拒绝
+    module: 用户管理
+    priority: P1
+    tags: [regression, security]
+    token_required: false
+    query_user_id: 1
+    expected_status: 401
+    expected_code: 2001
+
+  - case_id: TM-API-0204
+    name: 令牌查询不存在用户返回业务错误码
+    module: 用户管理
+    priority: P2
+    tags: [regression]
+    token_required: true
+    query_user_id: 999
+    expected_status: 200
+    expected_code: 2002
