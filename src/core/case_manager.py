@@ -10,9 +10,18 @@
     - 用例查询 list_cases: 支持module/priority/status/case_type多维度筛选，
       返回dict列表，按priority升序（P0→P3）再按case_id升序排列
 
+功能（第二阶段Day2交付）:
+    - 创建执行批次 create_execution: 校验trigger合法值并生成批次号，
+      批次元信息（触发方式/执行人/环境/备注）全量记录日志
+    - 筛选待执行用例 select_cases_for_execution: 复用list_cases查询active用例，
+      支持module/priority/tags（description标签解析+交集匹配）筛选
+    - 记录单条执行结果 record_execution: 单用例执行明细写入test_executions表，
+      result合法性、failed/error必填error_message强校验
+    - 完成批次汇总 finish_execution: 按批次聚合统计total/passed/failed/error/
+      skipped/pass_rate，upsert到defect_statistics表
+
 后续规划（不在本日范围）:
-    - 分级执行调度: 按smoke/regression标记与优先级圈定执行范围
-    - 批量调度执行: 触发测试执行并回写test_executions表
+    - 批量调度执行: 串联create->select->execute->record->finish完整自动化闭环
 
 使用示例:
     from src.core.case_manager import CaseManager, generate_execution_id
@@ -22,6 +31,13 @@
         "testdata/yaml/api_user_query_matrix.yaml"
     )
     cases = CaseManager.list_cases(module="用户管理", priority=["P0", "P1"])
+
+    # 执行调度链路
+    execution_id = CaseManager.create_execution(trigger="ci", executor="jenkins")
+    cases = CaseManager.select_cases_for_execution(priority="P0")
+    CaseManager.record_execution(execution_id, "TM-0001", "登录校验", "passed",
+                                 start_time, end_time, 0.5)
+    summary = CaseManager.finish_execution(execution_id)
 """
 
 import uuid
@@ -34,7 +50,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.common.logger import LogManager
 from src.core.data_driver import DataDriver, DataDriverError
 from src.db.db_session import DatabaseSession
-from src.db.models import TestCase
+from src.db.models import DefectStatistic, TestCase, TestExecution
 
 logger = LogManager.get_logger()
 
@@ -43,6 +59,15 @@ PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
 # 芯片板卡用例的路径特征关键词（路径命中任意词即判定为chip类型，统一小写匹配）
 CHIP_PATH_KEYWORDS = ("chip", "serial", "telnet")
+
+# 执行批次触发方式合法值
+VALID_TRIGGERS = ("manual", "cli", "web", "ci")
+
+# 单条执行结果合法值
+VALID_RESULTS = ("passed", "failed", "error", "skipped")
+
+# description字段中标签暂存格式的前缀（与_build_description写入格式对齐）
+TAGS_PREFIX = "标签:"
 
 # 进程内已生成批次号集合: 防止同秒内uuid4前4位hex碰撞
 # （16bit空间100次生成理论碰撞概率约7%），重试机制保证进程内绝对唯一
@@ -305,6 +330,312 @@ class CaseManager:
         return result
 
     # ------------------------------------------------------------------
+    # 执行调度（第二阶段Day2）
+    # ------------------------------------------------------------------
+    @classmethod
+    def create_execution(
+        cls,
+        trigger: str = "manual",
+        executor: str = "local",
+        environment: str = "dev",
+        remark: Optional[str] = None,
+    ) -> str:
+        """
+        创建测试执行批次
+
+        校验trigger合法值后生成批次号，批次元信息（触发方式/执行人/
+        环境/备注）全量记录日志，作为批次生命周期的起点。
+
+        参数:
+            trigger (str): 触发方式，可选manual/cli/web/ci，默认"manual"
+            executor (str): 执行人（人工姓名或CI标识，如jenkins），默认"local"
+            environment (str): 执行环境（dev/test/prod），默认"dev"
+            remark (str | None): 批次备注（如回归范围说明），默认None
+
+        返回:
+            str: 进程内唯一的执行批次号，格式RUN-YYYYMMDD-HHMMSS-xxxx
+
+        异常:
+            CaseManagerError: trigger为空或不在合法值集合（manual/cli/web/ci）时抛出，
+                              context携带operation与入参值
+        """
+        if not trigger or trigger not in VALID_TRIGGERS:
+            raise CaseManagerError(
+                f"触发方式非法: {trigger!r}，合法取值: {list(VALID_TRIGGERS)}",
+                context={"operation": "create_execution", "trigger": trigger},
+            )
+
+        execution_id = generate_execution_id()
+        logger.info(
+            f"执行批次已创建 | 批次号: {execution_id} | 触发方式: {trigger} | "
+            f"执行人: {executor} | 环境: {environment} | 备注: {remark or '-'}"
+        )
+        return execution_id
+
+    @classmethod
+    def select_cases_for_execution(
+        cls,
+        module: Optional[Union[str, list]] = None,
+        priority: Optional[Union[str, list]] = None,
+        tags: Optional[Union[str, list]] = None,
+        case_type: str = "api",
+    ) -> list:
+        """
+        筛选待执行用例（执行调度专用）
+
+        执行流程:
+            1. 复用list_cases查询status="active"且case_type匹配的用例
+               （已按priority升序+case_id升序排列，不重复实现查询逻辑）
+            2. tags非None时逐条解析description中的"标签: xxx,xxx"暂存格式，
+               与筛选tags取交集，无交集的用例剔除（保持原排序不变）
+
+        参数:
+            module (str | list | None): 模块筛选值，默认None不过滤
+            priority (str | list | None): 优先级筛选值，默认None不过滤
+            tags (str | list | None): 标签筛选值（任一命中即保留），默认None不过滤
+            case_type (str): 用例类型（api/chip），默认"api"
+
+        返回:
+            list[dict]: 命中筛选条件的待执行用例列表（priority升序再case_id升序）
+
+        异常:
+            无（底层list_cases的数据库异常已包装为CaseManagerError向上抛出）
+        """
+        # 复用list_cases: active状态 + case_type + module/priority多维度筛选
+        cases = cls.list_cases(
+            module=module, priority=priority, status="active", case_type=case_type
+        )
+
+        # tags维度: description暂存格式解析后交集匹配
+        if tags is not None:
+            tag_list = cls._normalize_values(tags, "tags")
+            if tag_list:
+                cases = [
+                    case for case in cases
+                    if set(cls._parse_tags_from_description(case["description"]))
+                    & set(tag_list)
+                ]
+            logger.info(
+                f"待执行用例标签筛选 | 筛选标签: {tag_list or '-'} | "
+                f"筛选后剩余: {len(cases)}条"
+            )
+
+        logger.info(
+            f"待执行用例筛选完成 | case_type: {case_type} | 命中: {len(cases)}条"
+        )
+        return cases
+
+    @classmethod
+    def record_execution(
+        cls,
+        execution_id: str,
+        case_id: str,
+        case_name: str,
+        result: str,
+        start_time: datetime,
+        end_time: datetime,
+        duration: float,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """
+        记录单条用例执行结果
+
+        校验result合法性及error_message必填规则后，将单用例执行明细
+        写入test_executions表（session_scope自动提交/回滚/关闭）。
+
+        参数:
+            execution_id (str): 执行批次号（由create_execution生成）
+            case_id (str): 业务用例编号
+            case_name (str): 用例名称（冗余存储，防止用例表变更影响历史记录）
+            result (str): 执行结果，可选passed/failed/error/skipped
+            start_time (datetime): 用例开始执行时间
+            end_time (datetime): 用例结束执行时间
+            duration (float): 执行耗时（秒，支持亚秒精度）
+            error_message (str | None): 失败/错误的异常信息，
+                                        result为failed/error时必填
+
+        返回:
+            None
+
+        异常:
+            CaseManagerError: result非法 / 批次号或用例编号为空 /
+                              failed/error时error_message缺失 /
+                              数据库操作异常时抛出，context携带operation定位
+        """
+        # 批次号与用例编号基础校验
+        if not execution_id or not str(execution_id).strip():
+            raise CaseManagerError(
+                "执行批次号不能为空",
+                context={"operation": "record_execution", "case_id": case_id},
+            )
+        if not case_id or not str(case_id).strip():
+            raise CaseManagerError(
+                "用例编号不能为空",
+                context={"operation": "record_execution", "execution_id": execution_id},
+            )
+
+        # result合法性校验
+        if result not in VALID_RESULTS:
+            raise CaseManagerError(
+                f"执行结果非法: {result!r}，合法取值: {list(VALID_RESULTS)}",
+                context={
+                    "operation": "record_execution",
+                    "execution_id": execution_id,
+                    "case_id": case_id,
+                    "result": result,
+                },
+            )
+
+        # failed/error时error_message必填（非空字符串）
+        if result in ("failed", "error"):
+            if not error_message or not str(error_message).strip():
+                raise CaseManagerError(
+                    f"执行结果为'{result}'时error_message必填",
+                    context={
+                        "operation": "record_execution",
+                        "execution_id": execution_id,
+                        "case_id": case_id,
+                        "result": result,
+                    },
+                )
+
+        try:
+            with DatabaseSession.session_scope() as session:
+                session.add(
+                    TestExecution(
+                        execution_id=execution_id,
+                        case_id=case_id,
+                        case_name=case_name,
+                        result=result,
+                        start_time=start_time,
+                        end_time=end_time,
+                        duration=duration,
+                        error_message=error_message,
+                    )
+                )
+        except SQLAlchemyError as exc:
+            logger.error(
+                f"执行结果入库数据库异常 | 批次: {execution_id} | "
+                f"用例: {case_id} | {exc}"
+            )
+            raise CaseManagerError(
+                f"执行结果入库数据库异常: {exc}",
+                context={
+                    "operation": "record_execution",
+                    "execution_id": execution_id,
+                    "case_id": case_id,
+                },
+            ) from exc
+
+        logger.info(
+            f"执行结果已入库 | 批次: {execution_id} | 用例: {case_id} | "
+            f"结果: {result} | 耗时: {duration:.3f}s"
+        )
+
+    @classmethod
+    def finish_execution(cls, execution_id: str) -> dict:
+        """
+        完成执行批次并生成汇总统计
+
+        执行流程:
+            1. 查询该execution_id下全部test_executions记录
+            2. 无任何记录视为批次不存在，抛CaseManagerError
+            3. 统计total/passed/failed/error/skipped及通过率
+               （pass_rate=passed/total，保留4位小数）
+            4. upsert到defect_statistics表: execution_id存在则更新指标，
+               不存在则插入（重复finish同一批次时指标幂等刷新）
+            5. 返回统计字典
+
+        参数:
+            execution_id (str): 执行批次号
+
+        返回:
+            dict: {"execution_id", "total", "passed", "failed", "error",
+                   "skipped", "pass_rate"}
+
+        异常:
+            CaseManagerError: 批次号为空 / 批次不存在（无执行记录） /
+                              数据库操作异常时抛出，context携带operation定位
+        """
+        if not execution_id or not str(execution_id).strip():
+            raise CaseManagerError(
+                "执行批次号不能为空",
+                context={"operation": "finish_execution"},
+            )
+
+        try:
+            with DatabaseSession.session_scope() as session:
+                records = (
+                    session.query(TestExecution)
+                    .filter_by(execution_id=execution_id)
+                    .all()
+                )
+                if not records:
+                    raise CaseManagerError(
+                        f"执行批次不存在或无任何执行记录: {execution_id}",
+                        context={
+                            "operation": "finish_execution",
+                            "execution_id": execution_id,
+                        },
+                    )
+
+                # 结果计数聚合
+                total = len(records)
+                passed = sum(1 for r in records if r.result == "passed")
+                failed = sum(1 for r in records if r.result == "failed")
+                error = sum(1 for r in records if r.result == "error")
+                skipped = sum(1 for r in records if r.result == "skipped")
+                pass_rate = round(passed / total, 4) if total else 0.0
+
+                # upsert到defect_statistics（execution_id唯一键）
+                statistic = (
+                    session.query(DefectStatistic)
+                    .filter_by(execution_id=execution_id)
+                    .first()
+                )
+                if statistic is not None:
+                    statistic.total_cases = total
+                    statistic.passed = passed
+                    statistic.failed = failed
+                    statistic.error = error
+                    statistic.skipped = skipped
+                    statistic.pass_rate = pass_rate
+                else:
+                    session.add(
+                        DefectStatistic(
+                            execution_id=execution_id,
+                            total_cases=total,
+                            passed=passed,
+                            failed=failed,
+                            error=error,
+                            skipped=skipped,
+                            pass_rate=pass_rate,
+                        )
+                    )
+        except SQLAlchemyError as exc:
+            logger.error(f"批次汇总数据库异常 | 批次: {execution_id} | {exc}")
+            raise CaseManagerError(
+                f"批次汇总数据库异常: {exc}",
+                context={"operation": "finish_execution", "execution_id": execution_id},
+            ) from exc
+
+        summary = {
+            "execution_id": execution_id,
+            "total": total,
+            "passed": passed,
+            "failed": failed,
+            "error": error,
+            "skipped": skipped,
+            "pass_rate": pass_rate,
+        }
+        logger.info(
+            f"执行批次汇总完成 | 批次: {execution_id} | 总数: {total} | "
+            f"通过: {passed} | 失败: {failed} | 错误: {error} | "
+            f"跳过: {skipped} | 通过率: {pass_rate:.2%}"
+        )
+        return summary
+
+    # ------------------------------------------------------------------
     # 内部工具方法
     # ------------------------------------------------------------------
     @staticmethod
@@ -349,6 +680,33 @@ class CaseManager:
             return custom_desc
         tags = case.get("tags", [])
         return f"标签: {', '.join(tags)}" if tags else ""
+
+    @staticmethod
+    def _parse_tags_from_description(description: Optional[str]) -> list:
+        """
+        从description字段解析标签列表（内部方法）
+
+        解析规则:
+            description为"标签: xxx,yyy"格式（由_build_description写入）时，
+            提取冒号后内容按逗号分割并strip；其他格式（自定义描述/空值）
+            返回空列表（视为无标签）。
+
+        参数:
+            description (str | None): 用例描述文本
+
+        返回:
+            list: 解析出的标签列表（无标签时为空列表）
+
+        异常:
+            无
+        """
+        if not description:
+            return []
+        text = str(description).strip()
+        if not text.startswith(TAGS_PREFIX):
+            return []
+        tag_text = text[len(TAGS_PREFIX):].strip()
+        return [tag.strip() for tag in tag_text.split(",") if tag.strip()]
 
     @staticmethod
     def _normalize_values(value: Union[str, list], dim_name: str) -> list:
