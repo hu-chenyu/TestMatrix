@@ -20,8 +20,13 @@
     - 完成批次汇总 finish_execution: 按批次聚合统计total/passed/failed/error/
       skipped/pass_rate，upsert到defect_statistics表
 
-后续规划（不在本日范围）:
-    - 批量调度执行: 串联create->select->execute->record->finish完整自动化闭环
+功能（第二阶段Day3交付）:
+    - 批量执行 run_batch: 串联sync→create→select→execute→record→finish
+      完整调度链路，支持dry_run只加载筛选不执行
+    - 命令行入口 main: argparse解析--file/--sheet/--priority/--module/
+      --tags/--trigger/--dry-run参数，可直接python -m src.core.case_manager运行
+    - 模拟执行器 _simulate_execute: 模拟单条用例执行（后续Web平台接入
+      真实pytest执行时替换此方法）
 
 使用示例:
     from src.core.case_manager import CaseManager, generate_execution_id
@@ -38,12 +43,19 @@
     CaseManager.record_execution(execution_id, "TM-0001", "登录校验", "passed",
                                  start_time, end_time, 0.5)
     summary = CaseManager.finish_execution(execution_id)
+
+    # 批量执行与命令行入口
+    summary = run_batch("testdata/yaml/api_user_query_matrix.yaml", dry_run=True)
+    # 命令行: python -m src.core.case_manager -f testdata/yaml/xxx.yaml --dry-run
 """
 
+import argparse
+import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -636,6 +648,45 @@ class CaseManager:
         return summary
 
     # ------------------------------------------------------------------
+    # 批量执行与命令行（第二阶段Day3）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _simulate_execute(case: dict) -> Tuple[str, Optional[str], float]:
+        """
+        模拟执行器（内部工具方法）
+
+        模拟单条用例执行过程（后续Web平台接入真实pytest执行时替换此方法）:
+            1. time.sleep(0.01)模拟用例执行耗时
+            2. 结果规则: case_id末尾数字为偶数→passed，奇数→failed
+               （failed时error_message为固定模拟文案）
+
+        参数:
+            case (dict): 待执行用例字典（含case_id/name等字段）
+
+        返回:
+            tuple: (result: str, error_message: Optional[str], duration: float)
+                   result为执行结果passed/failed，error_message为失败信息
+                   （通过时为None），duration为模拟执行耗时（秒）
+
+        异常:
+            无
+        """
+        start_time = time.perf_counter()
+        time.sleep(0.01)  # 模拟用例执行耗时
+        duration = time.perf_counter() - start_time
+
+        # case_id末尾数字奇偶决定结果（无数字时视为偶数→passed）
+        tail_digits = [ch for ch in str(case.get("case_id", "")) if ch.isdigit()]
+        tail_number = int(tail_digits[-1]) if tail_digits else 0
+        if tail_number % 2 == 0:
+            logger.debug(f"模拟执行通过 | 用例: {case.get('case_id')}")
+            return "passed", None, duration
+
+        error_message = "模拟执行失败: 断言不通过"
+        logger.debug(f"模拟执行失败 | 用例: {case.get('case_id')} | {error_message}")
+        return "failed", error_message, duration
+
+    # ------------------------------------------------------------------
     # 内部工具方法
     # ------------------------------------------------------------------
     @staticmethod
@@ -762,3 +813,189 @@ class CaseManager:
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }
+
+
+def run_batch(
+    file_path: Union[str, Path],
+    sheet_name: Optional[str] = None,
+    priority: Optional[Union[str, list]] = None,
+    module: Optional[Union[str, list]] = None,
+    tags: Optional[Union[str, list]] = None,
+    trigger: str = "cli",
+    dry_run: bool = False,
+) -> dict:
+    """
+    批量执行完整调度链路（模块级函数）
+
+    串联完整调度链路:
+        1. sync_cases_from_file 用例入库
+        2. create_execution 创建批次（trigger透传，executor固定"cli"）
+        3. select_cases_for_execution 筛选待执行用例
+        4. dry_run=True: 打印待执行用例列表（case_id/name/module/priority），
+           返回 {"dry_run": True, "count": N}，不产生执行记录
+        5. dry_run=False: 逐条调_simulate_execute模拟执行并record_execution入库
+        6. finish_execution 汇总统计并写入defect_statistics
+        7. 控制台打印汇总报告（总数/通过/失败/错误/跳过/通过率）
+
+    参数:
+        file_path (str | Path): 数据文件路径（YAML/Excel）
+        sheet_name (str | None): Excel的sheet名称，默认None
+        priority (str | list | None): 优先级筛选值，默认None不过滤
+        module (str | list | None): 模块筛选值，默认None不过滤
+        tags (str | list | None): 标签筛选值，默认None不过滤
+        trigger (str): 触发方式（manual/cli/web/ci），默认"cli"
+        dry_run (bool): 只加载筛选不执行，默认False
+
+    返回:
+        dict: dry_run时返回{"dry_run": True, "count": N}；
+              正常执行返回finish_execution的统计字典
+              （{"execution_id", "total", "passed", "failed", "error",
+                "skipped", "pass_rate"}）
+
+    异常:
+        CaseManagerError: 数据加载失败/数据库异常等链路任一环节失败时向上抛出
+    """
+    logger.info(
+        f"批量执行启动 | 文件: {file_path} | dry_run: {dry_run} | "
+        f"筛选: priority={priority or '-'} & module={module or '-'} & "
+        f"tags={tags or '-'}"
+    )
+
+    # 1. 用例入库
+    sync_result = CaseManager.sync_cases_from_file(file_path, sheet_name=sheet_name)
+    logger.info(
+        f"用例入库完成 | 总数: {sync_result['total']} | "
+        f"新增: {sync_result['inserted']} | 更新: {sync_result['updated']}"
+    )
+
+    # 2. 创建执行批次
+    execution_id = CaseManager.create_execution(trigger=trigger, executor="cli")
+
+    # 3. 筛选待执行用例
+    selected_cases = CaseManager.select_cases_for_execution(
+        module=module, priority=priority, tags=tags
+    )
+
+    # 4. dry_run: 只打印待执行列表即返回
+    if dry_run:
+        print(f"\n===== 待执行用例列表（共{len(selected_cases)}条）=====")
+        for case in selected_cases:
+            print(
+                f"  [{case['priority']}] {case['case_id']} | "
+                f"{case['module']} | {case['name']}"
+            )
+        print("=" * 46)
+        logger.info(f"dry_run模式 | 待执行用例: {len(selected_cases)}条，未产生执行记录")
+        return {"dry_run": True, "count": len(selected_cases)}
+
+    # 5. 逐条模拟执行并记录结果
+    for case in selected_cases:
+        result, error_message, duration = CaseManager._simulate_execute(case)
+        CaseManager.record_execution(
+            execution_id=execution_id,
+            case_id=case["case_id"],
+            case_name=case["name"],
+            result=result,
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            duration=duration,
+            error_message=error_message,
+        )
+
+    # 6. 批次汇总统计
+    summary = CaseManager.finish_execution(execution_id)
+
+    # 7. 控制台汇总报告
+    print(f"\n===== 批量执行汇总报告 | 批次号: {execution_id} =====")
+    print(f"  用例总数: {summary['total']}")
+    print(f"  通过: {summary['passed']} | 失败: {summary['failed']} | "
+          f"错误: {summary['error']} | 跳过: {summary['skipped']}")
+    print(f"  通过率: {summary['pass_rate']:.2%}")
+    print("=" * 52)
+
+    return summary
+
+
+def main() -> None:
+    """
+    命令行入口
+
+    参数说明:
+        --file / -f         数据文件路径（YAML/Excel），必填
+        --sheet / -s        Excel sheet名称，默认None
+        --priority / -p     优先级筛选，可多次传入（如-p P0 -p P1），默认None
+        --module / -m       模块筛选，可多次传入，默认None
+        --tags / -t         标签筛选，可多次传入，默认None
+        --trigger           触发方式（manual/cli/web/ci），默认cli
+        --dry-run           只加载筛选不执行，打印待执行用例列表后退出
+
+    参数:
+        无（从sys.argv解析）
+
+    返回:
+        None
+
+    异常:
+        SystemExit: --file缺失或文件不存在时sys.exit(1)；
+                    run_batch链路异常时打印错误并以退出码1退出
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m src.core.case_manager",
+        description="TestMatrix用例批量执行命令行入口",
+    )
+    parser.add_argument(
+        "--file", "-f", required=True,
+        help="数据文件路径（YAML/Excel），必填",
+    )
+    parser.add_argument(
+        "--sheet", "-s", default=None,
+        help="Excel sheet名称，默认None（仅Excel文件生效）",
+    )
+    parser.add_argument(
+        "--priority", "-p", action="append", default=None,
+        help="优先级筛选，可多次传入（如 -p P0 -p P1）",
+    )
+    parser.add_argument(
+        "--module", "-m", action="append", default=None,
+        help="模块筛选，可多次传入",
+    )
+    parser.add_argument(
+        "--tags", "-t", action="append", default=None,
+        help="标签筛选，可多次传入",
+    )
+    parser.add_argument(
+        "--trigger", default="cli",
+        choices=list(VALID_TRIGGERS),
+        help="触发方式（manual/cli/web/ci），默认cli",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="只加载筛选不执行，打印待执行用例列表后退出",
+    )
+    args = parser.parse_args()
+
+    # --file存在性校验（不存在打印错误并退出码1）
+    file_path = Path(args.file)
+    if not file_path.exists():
+        print(f"错误: 数据文件不存在: {args.file}")
+        sys.exit(1)
+
+    # 调用run_batch执行完整链路（链路异常时打印错误并以退出码1退出）
+    try:
+        run_batch(
+            file_path=file_path,
+            sheet_name=args.sheet,
+            priority=args.priority,
+            module=args.module,
+            tags=args.tags,
+            trigger=args.trigger,
+            dry_run=args.dry_run,
+        )
+    except CaseManagerError as exc:
+        print(f"错误: 批量执行失败: {exc}")
+        logger.error(f"命令行批量执行失败 | {exc} | context: {exc.context}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
