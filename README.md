@@ -8,6 +8,8 @@
 - **多协议统一封装**：HTTP（Requests）/ 串口（pyserial）/ Telnet 三协议客户端统一封装，
   芯片板卡测试仅需低成本适配即可接入
 - **数据驱动**：YAML / Excel 外部数据文件参数化，用例与数据彻底分离
+- **用例调度管理**：用例入库、批次创建、按模块/优先级/标签分级筛选执行、
+  结果记录与批次汇总统计（通过率/缺陷数），全链路可追踪
 - **增强断言库**：状态码、JSON点号路径取值、字段子集、响应耗时、包含关系等
   10+ 类开箱即用断言，失败信息自带完整上下文
 - **全链路日志**：Loguru三通道输出（控制台/全量/错误独立），按天切割、trace_id用例级追踪
@@ -53,6 +55,11 @@ pytest -m smoke         # 仅冒烟用例
 # 4. 生成并打开Allure HTML报告（需已安装allure命令行）
 allure generate output/allure_results -o output/reports/allure-report --clean
 allure open output/reports/allure-report
+
+# 5. 体验用例调度链路（CLI入口：入库→批次创建→筛选执行→汇总统计）
+python -m src.core.case_manager -f testdata/yaml/api_user_query_matrix.yaml          # 模拟执行全流程
+python -m src.core.case_manager -f testdata/yaml/api_user_query_matrix.yaml --dry-run # 仅查看待执行用例
+python -m src.core.case_manager -f testdata/yaml/api_user_query_matrix.yaml -p P0    # 按优先级筛选执行
 ```
 
 ### Docker方式运行
@@ -93,7 +100,7 @@ TestMatrix/
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | 第一阶段 | 架构基座：目录骨架、common封装层、数据持久层、pytest体系、Demo验证 | ✅ 已完成 |
-| 第二阶段 | 核心能力：数据驱动引擎、用例调度、报告解析、Flask可视化平台 | 开发中 |
-| 第三阶段 | 工程化：Jenkins CI/CD流水线、邮件通知、K8s部署落地 | 规划中 |
+| 第二阶段 | 核心能力：数据驱动引擎、用例调度、报告解析、Flask可视化平台 | 🔄 开发中 |
+| 第三阶段 | 工程化：Jenkins CI/CD流水线、邮件通知、K8s部署落地 | ⏳ 规划中 |
 
 详细需求基准见 [PROJECT_SPEC.md](PROJECT_SPEC.md)。
