@@ -22,9 +22,19 @@
         * 失败明细             failed+broken用例的uuid/模块/优先级/错误信息提取
         * to_dict              统计结果转字典（便于入库与JSON序列化）
 
-规划能力（Day8）:
-    - 汇总数据写入defect_statistics表，支撑Web平台ECharts看板
-    - 趋势数据生成与测试报告邮件推送（基于smtplib，依赖TM_EMAIL_*配置）
+已实现能力（Day8）:
+    - ReportRepository统计结果仓储:
+        * save_statistics       StatisticsResult写入defect_statistics表
+                               （failed剔除broken后入库，broken映射error字段）
+        * get_by_execution_id   按批次号查询单条统计
+        * get_latest_statistics 最近N条统计（created_at降序）
+        * get_trend_data        通过率趋势数据（时间升序字典列表，
+                               created_at转字符串便于ECharts消费）
+        * get_pass_rate_trend   通过率浮点列表（前端折线图直接消费）
+    - db模型采用函数内延迟导入，规避core与db模块循环依赖
+
+规划能力:
+    - 测试报告邮件推送（基于smtplib，依赖TM_EMAIL_*配置）
 """
 
 import json
@@ -852,3 +862,213 @@ class ReportStatistics:
             return values[0]
         logger.warning(f"优先级提取失败已降级unknown | 用例: {result.name}")
         return UNKNOWN_LABEL
+
+
+# ======================================================================
+# 统计结果仓储（Day8）
+# ======================================================================
+class ReportRepository:
+    """
+    统计结果数据仓储
+
+    负责StatisticsResult持久化到defect_statistics表，
+    以及基于历史批次数据的通过率趋势查询，
+    供Web平台看板与通知推送消费。
+
+    设计说明:
+        - db层模型采用函数内延迟导入，规避core与db模块循环依赖
+        - execution_id重复时由数据库unique约束抛IntegrityError，
+          不做静默更新（批次统计唯一性由调用方保证）
+    """
+
+    @staticmethod
+    def save_statistics(
+        stat: StatisticsResult,
+        execution_id: str,
+        remark: str = "",
+    ):
+        """
+        将StatisticsResult写入defect_statistics表
+
+        字段映射规则:
+            - total_cases = stat.total
+            - passed      = stat.passed
+            - failed      = stat.failed - stat.broken
+              （stat.failed是failed+broken合计，剔除broken得到纯断言失败数）
+            - error       = stat.broken（Allure的broken=环境/代码异常，
+              对应表内error字段）
+            - skipped     = stat.skipped
+            - pass_rate   = stat.pass_rate
+            - remark      = 入参remark（可传入耗时/分组/失败明细JSON扩展数据）
+
+        参数:
+            stat (StatisticsResult): 批次级统计结果对象
+            execution_id (str): 执行批次号（AllureResult不含批次号，由调用方传入）
+            remark (str): 备注信息（如to_dict的JSON扩展数据），默认空串
+
+        返回:
+            DefectStatistic: 入库后的ORM对象（含数据库生成的id与created_at）
+
+        异常:
+            ValueError: execution_id为空时抛出
+            sqlalchemy.exc.IntegrityError: execution_id重复（unique约束）时
+                                           由数据库抛出并记录error日志
+            sqlalchemy.exc.SQLAlchemyError: 其他数据库异常时向上抛出
+        """
+        # 延迟导入: 规避core与db模块循环依赖
+        from src.db.db_session import DatabaseSession
+        from src.db.models import DefectStatistic
+
+        if not execution_id or not str(execution_id).strip():
+            raise ValueError("执行批次号不能为空")
+
+        record = DefectStatistic(
+            execution_id=execution_id,
+            total_cases=stat.total,
+            passed=stat.passed,
+            failed=stat.failed - stat.broken,  # 剔除broken得到纯failed
+            error=stat.broken,  # broken映射error（环境/代码异常）
+            skipped=stat.skipped,
+            pass_rate=stat.pass_rate,
+            remark=remark,
+        )
+        try:
+            with DatabaseSession.session_scope() as session:
+                session.add(record)
+                session.flush()  # 立即写库以获取自增id与created_at
+                saved_id = record.id
+                logger.info(
+                    f"统计结果入库成功 | 批次: {execution_id} | "
+                    f"总数: {stat.total} | 通过: {stat.passed} | "
+                    f"失败: {record.failed} | 错误: {record.error} | "
+                    f"通过率: {stat.pass_rate:.2%} | 记录ID: {saved_id}"
+                )
+                return record
+        except Exception as exc:
+            logger.error(
+                f"统计结果入库失败 | 批次: {execution_id} | "
+                f"异常: {type(exc).__name__}: {exc}"
+            )
+            raise
+
+    @staticmethod
+    def get_by_execution_id(execution_id: str):
+        """
+        按批次号查询单条统计记录
+
+        参数:
+            execution_id (str): 执行批次号
+
+        返回:
+            DefectStatistic | None: 统计记录ORM对象；不存在返回None
+
+        异常:
+            无（查询异常由session_scope记录日志后向上抛出）
+        """
+        # 延迟导入: 规避core与db模块循环依赖
+        from src.db.db_session import DatabaseSession
+        from src.db.models import DefectStatistic
+
+        session = DatabaseSession.get_session()
+        try:
+            record = (
+                session.query(DefectStatistic)
+                .filter_by(execution_id=execution_id)
+                .first()
+            )
+            if record is None:
+                logger.debug(f"按批次号查询无记录 | 批次: {execution_id}")
+            return record
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_latest_statistics(limit: int = 10) -> List:
+        """
+        查询最近N条统计记录
+
+        参数:
+            limit (int): 返回条数上限，默认10
+
+        返回:
+            List[DefectStatistic]: 统计记录列表（created_at降序，最新在前）；
+                                   空表返回空列表
+
+        异常:
+            无（查询异常由session记录日志后向上抛出）
+        """
+        # 延迟导入: 规避core与db模块循环依赖
+        from src.db.db_session import DatabaseSession
+        from src.db.models import DefectStatistic
+
+        session = DatabaseSession.get_session()
+        try:
+            records = (
+                session.query(DefectStatistic)
+                .order_by(DefectStatistic.created_at.desc(), DefectStatistic.id.desc())
+                .limit(limit)
+                .all()
+            )
+            if not records:
+                logger.debug(f"最近统计查询为空 | limit: {limit}")
+            return records
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_trend_data(limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        生成通过率趋势数据（时间从早到晚）
+
+        查询最近N条统计（created_at降序）后反转为升序返回，
+        created_at转为ISO格式字符串，便于JSON序列化与ECharts消费。
+
+        参数:
+            limit (int): 返回条数上限，默认20
+
+        返回:
+            List[Dict[str, Any]]: 趋势字典列表（时间升序），格式:
+                [{"execution_id", "pass_rate", "total_cases", "passed",
+                  "failed", "error", "created_at"}, ...]
+                空表返回空列表
+
+        异常:
+            无
+        """
+        records = ReportRepository.get_latest_statistics(limit=limit)
+        # 降序查询后反转为时间升序（趋势图从左到右时间递增）
+        records.reverse()
+        return [
+            {
+                "execution_id": record.execution_id,
+                "pass_rate": record.pass_rate,
+                "total_cases": record.total_cases,
+                "passed": record.passed,
+                "failed": record.failed,
+                "error": record.error,
+                "created_at": record.created_at.isoformat()
+                if record.created_at
+                else "",
+            }
+            for record in records
+        ]
+
+    @staticmethod
+    def get_pass_rate_trend(limit: int = 20) -> List[float]:
+        """
+        获取通过率浮点数列表（时间升序）
+
+        便捷方法，供前端折线图直接消费。
+
+        参数:
+            limit (int): 返回条数上限，默认20
+
+        返回:
+            List[float]: 通过率列表（时间从早到晚）；空表返回空列表
+
+        异常:
+            无
+        """
+        return [
+            item["pass_rate"] for item in ReportRepository.get_trend_data(limit=limit)
+        ]
