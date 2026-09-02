@@ -142,13 +142,22 @@ class DatabaseSession:
                     url = cls._build_db_url()
                     # pool_pre_ping: 每次取连接先探活，自动剔除失效连接（MySQL长连接断开后自愈）
                     # pool_recycle: 连接最大存活3600秒，防止MySQL 8小时wait_timeout断连问题
-                    cls._engine = create_engine(
-                        url,
-                        pool_pre_ping=True,
-                        pool_recycle=3600,
-                        echo=False,
-                        future=True,
-                    )
+                    engine_kwargs: dict = {
+                        "pool_pre_ping": True,
+                        "pool_recycle": 3600,
+                        "echo": False,
+                        "future": True,
+                    }
+                    if url.startswith("sqlite"):
+                        # SQLite默认check_same_thread=True，连接只能在创建它的线程使用；
+                        # Web平台请求线程/SSE推送线程/异步执行线程会并发访问，
+                        # 必须关闭该限制，否则报"SQLite objects created in a thread
+                        # can only be used in that same thread"。
+                        # SQLite文件库写入由数据库文件锁串行化，连接本身跨线程安全。
+                        engine_kwargs["connect_args"] = {
+                            "check_same_thread": False
+                        }
+                    cls._engine = create_engine(url, **engine_kwargs)
                     cls._session_factory = sessionmaker(
                         bind=cls._engine, expire_on_commit=False, future=True
                     )
