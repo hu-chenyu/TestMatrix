@@ -9,7 +9,7 @@
 
 渠道扩展规划:
     - Day11: HTML邮件报告模板（已完成，内联CSS+模块/优先级分布+失败明细）
-    - Day12: 企业微信机器人webhook通知器（继承BaseNotifier）
+    - Day12: 企业微信机器人webhook通知器（已完成，markdown消息）
     - Day13: 失败用例@负责人 + 分级通知策略（全量/仅失败）
     - 后续: 钉钉等渠道按需扩展，均继承BaseNotifier实现send即可
 
@@ -21,14 +21,18 @@
       内联样式是邮件HTML的事实标准
 """
 
+import re
 import smtplib
 import socket
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional
+
+import requests
 
 from src.common.env_manager import env_manager
 from src.common.logger import LogManager
@@ -872,3 +876,299 @@ class EmailReportTemplate:
             f'<div style="padding: 12px; text-align: center; '
             f'color: {COLOR_GRAY};">{empty_text}</div>'
         )
+
+
+# ======================================================================
+# 企业微信机器人webhook通知（Day12）
+# ======================================================================
+class WeChatNotifier(BaseNotifier):
+    """
+    企业微信机器人webhook通知器
+
+    通过群机器人webhook发送markdown消息，
+    继承BaseNotifier统一send接口（调用方无需感知渠道差异）。
+
+    配置项（env_manager读取，对应.env.example的TM_WECHAT_*系列）:
+        TM_WECHAT_ENABLED     总开关（默认false）
+        TM_WECHAT_WEBHOOK_URL 机器人webhook完整URL（含key参数）
+
+    API约定:
+        POST {webhook_url}，body为
+        {"msgtype": "markdown", "markdown": {"content": "..."}}
+        响应 {"errcode": 0, "errmsg": "ok"} 表示成功。
+
+    安全设计:
+        - webhook URL含key属敏感信息，日志只打印前30字符脱敏
+        - send()捕获全部异常返回bool，绝不影响主流程
+    """
+
+    # webhook请求超时（秒）
+    WEBHOOK_TIMEOUT_SECONDS = 10
+
+    # 通知级别对应的emoji标记
+    LEVEL_ICONS = {"critical": "⚠️", "warning": "🔔", "info": "📋"}
+
+    def __init__(self):
+        """
+        初始化企微通知器（读取并校验webhook配置）
+
+        参数:
+            无
+
+        返回:
+            无
+
+        异常:
+            无（配置缺失/格式非法不抛异常，send时校验返回False）
+        """
+        self.webhook_url = str(env_manager.get("TM_WECHAT_WEBHOOK_URL", ""))
+        if not self._validate_webhook_url(self.webhook_url):
+            if self.webhook_url:
+                logger.warning(
+                    f"企微webhook URL格式非法 | "
+                    f"{self._mask_url(self.webhook_url)}"
+                )
+            self.webhook_url = ""
+        logger.debug(
+            f"企微通知器初始化 | webhook: {self._mask_url(self.webhook_url) or '-'}"
+        )
+
+    def is_enabled(self) -> bool:
+        """
+        企微渠道开关检查（重写基类方法）
+
+        参数:
+            无
+
+        返回:
+            bool: TM_WECHAT_ENABLED为true/1/yes时返回True，默认False
+
+        异常:
+            无
+        """
+        return env_manager.get_bool("TM_WECHAT_ENABLED", False)
+
+    def send(self, notification: Notification) -> bool:
+        """
+        发送企微webhook通知（重写基类方法）
+
+        执行流程:
+            1. 渠道开关检查: 未启用debug日志+返回False（不发请求）
+            2. webhook URL校验: 缺失或格式非法error日志+返回False
+            3. 生成markdown内容并构造payload
+            4. requests.post发送（10秒超时）
+            5. 解析响应: errcode==0成功；业务失败/响应异常/网络异常
+               全部error日志+返回False
+
+        参数:
+            notification (Notification): 统一通知消息对象
+
+        返回:
+            bool: 发送成功True / 失败False（任何异常都不向上抛出）
+
+        异常:
+            无（requests.exceptions.RequestException全部内部捕获）
+        """
+        # 1. 渠道开关检查
+        if not self.is_enabled():
+            logger.debug("企微通知未启用，跳过发送")
+            return False
+
+        # 2. webhook URL校验
+        if not self.webhook_url:
+            logger.error("企微webhook URL未配置，发送中止")
+            return False
+        if not self._validate_webhook_url(self.webhook_url):
+            logger.error(
+                f"企微webhook URL格式非法 | "
+                f"{self._mask_url(self.webhook_url)}"
+            )
+            return False
+
+        # 3. 构造payload
+        markdown_content = self._build_markdown_content(notification)
+        payload = {
+            "msgtype": "markdown",
+            "markdown": {"content": markdown_content},
+        }
+
+        # 4. 发送请求（异常全捕获）
+        start_time = time.perf_counter()
+        try:
+            response = requests.post(
+                self.webhook_url,
+                json=payload,
+                timeout=self.WEBHOOK_TIMEOUT_SECONDS,
+            )
+        except requests.exceptions.RequestException as exc:
+            # 网络层异常: ConnectionError/Timeout等全部子类
+            logger.error(
+                f"企微通知网络异常 | {type(exc).__name__}: {exc}"
+            )
+            return False
+
+        # 5. 解析响应
+        try:
+            result = response.json()
+        except ValueError:
+            # 响应非JSON格式
+            logger.error(
+                f"企微通知响应解析失败 | 状态码: {response.status_code} | "
+                f"响应: {response.text[:100]}"
+            )
+            return False
+
+        if result.get("errcode") != 0:
+            logger.error(
+                f"企微通知业务失败 | errcode: {result.get('errcode')} | "
+                f"errmsg: {result.get('errmsg')}"
+            )
+            return False
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        logger.info(
+            f"企微通知发送成功 | 标题: {notification.title} | "
+            f"耗时: {elapsed_ms:.0f}ms"
+        )
+        return True
+
+    # ------------------------------------------------------------------
+    # 内容转换方法
+    # ------------------------------------------------------------------
+    def _build_markdown_content(self, notification: Notification) -> str:
+        """
+        将Notification转为企微markdown格式内容（内部方法）
+
+        结构:
+            1. 标题行: emoji + 二级标题（级别决定emoji）
+            2. 空行分隔
+            3. 正文（HTML自动转纯文本，纯文本/markdown原样）
+            4. 批次号引用行（execution_id非空时）
+            5. 通过率引用行（pass_rate非空时，颜色随通过率）
+
+        参数:
+            notification (Notification): 通知消息对象
+
+        返回:
+            str: 企微兼容的markdown字符串
+
+        异常:
+            无
+        """
+        icon = self.LEVEL_ICONS.get(notification.level, "📋")
+        lines = [f"## {icon} {notification.title}", ""]
+
+        body = self._convert_to_markdown(notification.content)
+        if body:
+            lines.append(body)
+            lines.append("")
+
+        if notification.execution_id:
+            lines.append(f"> 批次号：{notification.execution_id}")
+
+        if notification.pass_rate is not None:
+            color = self._pass_rate_color(notification.pass_rate)
+            lines.append(
+                f'> 通过率：<font color="{color}">'
+                f"{notification.pass_rate:.2%}</font>"
+            )
+
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _convert_to_markdown(content: str) -> str:
+        """
+        通知正文转企微兼容文本（内部方法）
+
+        转换规则:
+            - 空内容返回空串
+            - 含HTML标签: 正则去除全部标签+还原常见HTML实体+
+              合并多余空行（连续3+换行压成2个）
+            - 不含HTML标签: 原样返回（视为纯文本或markdown）
+
+        参数:
+            content (str): 通知正文
+
+        返回:
+            str: 企微可展示的文本内容
+
+        异常:
+            无
+        """
+        if not content:
+            return ""
+        if not any(tag in content.lower() for tag in HTML_TAGS):
+            return content
+
+        # HTML转纯文本: 去标签+还原实体+压缩空行
+        text = re.sub(r"<[^>]+>", "", content)
+        text = text.replace("&nbsp;", " ")
+        text = text.replace("&amp;", "&")
+        text = text.replace("&lt;", "<")
+        text = text.replace("&gt;", ">")
+        text = text.replace("&quot;", '"')
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    # ------------------------------------------------------------------
+    # 校验与辅助方法
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _validate_webhook_url(url: str) -> bool:
+        """
+        校验webhook URL格式（内部方法）
+
+        参数:
+            url (str): webhook完整URL
+
+        返回:
+            bool: 非空且以http://或https://开头返回True；
+                  仅做基础格式校验，不验证URL真实可用性
+                  （发送时自然会失败并被捕获）
+
+        异常:
+            无
+        """
+        return bool(url) and url.startswith(("http://", "https://"))
+
+    @staticmethod
+    def _mask_url(url: str) -> str:
+        """
+        webhook URL脱敏显示（内部方法，日志安全）
+
+        参数:
+            url (str): 原始URL（含key，敏感）
+
+        返回:
+            str: 前30字符+"..."；URL本身不超30字符时原样返回
+
+        异常:
+            无
+        """
+        if not url:
+            return ""
+        return url[:30] + "..." if len(url) > 30 else url
+
+    @staticmethod
+    def _pass_rate_color(pass_rate: Optional[float]) -> str:
+        """
+        通过率映射企微font颜色（内部方法）
+
+        企微markdown仅支持info(绿)/comment(灰)/warning(橙)三色，
+        无红色——低于0.7用warning（橙色警示）表达需关注。
+
+        参数:
+            pass_rate (float | None): 通过率
+
+        返回:
+            str: "info"（≥0.9绿）/ "warning"（≥0.7橙或<0.7警示橙）/
+                "comment"（无效值灰）
+
+        异常:
+            无
+        """
+        if pass_rate is None or pass_rate < 0:
+            return "comment"
+        if pass_rate >= 0.9:
+            return "info"
+        return "warning"
