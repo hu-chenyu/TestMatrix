@@ -193,6 +193,7 @@ class ReportAnalyzer:
         异常:
             FileNotFoundError: 文件不存在时抛出
             json.JSONDecodeError: JSON语法非法时抛出（批量解析层捕获跳过）
+            ValueError: 合法JSON但顶层非对象（dict）时抛出（批量解析层捕获跳过）
         """
         path = Path(file_path)
         if not path.is_file():
@@ -201,15 +202,25 @@ class ReportAnalyzer:
         with open(path, encoding="utf-8") as file_handle:
             data = json.load(file_handle)
 
+        # 顶层必须是JSON对象（dict）；合法JSON但顶层为列表/字符串/数字时
+        # 后续data.get会抛AttributeError，此处统一抛ValueError，
+        # 由批量解析层按"单文件损坏跳过"策略捕获
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"结果文件顶层结构必须是JSON对象，实际为: {type(data).__name__}"
+            )
+
+        # 字符串字段统一用 `or 默认值` 兜底：字段显式为null时
+        # data.get会取到None，str(None)会得到字符串"None"而非预期默认值
         result = AllureResult(
-            uuid=str(data.get("uuid", "")),
-            name=str(data.get("name", "")),
-            full_name=str(data.get("fullName", "")),
-            status=str(data.get("status", "unknown")),
-            description=str(data.get("description", "") or ""),
+            uuid=str(data.get("uuid") or ""),
+            name=str(data.get("name") or ""),
+            full_name=str(data.get("fullName") or ""),
+            status=str(data.get("status") or "unknown"),
+            description=str(data.get("description") or ""),
             start=ReportAnalyzer._safe_int(data.get("start")),
             stop=ReportAnalyzer._safe_int(data.get("stop")),
-            history_id=str(data.get("historyId", "")),
+            history_id=str(data.get("historyId") or ""),
             labels=ReportAnalyzer._merge_labels(data.get("labels", [])),
             parameters=list(data.get("parameters", []) or []),
             status_details=data.get("statusDetails") or None,
@@ -244,10 +255,18 @@ class ReportAnalyzer:
         for file_path in result_files:
             try:
                 results.append(ReportAnalyzer.parse_result_file(file_path))
-            except json.JSONDecodeError as exc:
+            except (
+                json.JSONDecodeError,  # JSON语法非法
+                ValueError,             # 顶层结构非JSON对象
+                AttributeError,         # 字段形态异常
+                TypeError,              # 字段类型异常
+                KeyError,               # 必需键缺失
+            ) as exc:
+                # 单文件任何形态损坏都只warning跳过，保证整批解析不中断
                 skipped += 1
                 logger.warning(
-                    f"结果文件JSON解析失败已跳过 | 文件: {file_path} | {exc}"
+                    f"结果文件解析失败已跳过 | 文件: {file_path} | "
+                    f"{type(exc).__name__}: {exc}"
                 )
 
         logger.info(

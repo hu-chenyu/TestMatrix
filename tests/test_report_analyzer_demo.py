@@ -262,6 +262,62 @@ class TestParseResultFile:
         assert len(results) == 1
         assert results[0].name == SAMPLE_RESULT["name"]
 
+    def test_parse_null_fields_fallback(self, tmp_path):
+        """
+        null值容错: 字段显式为null时不得到字符串"None"，
+        status回退unknown、其余字符串字段回退空串、时间戳回退0
+
+        参数:
+            tmp_path (Path): pytest临时目录fixture
+
+        返回:
+            无
+        """
+        null_fields = {
+            "uuid": None, "name": None, "fullName": None,
+            "status": None, "description": None, "historyId": None,
+            "start": None, "stop": None,
+        }
+        file_path = tmp_path / "null-fields-result.json"
+        file_path.write_text(json.dumps(null_fields), encoding="utf-8")
+
+        result = ReportAnalyzer.parse_result_file(file_path)
+
+        assert result.status == "unknown"
+        assert result.uuid == ""
+        assert result.name == ""
+        assert result.full_name == ""
+        assert result.history_id == ""
+        assert result.start == 0
+        assert result.stop == 0
+
+    def test_parse_non_dict_top_level_skipped_in_batch(self, tmp_path):
+        """
+        顶层结构容错: 合法JSON但顶层为列表时，
+        单文件解析抛ValueError、批量解析跳过该文件且不拖垮同批正常文件
+
+        参数:
+            tmp_path (Path): pytest临时目录fixture
+
+        返回:
+            无
+        """
+        # 顶层是列表（合法JSON但非JSON对象）
+        (tmp_path / "list-top-result.json").write_text(
+            json.dumps([{"status": "passed"}]), encoding="utf-8"
+        )
+        # 同目录放一个正常文件，证明整批解析不被畸形文件拖垮
+        (tmp_path / "good-result.json").write_text(
+            json.dumps(SAMPLE_RESULT), encoding="utf-8"
+        )
+
+        with pytest.raises(ValueError):
+            ReportAnalyzer.parse_result_file(tmp_path / "list-top-result.json")
+
+        results = ReportAnalyzer.parse_results_dir(tmp_path)
+        assert len(results) == 1
+        assert results[0].name == SAMPLE_RESULT["name"]
+
 
 @allure.feature("报告解析引擎")
 @allure.story("批量解析")
