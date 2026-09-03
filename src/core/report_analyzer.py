@@ -454,6 +454,7 @@ class FailedCaseDetail:
     priority: str = UNKNOWN_LABEL
     error_message: str = ""
     error_trace: str = ""
+    owner: str = ""
 
 
 @dataclass
@@ -626,6 +627,7 @@ class ReportStatistics:
                     "priority": detail.priority,
                     "error_message": detail.error_message,
                     "error_trace": detail.error_trace,
+                    "owner": detail.owner,
                 }
                 for detail in stat.failed_details
             ],
@@ -802,6 +804,8 @@ class ReportStatistics:
             status_details = result.status_details or {}
             if not isinstance(status_details, dict):
                 status_details = {}
+            # 负责人: labels的"owner"第一个值（通知@人消费），无则空串
+            owner_values = result.get_label("owner")
             details.append(
                 FailedCaseDetail(
                     uuid=result.uuid,
@@ -813,6 +817,7 @@ class ReportStatistics:
                     priority=ReportStatistics._extract_priority(result),
                     error_message=str(status_details.get("message", "") or ""),
                     error_trace=str(status_details.get("trace", "") or ""),
+                    owner=owner_values[0] if owner_values else "",
                 )
             )
         return details

@@ -12,6 +12,7 @@ from src.core.notification import (
     EmailNotifier,
     EmailReportTemplate,
     Notification,
+    NotificationRouter,
     WeChatNotifier,
 )
 
@@ -20,5 +21,6 @@ __all__ = [
     "EmailNotifier",
     "EmailReportTemplate",
     "Notification",
+    "NotificationRouter",
     "WeChatNotifier",
 ]

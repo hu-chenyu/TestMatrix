@@ -10,7 +10,9 @@
 渠道扩展规划:
     - Day11: HTML邮件报告模板（已完成，内联CSS+模块/优先级分布+失败明细）
     - Day12: 企业微信机器人webhook通知器（已完成，markdown消息）
-    - Day13: 失败用例@负责人 + 分级通知策略（全量/仅失败）
+    - Day13: 分级通知策略（全量/仅失败）+失败用例@负责人+NotificationRouter路由器（已完成）
+    - Day14: 重试机制（指数退避+死信记录）
+    - Day15: 与case_manager集成（批次完成自动推送）
     - 后续: 钉钉等渠道按需扩展，均继承BaseNotifier实现send即可
 
 设计原则:
@@ -30,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -124,6 +126,9 @@ class BaseNotifier(ABC):
         调用方通过统一接口推送，无需感知具体渠道差异。
     """
 
+    # 渠道名标识（子类按渠道覆写；NotificationRouter用其作为结果字典的键）
+    channel_name = "base"
+
     @abstractmethod
     def send(self, notification: Notification) -> bool:
         """
@@ -200,6 +205,9 @@ class EmailNotifier(BaseNotifier):
         - 587: smtplib.SMTP + starttls()（明文连接后升级TLS）
         - 其他: smtplib.SMTP（明文，仅本地测试环境使用）
     """
+
+    # 渠道名标识（NotificationRouter结果字典的键）
+    channel_name = "email"
 
     def __init__(self):
         """
@@ -687,7 +695,8 @@ class EmailReportTemplate:
         """
         渲染失败用例明细表格（内部方法）
 
-        失败行背景色#fff5f5高亮；错误信息截断200字符（超出加...）。
+        失败行背景色#fff5f5高亮；错误信息截断200字符（超出加...）；
+        表头含负责人列（owner为空显示"-"）。
 
         参数:
             failed_details (List[FailedCaseDetail]): 失败明细列表
@@ -706,19 +715,37 @@ class EmailReportTemplate:
                 f'color: {COLOR_GREEN};">🎉 本次执行无失败用例</div>'
             )
 
+        # 负责人提示行: 存在负责人时在明细表上方输出（邮件无@能力，靠视觉提示）
+        owner_names = list(
+            dict.fromkeys(
+                detail.owner for detail in failed_details if detail.owner
+            )
+        )
+        owner_section = ""
+        if owner_names:
+            owner_section = (
+                f'<div style="padding: 8px 0; color: {COLOR_RED}; '
+                f'font-weight: bold;">请以下负责人关注：'
+                f"{'、'.join(owner_names)}</div>\n"
+            )
+
         rows = "\n".join(
             f'<tr style="{FAILED_ROW_STYLE}">\n'
             f'<td style="{TD_STYLE}">{detail.name}</td>\n'
             f'<td style="{TD_STYLE}">{detail.module}</td>\n'
             f'<td style="{TD_STYLE}">{detail.priority}</td>\n'
+            f'<td style="{TD_STYLE}">{detail.owner or "-"}</td>\n'
             f'<td style="{TD_STYLE} font-size: 12px;">'
             f"{self._truncate(detail.error_message)}</td>\n"
             f"</tr>"
             for detail in failed_details
         )
-        return self._section_with_table(
-            "❌ 失败明细", ["用例名", "模块", "优先级", "错误信息"], rows
+        table = self._section_with_table(
+            "❌ 失败明细",
+            ["用例名", "模块", "优先级", "负责人", "错误信息"],
+            rows,
         )
+        return owner_section + table
 
     # ------------------------------------------------------------------
     # 格式化与辅助方法
@@ -902,6 +929,9 @@ class WeChatNotifier(BaseNotifier):
         - send()捕获全部异常返回bool，绝不影响主流程
     """
 
+    # 渠道名标识（NotificationRouter结果字典的键）
+    channel_name = "wechat"
+
     # webhook请求超时（秒）
     WEBHOOK_TIMEOUT_SECONDS = 10
 
@@ -985,12 +1015,21 @@ class WeChatNotifier(BaseNotifier):
             )
             return False
 
-        # 3. 构造payload
+        # 3. 构造payload（@负责人: 企微markdown正文写<@xxx>不触发提醒，
+        #    必须在payload顶层注入mentioned_list/mentioned_mobile_list）
         markdown_content = self._build_markdown_content(notification)
-        payload = {
+        payload: Dict[str, Any] = {
             "msgtype": "markdown",
             "markdown": {"content": markdown_content},
         }
+        mentioned_list = list(notification.extra.get("mentioned_list", []) or [])
+        mentioned_mobile_list = list(
+            notification.extra.get("mentioned_mobile_list", []) or []
+        )
+        if mentioned_list:
+            payload["mentioned_list"] = mentioned_list
+        if mentioned_mobile_list:
+            payload["mentioned_mobile_list"] = mentioned_mobile_list
 
         # 4. 发送请求（异常全捕获）
         start_time = time.perf_counter()
@@ -1072,6 +1111,11 @@ class WeChatNotifier(BaseNotifier):
                 f'> 通过率：<font color="{color}">'
                 f"{notification.pass_rate:.2%}</font>"
             )
+
+        # 负责人视觉展示行（真正@提醒靠payload的mentioned字段，此行仅人眼可见）
+        owner_names = list(notification.extra.get("owner_names", []) or [])
+        if owner_names:
+            lines.append(f"> 负责人：{'、'.join(owner_names)}")
 
         return "\n".join(lines).strip()
 
@@ -1172,3 +1216,314 @@ class WeChatNotifier(BaseNotifier):
         if pass_rate >= 0.9:
             return "info"
         return "warning"
+
+
+# ======================================================================
+# 通知路由器（Day13）
+# ======================================================================
+class NotificationRouter:
+    """
+    通知路由器
+
+    输入 StatisticsResult + execution_id，决策"要不要发、发什么、@谁、
+    走哪几个渠道"，并汇总各渠道发送结果。是通知体系的统一入口，
+    调用方（case_manager等）只与本类交互，不直接触碰具体渠道。
+
+    决策维度:
+        - 策略（all/failed_only）: 控制是否发送
+        - 负责人收集: failed_details的owner标签 → 企微@名单/邮件提示行
+        - 渠道路由: 显式传入notifiers > 按配置默认实例化邮件+企微
+
+    配置项（env_manager）:
+        TM_NOTIFY_STRATEGY      通知策略 all/failed_only（默认all）
+        TM_NOTIFY_AT_ALL        存在失败时是否@所有人（默认false）
+        TM_NOTIFY_OWNER_MOBILES 额外@的手机号列表（逗号分隔，可选）
+    """
+
+    # 合法策略值
+    VALID_STRATEGIES = ("all", "failed_only")
+
+    # 手机号正则（1开头11位，用于区分企微userid与手机号@人）
+    MOBILE_PATTERN = re.compile(r"^1\d{10}$")
+
+    def __init__(
+        self,
+        strategy: Optional[str] = None,
+        notifiers: Optional[List[BaseNotifier]] = None,
+    ):
+        """
+        初始化通知路由器
+
+        参数:
+            strategy (str | None): 通知策略（all/failed_only）；
+                None时读env TM_NOTIFY_STRATEGY，默认all，非法值warning降级all
+            notifiers (List[BaseNotifier] | None): 通知渠道列表；
+                None时默认实例化 [EmailNotifier(), WeChatNotifier()]
+                （未启用渠道由send内部跳过，router不重复判断开关）
+
+        返回:
+            无
+
+        异常:
+            无
+        """
+        # 策略: 显式传参 > env配置 > 默认all；非法值warning降级all
+        if strategy is None:
+            strategy = str(env_manager.get("TM_NOTIFY_STRATEGY", "all"))
+        if strategy not in self.VALID_STRATEGIES:
+            logger.warning(
+                f"通知策略非法: {strategy!r}，降级为all | "
+                f"合法值: {list(self.VALID_STRATEGIES)}"
+            )
+            strategy = "all"
+        self.strategy = strategy
+
+        # 渠道: 显式传入 > 默认按配置实例化
+        if notifiers is None:
+            notifiers = [EmailNotifier(), WeChatNotifier()]
+        self.notifiers = notifiers
+        logger.debug(
+            f"通知路由器初始化 | 策略: {self.strategy} | "
+            f"渠道: {[n.channel_name for n in self.notifiers]}"
+        )
+
+    def should_notify(self, stat, strategy: Optional[str] = None) -> bool:
+        """
+        判断是否需要发送通知
+
+        参数:
+            stat (StatisticsResult): 批次级统计结果
+            strategy (str | None): 覆盖策略（None用实例策略）
+
+        返回:
+            bool: all策略总是True；failed_only策略仅当
+                  stat.failed>0（failed+broken合计口径）为True
+
+        异常:
+            无
+        """
+        effective = strategy if strategy is not None else self.strategy
+        if effective == "failed_only":
+            return stat.failed > 0
+        return True
+
+    def collect_owners(self, stat) -> Tuple[List[str], List[str], List[str]]:
+        """
+        收集失败用例负责人并分流@名单（内部含配置合并）
+
+        分流规则:
+            - owner_names: 去空/去重/保序的展示名单
+            - 匹配手机号正则（1开头11位）→ mentioned_mobile_list（企微手机号@）
+            - 其余视为企微userid → mentioned_list
+            - TM_NOTIFY_AT_ALL=true时mentioned_list首位插入"@all"
+            - TM_NOTIFY_OWNER_MOBILES（逗号分隔）合并进手机号名单（去重保序）
+
+        参数:
+            stat (StatisticsResult): 批次级统计结果
+
+        返回:
+            Tuple[List[str], List[str], List[str]]:
+            (owner_names, mentioned_list, mentioned_mobile_list)
+
+        异常:
+            无
+        """
+        # 展示名单: 去空去重保序
+        owner_names = list(
+            dict.fromkeys(
+                detail.owner
+                for detail in stat.failed_details
+                if detail.owner
+            )
+        )
+
+        # 手机号/_userid分流
+        mentioned_list: List[str] = []
+        mentioned_mobile_list: List[str] = []
+        for owner in owner_names:
+            if self.MOBILE_PATTERN.match(owner):
+                mentioned_mobile_list.append(owner)
+            else:
+                mentioned_list.append(owner)
+
+        # @所有人开关
+        if env_manager.get_bool("TM_NOTIFY_AT_ALL", False):
+            mentioned_list.insert(0, "@all")
+
+        # 额外手机号配置合并（去重保序）
+        raw_mobiles = str(env_manager.get("TM_NOTIFY_OWNER_MOBILES", ""))
+        for mobile in raw_mobiles.split(","):
+            mobile = mobile.strip()
+            if mobile and mobile not in mentioned_mobile_list:
+                mentioned_mobile_list.append(mobile)
+
+        return owner_names, mentioned_list, mentioned_mobile_list
+
+    def notify(self, stat, execution_id: str, strategy: Optional[str] = None) -> Dict[str, bool]:
+        """
+        通知分发主入口
+
+        执行流程:
+            1. should_notify判定: False时返回空dict且不触碰任何渠道
+            2. 收集负责人（owner_names/@名单）
+            3. 构造各渠道Notification（邮件HTML/企微markdown摘要）
+            4. 逐渠道send，汇总 {"渠道名": True/False}
+            5. 单渠道异常（契约上不抛，防御性try）不影响其他渠道
+
+        参数:
+            stat (StatisticsResult): 批次级统计结果
+            execution_id (str): 执行批次号
+            strategy (str | None): 覆盖策略（None用实例策略）
+
+        返回:
+            Dict[str, bool]: 各渠道发送结果；策略跳过时返回空dict
+
+        异常:
+            无（全部内部消化）
+        """
+        if not self.should_notify(stat, strategy):
+            logger.info(
+                f"全通过且策略为仅失败，跳过通知 | 批次: {execution_id}"
+            )
+            return {}
+
+        owner_names, mentioned_list, mentioned_mobile_list = (
+            self.collect_owners(stat)
+        )
+        notifications = self._build_channel_notifications(
+            stat, execution_id, owner_names
+        )
+        # extra统一注入@名单（渠道自行决定消费方式）
+        for notification in notifications.values():
+            notification.extra["mentioned_list"] = mentioned_list
+            notification.extra["mentioned_mobile_list"] = mentioned_mobile_list
+            notification.extra["owner_names"] = owner_names
+
+        results: Dict[str, bool] = {}
+        for notifier in self.notifiers:
+            channel = notifier.channel_name
+            try:
+                results[channel] = notifier.send(notifications[channel])
+                logger.debug(
+                    f"渠道通知完成 | 渠道: {channel} | "
+                    f"结果: {results[channel]} | 批次: {execution_id}"
+                )
+            except Exception as exc:  # 防御性捕获: 渠道契约不抛，万一抛也不影响其他渠道
+                logger.warning(
+                    f"渠道通知异常已捕获 | 渠道: {channel} | "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                results[channel] = False
+
+        logger.info(
+            f"通知路由完成 | 批次: {execution_id} | 策略: "
+            f"{strategy or self.strategy} | 负责人: {owner_names or '-'} | "
+            f"结果: {results}"
+        )
+        return results
+
+    # ------------------------------------------------------------------
+    # 内部方法
+    # ------------------------------------------------------------------
+    def _build_channel_notifications(
+        self, stat, execution_id: str, owner_names: List[str]
+    ) -> Dict[str, Notification]:
+        """
+        构造各渠道通知消息（内部方法）
+
+        邮件: EmailReportTemplate渲染HTML，level按通过率映射
+              （<0.7 critical / <0.9 warning / 否则 info）
+        企微: 纯markdown文本摘要（总数/通过/失败/错误/跳过/通过率/P95 +
+              失败用例逐条"用例名(模块,负责人): 错误信息截断"）
+
+        参数:
+            stat (StatisticsResult): 批次级统计结果
+            execution_id (str): 执行批次号
+            owner_names (List[str]): 负责人展示名单
+
+        返回:
+            Dict[str, Notification]: {渠道名: 通知消息}（extra由notify统一注入）
+
+        异常:
+            无
+        """
+        # level按通过率映射
+        if stat.pass_rate is None or stat.pass_rate < 0.7:
+            level = "critical"
+        elif stat.pass_rate < 0.9:
+            level = "warning"
+        else:
+            level = "info"
+
+        common_kwargs = {
+            "level": level,
+            "execution_id": execution_id,
+            "pass_rate": stat.pass_rate,
+            "total_cases": stat.total,
+            "failed_cases": stat.failed,
+        }
+
+        # 邮件: HTML完整报告
+        email_content = EmailReportTemplate().render(stat, execution_id)
+        email_notification = Notification(
+            title=f"测试批次报告 {execution_id}",
+            content=email_content,
+            **common_kwargs,
+        )
+
+        # 企微: 纯markdown文本摘要（不依赖HTML）
+        wechat_content = self._build_wechat_summary(
+            stat, execution_id, owner_names
+        )
+        wechat_notification = Notification(
+            title=f"测试批次摘要 {execution_id}",
+            content=wechat_content,
+            **common_kwargs,
+        )
+
+        return {"email": email_notification, "wechat": wechat_notification}
+
+    @staticmethod
+    def _build_wechat_summary(
+        stat, execution_id: str, owner_names: List[str]
+    ) -> str:
+        """
+        构造企微markdown文本摘要（内部方法）
+
+        参数:
+            stat (StatisticsResult): 批次级统计结果
+            execution_id (str): 执行批次号
+            owner_names (List[str]): 负责人展示名单
+
+        返回:
+            str: 纯文本markdown摘要（失败用例逐条含负责人）
+
+        异常:
+            无
+        """
+        lines = [
+            f"**测试批次执行完成**（{execution_id}）",
+            "",
+            f"- 用例总数：{stat.total}",
+            f"- 通过：{stat.passed} | 失败：{stat.failed - stat.broken} | "
+            f"错误：{stat.broken} | 跳过：{stat.skipped}",
+            f"- 通过率：{stat.pass_rate:.2%}" if stat.pass_rate is not None
+            else "- 通过率：N/A",
+            f"- P95耗时：{stat.p95_duration_ms:.2f}ms",
+        ]
+        if owner_names:
+            lines.append(f"- 负责人：{'、'.join(owner_names)}")
+        if stat.failed_details:
+            lines.append("")
+            lines.append("**失败用例：**")
+            for detail in stat.failed_details[:10]:  # 摘要最多列10条防超长
+                owner_suffix = f",{detail.owner}" if detail.owner else ""
+                message = detail.error_message or "无错误信息"
+                if len(message) > 50:
+                    message = message[:50] + "..."
+                lines.append(
+                    f"- {detail.name}（{detail.module}{owner_suffix}）: {message}"
+                )
+            if len(stat.failed_details) > 10:
+                lines.append(f"- ...等共{len(stat.failed_details)}条失败用例")
+        return "\n".join(lines)
