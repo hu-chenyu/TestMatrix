@@ -23,6 +23,7 @@
       内联样式是邮件HTML的事实标准
 """
 
+import random
 import re
 import smtplib
 import socket
@@ -79,6 +80,16 @@ FAILED_ROW_STYLE = "background-color: #fff5f5;"
 
 # 错误信息截断长度（字符）
 ERROR_MESSAGE_MAX_LENGTH = 200
+
+# ============ 通知重试常量（Day14） ============
+# 失败后最大重试次数（首次尝试不计，总尝试=1+max_retries）
+DEFAULT_MAX_RETRIES = 3
+
+# 指数退避基准秒数（第k次失败后等待 base×2^(k-1)，序列1/2/4/8...）
+DEFAULT_BASE_DELAY = 1.0
+
+# 死信fail_reason落库截断长度（字符）
+REASON_MAX_LEN = 1000
 
 
 @dataclass
@@ -1235,9 +1246,12 @@ class NotificationRouter:
         - 渠道路由: 显式传入notifiers > 按配置默认实例化邮件+企微
 
     配置项（env_manager）:
-        TM_NOTIFY_STRATEGY      通知策略 all/failed_only（默认all）
-        TM_NOTIFY_AT_ALL        存在失败时是否@所有人（默认false）
-        TM_NOTIFY_OWNER_MOBILES 额外@的手机号列表（逗号分隔，可选）
+        TM_NOTIFY_STRATEGY          通知策略 all/failed_only（默认all）
+        TM_NOTIFY_AT_ALL            存在失败时是否@所有人（默认false）
+        TM_NOTIFY_OWNER_MOBILES     额外@的手机号列表（逗号分隔，可选）
+        TM_NOTIFY_MAX_RETRIES       失败后最大重试次数（默认3，总尝试=1+次数）
+        TM_NOTIFY_RETRY_BASE_DELAY  指数退避基准秒数（默认1.0，序列base×2^k）
+        TM_NOTIFY_RETRY_JITTER      是否加随机抖动防雪崩（默认false）
     """
 
     # 合法策略值
@@ -1250,6 +1264,11 @@ class NotificationRouter:
         self,
         strategy: Optional[str] = None,
         notifiers: Optional[List[BaseNotifier]] = None,
+        max_retries: Optional[int] = None,
+        base_delay: Optional[float] = None,
+        use_jitter: Optional[bool] = None,
+        dead_letter_repo=None,
+        sleeper=None,
     ):
         """
         初始化通知路由器
@@ -1260,6 +1279,15 @@ class NotificationRouter:
             notifiers (List[BaseNotifier] | None): 通知渠道列表；
                 None时默认实例化 [EmailNotifier(), WeChatNotifier()]
                 （未启用渠道由send内部跳过，router不重复判断开关）
+            max_retries (int | None): 失败后最大重试次数（首次不计）；
+                None时读env TM_NOTIFY_MAX_RETRIES，默认3；非法值按0处理并warning
+            base_delay (float | None): 指数退避基准秒数；
+                None时读env TM_NOTIFY_RETRY_BASE_DELAY，默认1.0
+            use_jitter (bool | None): 重试等待是否加随机抖动；
+                None时读env TM_NOTIFY_RETRY_JITTER，默认False（保证测试确定性）
+            dead_letter_repo: 死信仓储（默认NotificationDeadLetterRepository；
+                测试可注入fake）
+            sleeper: 等待函数（默认time.sleep；测试注入记录型fake禁止真实等待）
 
         返回:
             无
@@ -1282,9 +1310,42 @@ class NotificationRouter:
         if notifiers is None:
             notifiers = [EmailNotifier(), WeChatNotifier()]
         self.notifiers = notifiers
+
+        # 重试参数: 显式传参 > env配置 > 默认值
+        if max_retries is None:
+            max_retries = env_manager.get_int(
+                "TM_NOTIFY_MAX_RETRIES", DEFAULT_MAX_RETRIES
+            )
+        if not isinstance(max_retries, int) or isinstance(max_retries, bool) \
+                or max_retries < 0:
+            logger.warning(f"重试次数非法: {max_retries!r}，按0处理")
+            max_retries = 0
+        self.max_retries = max_retries
+
+        if base_delay is None:
+            base_delay = env_manager.get_float(
+                "TM_NOTIFY_RETRY_BASE_DELAY", DEFAULT_BASE_DELAY
+            )
+        self.base_delay = float(base_delay)
+
+        if use_jitter is None:
+            use_jitter = env_manager.get_bool(
+                "TM_NOTIFY_RETRY_JITTER", False
+            )
+        self.use_jitter = use_jitter
+
+        # 死信仓储与等待函数: 构造注入（测试可替换，禁止测试真实sleep）
+        self.dead_letter_repo = (
+            dead_letter_repo if dead_letter_repo is not None
+            else NotificationDeadLetterRepository()
+        )
+        self.sleeper = sleeper if sleeper is not None else time.sleep
+
         logger.debug(
             f"通知路由器初始化 | 策略: {self.strategy} | "
-            f"渠道: {[n.channel_name for n in self.notifiers]}"
+            f"渠道: {[n.channel_name for n in self.notifiers]} | "
+            f"重试: max={self.max_retries} base={self.base_delay}s "
+            f"jitter={self.use_jitter}"
         )
 
     def should_notify(self, stat, strategy: Optional[str] = None) -> bool:
@@ -1403,11 +1464,31 @@ class NotificationRouter:
         for notifier in self.notifiers:
             channel = notifier.channel_name
             try:
-                results[channel] = notifier.send(notifications[channel])
-                logger.debug(
-                    f"渠道通知完成 | 渠道: {channel} | "
-                    f"结果: {results[channel]} | 批次: {execution_id}"
+                # 重试由路由层统一管理（BaseNotifier.send保持单次尝试语义）
+                success, attempts, fail_reason = self._send_with_retry(
+                    notifier, notifications[channel]
                 )
+                results[channel] = success
+                if success:
+                    logger.debug(
+                        f"渠道通知完成 | 渠道: {channel} | 尝试: {attempts}次 | "
+                        f"批次: {execution_id}"
+                    )
+                elif fail_reason != "渠道未启用":
+                    # 配置性跳过（未启用）不是发送失败，不写死信
+                    logger.warning(
+                        f"渠道通知重试耗尽 | 渠道: {channel} | "
+                        f"尝试: {attempts}次 | 原因: {fail_reason} | "
+                        f"批次: {execution_id}"
+                    )
+                    self._save_dead_letter(
+                        notifications[channel], channel,
+                        fail_reason, attempts,
+                    )
+                else:
+                    logger.debug(
+                        f"渠道未启用已跳过 | 渠道: {channel} | 批次: {execution_id}"
+                    )
             except Exception as exc:  # 防御性捕获: 渠道契约不抛，万一抛也不影响其他渠道
                 logger.warning(
                     f"渠道通知异常已捕获 | 渠道: {channel} | "
@@ -1425,6 +1506,105 @@ class NotificationRouter:
     # ------------------------------------------------------------------
     # 内部方法
     # ------------------------------------------------------------------
+    def _send_with_retry(
+        self, notifier: BaseNotifier, notification: Notification
+    ) -> Tuple[bool, int, str]:
+        """
+        带指数退避重试的渠道发送（内部方法）
+
+        重试策略:
+            - send返回False或抛异常均视为一次失败并重试
+              （异常类型+消息进fail_reason；契约上send不抛，此处防御性兜底）
+            - is_enabled()=False为配置性跳过: 不重试、不等待，直接返回
+            - 第k次失败后等待 base_delay×2^(k-1)（序列1/2/4/8...）；
+              use_jitter为真时再加random.uniform(0, delay×0.25)抖动
+              （防多实例同时重试雪崩，默认关闭保证测试确定性）
+            - 总尝试次数上限 = 1 + max_retries
+
+        参数:
+            notifier (BaseNotifier): 通知渠道实例
+            notification (Notification): 通知消息
+
+        返回:
+            Tuple[bool, int, str]: (最终是否成功, 总尝试次数, 最后失败原因)
+
+        异常:
+            无（全部内部消化）
+        """
+        # 配置性跳过: 渠道未启用不是发送失败（不重试/不等待/不写死信）
+        if not notifier.is_enabled():
+            return False, 0, "渠道未启用"
+
+        max_attempts = 1 + self.max_retries
+        attempts = 0
+        last_reason = ""
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                if notifier.send(notification):
+                    return True, attempts, ""
+                last_reason = "send返回False"
+            except Exception as exc:  # 防御性: 契约不抛，万一是抛也算失败重试
+                last_reason = f"{type(exc).__name__}: {exc}"
+
+            # 还有下一次才计算等待（最后一次失败后不再空等）
+            if attempts < max_attempts:
+                delay = self.base_delay * (2 ** (attempts - 1))
+                if self.use_jitter:
+                    delay += random.uniform(0, delay * 0.25)
+                logger.warning(
+                    f"发送失败准备重试 | 渠道: {notifier.channel_name} | "
+                    f"第{attempts}次失败 | 原因: {last_reason} | "
+                    f"等待: {delay:.2f}s"
+                )
+                self.sleeper(delay)
+
+        return False, attempts, last_reason
+
+    def _save_dead_letter(
+        self,
+        notification: Notification,
+        channel: str,
+        fail_reason: str,
+        attempts: int,
+    ) -> None:
+        """
+        重试耗尽后写入死信留痕（内部方法）
+
+        旁路铁律: 写死信本身失败（如DB挂了）只记error日志，
+        绝不向上抛——通知已是旁路能力，死信是其旁路的旁路。
+
+        参数:
+            notification (Notification): 通知消息（title/content/level/批次号来源）
+            channel (str): 渠道名
+            fail_reason (str): 最后失败原因
+            attempts (int): 总尝试次数
+
+        返回:
+            无
+
+        异常:
+            无（仓储异常内部消化）
+        """
+        try:
+            self.dead_letter_repo.save_dead_letter(
+                channel=channel,
+                execution_id=notification.execution_id or "",
+                title=notification.title,
+                content=notification.content,
+                level=notification.level,
+                fail_reason=fail_reason,
+                attempts=attempts,
+            )
+            logger.info(
+                f"死信已入库 | 渠道: {channel} | 尝试: {attempts}次 | "
+                f"批次: {notification.execution_id or '-'}"
+            )
+        except Exception as exc:
+            logger.error(
+                f"死信入库失败（已忽略，不影响主流程） | 渠道: {channel} | "
+                f"{type(exc).__name__}: {exc}"
+            )
     def _build_channel_notifications(
         self, stat, execution_id: str, owner_names: List[str]
     ) -> Dict[str, Notification]:
@@ -1527,3 +1707,187 @@ class NotificationRouter:
             if len(stat.failed_details) > 10:
                 lines.append(f"- ...等共{len(stat.failed_details)}条失败用例")
         return "\n".join(lines)
+
+
+# ======================================================================
+# 通知死信仓储（Day14）
+# ======================================================================
+class NotificationDeadLetterRepository:
+    """
+    通知死信数据仓储
+
+    负责死信记录的落库与查询（重试耗尽的通知留痕），
+    对齐Day8 ReportRepository的函数内延迟导入风格
+    （core层不顶层import db，规避循环依赖）。
+    """
+
+    @staticmethod
+    def save_dead_letter(
+        channel: str,
+        execution_id: str,
+        title: str,
+        content: str,
+        level: str,
+        fail_reason: str,
+        attempts: int,
+    ) -> int:
+        """
+        写入一条死信记录
+
+        参数:
+            channel (str): 渠道名（email/wechat）
+            execution_id (str): 执行批次号
+            title (str): 通知标题
+            content (str): 完整消息体（HTML/markdown全文）
+            level (str): 通知级别（info/warning/critical）
+            fail_reason (str): 最后失败原因（超长截断到1000字符）
+            attempts (int): 总尝试次数
+
+        返回:
+            int: 自增主键id
+
+        异常:
+            sqlalchemy.exc.SQLAlchemyError: 数据库异常时向上抛出
+                （由Router._save_dead_letter捕获消化，绝不影响主流程）
+        """
+        # 延迟导入: 规避core与db模块循环依赖
+        from src.db.db_session import DatabaseSession
+        from src.db.models import NotificationDeadLetter
+
+        record = NotificationDeadLetter(
+            channel=channel,
+            execution_id=execution_id,
+            title=title,
+            content=content,
+            level=level,
+            fail_reason=fail_reason[:REASON_MAX_LEN],
+            attempts=attempts,
+            status="dead",
+        )
+        with DatabaseSession.session_scope() as session:
+            session.add(record)
+            session.flush()
+            logger.info(
+                f"死信记录已写入 | id: {record.id} | 渠道: {channel} | "
+                f"批次: {execution_id or '-'} | 尝试: {attempts}次"
+            )
+            return record.id
+
+    @staticmethod
+    def list_by_execution_id(execution_id: str) -> List[Dict[str, Any]]:
+        """
+        按批次号查询死信列表
+
+        参数:
+            execution_id (str): 执行批次号
+
+        返回:
+            List[Dict[str, Any]]: 该批次的死信字典列表（id升序）
+
+        异常:
+            无（查询异常由session记录后向上抛出）
+        """
+        # 延迟导入: 规避core与db模块循环依赖
+        from src.db.db_session import DatabaseSession
+        from src.db.models import NotificationDeadLetter
+
+        session = DatabaseSession.get_session()
+        try:
+            records = (
+                session.query(NotificationDeadLetter)
+                .filter_by(execution_id=execution_id)
+                .order_by(NotificationDeadLetter.id)
+                .all()
+            )
+            return [
+                NotificationDeadLetterRepository._to_dict(record)
+                for record in records
+            ]
+        finally:
+            session.close()
+
+    @staticmethod
+    def list_all(limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        查询全部死信（最近N条）
+
+        参数:
+            limit (int): 返回条数上限，默认100
+
+        返回:
+            List[Dict[str, Any]]: 死信字典列表（id升序）
+
+        异常:
+            无
+        """
+        # 延迟导入: 规避core与db模块循环依赖
+        from src.db.db_session import DatabaseSession
+        from src.db.models import NotificationDeadLetter
+
+        session = DatabaseSession.get_session()
+        try:
+            records = (
+                session.query(NotificationDeadLetter)
+                .order_by(NotificationDeadLetter.id)
+                .limit(limit)
+                .all()
+            )
+            return [
+                NotificationDeadLetterRepository._to_dict(record)
+                for record in records
+            ]
+        finally:
+            session.close()
+
+    @staticmethod
+    def count_all() -> int:
+        """
+        统计死信总数
+
+        参数:
+            无
+
+        返回:
+            int: 死信记录总条数
+
+        异常:
+            无
+        """
+        # 延迟导入: 规避core与db模块循环依赖
+        from src.db.db_session import DatabaseSession
+        from src.db.models import NotificationDeadLetter
+
+        session = DatabaseSession.get_session()
+        try:
+            return session.query(NotificationDeadLetter).count()
+        finally:
+            session.close()
+
+    @staticmethod
+    def _to_dict(record) -> Dict[str, Any]:
+        """
+        死信模型行转字典（内部方法）
+
+        参数:
+            record (NotificationDeadLetter): 数据库模型实例
+
+        返回:
+            Dict[str, Any]: 含全部字段的字典（created_at转ISO字符串）
+
+        异常:
+            无
+        """
+        return {
+            "id": record.id,
+            "channel": record.channel,
+            "execution_id": record.execution_id,
+            "title": record.title,
+            "content": record.content,
+            "level": record.level,
+            "fail_reason": record.fail_reason,
+            "attempts": record.attempts,
+            "status": record.status,
+            "created_at": record.created_at.isoformat()
+            if record.created_at
+            else "",
+        }

@@ -1,10 +1,11 @@
 """
 SQLAlchemy数据模型模块
 
-定义测试平台3张核心表:
-    test_cases        测试用例表（用例元信息管理）
-    test_executions   测试执行记录表（单用例执行明细）
-    defect_statistics 缺陷统计表（批次级执行汇总指标）
+定义测试平台4张核心表:
+    test_cases               测试用例表（用例元信息管理）
+    test_executions          测试执行记录表（单用例执行明细）
+    defect_statistics        缺陷统计表（批次级执行汇总指标）
+    notification_dead_letters 通知死信表（重试耗尽的通知留痕）
 
 使用SQLAlchemy 2.0声明式风格（DeclarativeBase + Mapped + mapped_column），
 同时兼容SQLite与MySQL（字段类型选取两者通用类型）。
@@ -191,4 +192,59 @@ class DefectStatistic(Base):
         return (
             f"DefectStatistic(execution_id={self.execution_id!r}, "
             f"total_cases={self.total_cases}, pass_rate={self.pass_rate})"
+        )
+
+
+class NotificationDeadLetter(Base):
+    """
+    通知死信表（notification_dead_letters）
+
+    记录重试全部耗尽仍未送达的通知消息（完整消息体留痕），
+    供事后人工排查与重发；本次仅落库（status=dead），
+    重放（status=resent）为后续扩展位，暂不实现。
+
+    表字段说明:
+        id           自增主键
+        channel      通知渠道: email / wechat
+        execution_id 关联的执行批次号
+        title        通知标题
+        content      完整消息体（HTML/markdown全文，Text类型，便于人工重发）
+        level        通知级别: info / warning / critical
+        fail_reason  最后一次失败原因（异常类型:消息，超长截断1000字符）
+        attempts     实际总尝试次数（首次+全部重试）
+        status       死信状态: dead=待处理 / resent=已重发（扩展位）
+        created_at   落库时间（数据库时间自动填充）
+    """
+
+    __tablename__ = "notification_dead_letters"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, comment="自增主键")
+    channel: Mapped[str] = mapped_column(String(16), nullable=False, comment="通知渠道email/wechat")
+    execution_id: Mapped[str] = mapped_column(String(64), nullable=False, default="", comment="执行批次号")
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="", comment="通知标题")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="", comment="完整消息体（HTML/markdown全文）")
+    level: Mapped[str] = mapped_column(String(16), nullable=False, default="info", comment="通知级别info/warning/critical")
+    fail_reason: Mapped[str] = mapped_column(Text, nullable=False, default="", comment="最后一次失败原因（截断1000字符）")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="实际总尝试次数")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="dead", comment="状态dead/resent（重放为扩展位）")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), comment="落库时间"
+    )
+
+    # 单列索引: 按批次号查死信为高频排查场景
+    __table_args__ = (
+        Index("idx_dl_execution", "execution_id"),
+        {"comment": "通知死信表（重试耗尽的通知留痕）"},
+    )
+
+    def __repr__(self) -> str:
+        """
+        模型可读化表示（调试与日志打印用）
+
+        返回:
+            str: 形如 NotificationDeadLetter(id=1, channel=email, attempts=4) 的字符串
+        """
+        return (
+            f"NotificationDeadLetter(id={self.id}, channel={self.channel!r}, "
+            f"execution_id={self.execution_id!r}, attempts={self.attempts})"
         )
