@@ -1605,6 +1605,7 @@ class NotificationRouter:
                 f"死信入库失败（已忽略，不影响主流程） | 渠道: {channel} | "
                 f"{type(exc).__name__}: {exc}"
             )
+
     def _build_channel_notifications(
         self, stat, execution_id: str, owner_names: List[str]
     ) -> Dict[str, Notification]:

@@ -23,10 +23,18 @@
 功能（第二阶段Day3交付）:
     - 批量执行 run_batch: 串联sync→create→select→execute→record→finish
       完整调度链路，支持dry_run只加载筛选不执行
-    - 命令行入口 main: argparse解析--file/--sheet/--priority/--module/
-      --tags/--trigger/--dry-run参数，可直接python -m src.core.case_manager运行
+    - 命令行入口 main: argparse解析--file/--priority/--module/
+      --tags/--trigger/--dry-run/--notify参数，可直接python -m src.core.case_manager运行
     - 模拟执行器 _simulate_execute: 模拟单条用例执行（后续Web平台接入
       真实pytest执行时替换此方法）
+
+功能（第二阶段Day15交付）:
+    - 批次统计适配 build_notification_statistics: 批次DB执行记录转
+      AllureResult列表（状态映射error→broken、耗时秒→毫秒、
+      test_cases批量补全module/priority），复用ReportStatistics.aggregate
+    - 批次自动通知 notify_execution_result: 统计模型交NotificationRouter
+      推送（旁路铁律: 通知异常仅记error日志，不影响执行主流程）
+    - run_batch新增notify参数（默认False零回归），CLI同步支持--notify
 
 使用示例:
     from src.core.case_manager import CaseManager, generate_execution_id
@@ -61,6 +69,12 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.common.logger import LogManager
 from src.core.data_driver import DataDriver, DataDriverError
+from src.core.notification import NotificationRouter
+from src.core.report_analyzer import (
+    AllureResult,
+    ReportStatistics,
+    StatisticsResult,
+)
 from src.db.db_session import DatabaseSession
 from src.db.models import DefectStatistic, TestCase, TestExecution
 
@@ -648,6 +662,145 @@ class CaseManager:
         return summary
 
     # ------------------------------------------------------------------
+    # 批次完成通知集成（第二阶段Day15）
+    # ------------------------------------------------------------------
+    @classmethod
+    def build_notification_statistics(
+        cls, execution_id: str
+    ) -> Optional[StatisticsResult]:
+        """
+        将批次DB执行记录适配为统计模型（Day15适配器）
+
+        执行流程:
+            1. 查询该execution_id全部test_executions记录，无记录返回None
+            2. 一次性查询关联test_cases建立case_id→(module, priority)字典
+               （批量查询防N+1；缺失用例落unknown不报错）
+            3. 逐条转AllureResult（状态映射: DB error→Allure broken，
+               即Day8入库映射的逆过程；耗时秒→毫秒: start=0, stop=duration×1000）
+            4. 复用ReportStatistics.aggregate产出StatisticsResult
+               （aggregate是唯一统计入口，P95/分组/失败明细口径只有一份）
+
+        参数:
+            execution_id (str): 执行批次号
+
+        返回:
+            StatisticsResult | None: 批次统计结果；批次无记录时返回None
+
+        异常:
+            无（数据库异常由session记录后向上抛出，调用方notify_execution_result消化）
+        """
+        session = DatabaseSession.get_session()
+        try:
+            records = (
+                session.query(TestExecution)
+                .filter_by(execution_id=execution_id)
+                .all()
+            )
+            if not records:
+                logger.debug(f"批次无执行记录，跳过统计构建 | 批次: {execution_id}")
+                return None
+
+            # 批量查关联用例（防N+1）: case_id→(module, priority)
+            case_ids = [record.case_id for record in records]
+            case_rows = (
+                session.query(TestCase)
+                .filter(TestCase.case_id.in_(case_ids))
+                .all()
+            )
+            case_info = {
+                row.case_id: (row.module, row.priority) for row in case_rows
+            }
+
+            # DB四态→Allure四态映射（Day8入库映射的逆过程:
+            # 入库时failed=纯failed、error=broken，此处error还原为broken）
+            status_mapping = {"passed": "passed", "failed": "failed",
+                              "error": "broken", "skipped": "skipped"}
+            allure_results = []
+            for record in records:
+                module, priority = case_info.get(
+                    record.case_id, ("unknown", "unknown")
+                )
+                allure_status = status_mapping.get(record.result, "unknown")
+                allure_results.append(
+                    AllureResult(
+                        uuid=record.case_id,
+                        name=record.case_name,
+                        full_name=record.case_id,
+                        status=allure_status,
+                        description="",
+                        start=0,
+                        stop=int(round(record.duration * 1000)),  # 秒→毫秒
+                        history_id=record.case_id,
+                        labels={
+                            "feature": [module or "unknown"],
+                            "severity": [priority or "unknown"],
+                        },
+                        parameters=[],
+                        status_details=(
+                            {"message": record.error_message or "", "trace": ""}
+                            if allure_status in ("failed", "broken")
+                            else None
+                        ),
+                    )
+                )
+        finally:
+            session.close()
+
+        stat = ReportStatistics.aggregate(allure_results)
+        logger.info(
+            f"批次统计模型构建完成 | 批次: {execution_id} | "
+            f"总数: {stat.total} | 通过率: {stat.pass_rate:.2%}"
+        )
+        return stat
+
+    @classmethod
+    def notify_execution_result(
+        cls,
+        execution_id: str,
+        router: Optional[NotificationRouter] = None,
+        strategy: Optional[str] = None,
+    ) -> dict:
+        """
+        批次完成自动通知（Day15集成入口，通知为旁路能力）
+
+        执行流程:
+            1. build_notification_statistics构建统计模型，无记录返回{}
+            2. router为None时默认实例化NotificationRouter
+            3. router.notify推送（发送策略/重试/死信均由Router管理）
+
+        旁路铁律: 任何异常（建统计失败/路由失败/发送失败）只记error日志
+        并返回{}，绝不向上抛——执行主流程不被通知影响。
+
+        参数:
+            execution_id (str): 执行批次号
+            router (NotificationRouter | None): 通知路由器（测试可注入）
+            strategy (str | None): 覆盖通知策略（None用Router实例策略）
+
+        返回:
+            dict: 各渠道发送结果（如{"email": True, "wechat": False}）；
+                  任何异常时返回{}
+
+        异常:
+            无（全部内部消化）
+        """
+        try:
+            stat = cls.build_notification_statistics(execution_id)
+            if stat is None:
+                logger.info(
+                    f"批次无执行记录，跳过通知 | 批次: {execution_id}"
+                )
+                return {}
+            if router is None:
+                router = NotificationRouter()
+            return router.notify(stat, execution_id, strategy)
+        except Exception as exc:
+            logger.error(
+                f"批次通知异常已捕获（不影响主流程） | 批次: {execution_id} | "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return {}
+
+    # ------------------------------------------------------------------
     # 批量执行与命令行（第二阶段Day3）
     # ------------------------------------------------------------------
     @staticmethod
@@ -823,6 +976,7 @@ def run_batch(
     tags: Optional[Union[str, list]] = None,
     trigger: str = "cli",
     dry_run: bool = False,
+    notify: bool = False,
 ) -> dict:
     """
     批量执行完整调度链路（模块级函数）
@@ -913,6 +1067,16 @@ def run_batch(
     print(f"  通过率: {summary['pass_rate']:.2%}")
     print("=" * 52)
 
+    # 8. 批次完成自动推送（旁路: 通知异常仅记error日志，不影响主流程返回）
+    if notify:
+        try:
+            CaseManager.notify_execution_result(execution_id)
+        except Exception as exc:
+            logger.error(
+                f"批次自动通知异常已捕获（不影响主流程） | 批次: {execution_id} | "
+                f"{type(exc).__name__}: {exc}"
+            )
+
     return summary
 
 
@@ -972,6 +1136,10 @@ def main() -> None:
         "--dry-run", action="store_true", default=False,
         help="只加载筛选不执行，打印待执行用例列表后退出",
     )
+    parser.add_argument(
+        "--notify", action="store_true", default=False,
+        help="执行完成后推送邮件/企微通知（需同时开启对应渠道开关）",
+    )
     args = parser.parse_args()
 
     # --file存在性校验（不存在打印错误并退出码1）
@@ -990,6 +1158,7 @@ def main() -> None:
             tags=args.tags,
             trigger=args.trigger,
             dry_run=args.dry_run,
+            notify=args.notify,
         )
     except CaseManagerError as exc:
         print(f"错误: 批量执行失败: {exc}")
