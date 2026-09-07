@@ -91,6 +91,8 @@ graph LR
 
 ### 2.4 notification 通知推送引擎
 
+> 详细设计（类关系图/数据流图/配置全表/扩展渠道指南/连环问清单）见 [notification_architecture.md](notification_architecture.md)
+
 **职责**：`Notification` 统一消息结构 + `BaseNotifier` 抽象基类（send/is_enabled/build_notification）+ `EmailNotifier`（smtplib，465 SSL/587 STARTTLS 自适应）+ `WeChatNotifier`（webhook markdown）+ `EmailReportTemplate`（内联 CSS 六区块 HTML 报告）。
 
 **设计决策**：
