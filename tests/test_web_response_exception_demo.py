@@ -33,6 +33,8 @@ def sqlite_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None
     将数据库指向pytest临时目录，测试后重置DatabaseSession引擎，
     避免Windows下SQLite文件句柄残留导致tmp_path清理失败，
     也避免污染项目默认数据库文件。
+    Day19起/api/cases/为真实实现（查询test_cases表），
+    fixture需完成init_db建表。
 
     参数:
         monkeypatch (pytest.MonkeyPatch): 环境变量补丁工具
@@ -44,6 +46,7 @@ def sqlite_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None
     monkeypatch.setenv("TM_DB_TYPE", "sqlite")
     monkeypatch.setenv("TM_DB_SQLITE_PATH", str(tmp_path / "health_probe.db"))
     DatabaseSession.reset()
+    DatabaseSession.init_db()
     yield
     DatabaseSession.reset()
 
