@@ -36,6 +36,12 @@
       推送（旁路铁律: 通知异常仅记error日志，不影响执行主流程）
     - run_batch新增notify参数（默认False零回归），CLI同步支持--notify
 
+功能（第三阶段Day19交付）:
+    - 分页用例查询 list_cases_paged: limit/offset在数据库层完成分页，
+      支持keyword关键字三字段模糊搜索（case_id/name/description，
+      LIKE不区分大小写），返回items/total/page/page_size/total_pages
+      分页结构；与list_cases并存（后者为内部链路保留，保持向后兼容）
+
 使用示例:
     from src.core.case_manager import CaseManager, generate_execution_id
 
@@ -65,6 +71,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
+from sqlalchemy import case, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.common.logger import LogManager
@@ -82,6 +89,9 @@ logger = LogManager.get_logger()
 
 # 优先级排序权重: 数值越小越靠前（P0最高），未知优先级排最后
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+# 分页查询每页最大条数（防止单页拉取全表，Web列表API分页上限）
+MAX_PAGE_SIZE = 100
 
 # 芯片板卡用例的路径特征关键词（路径命中任意词即判定为chip类型，统一小写匹配）
 CHIP_PATH_KEYWORDS = ("chip", "serial", "telnet")
@@ -353,6 +363,173 @@ class CaseManager:
             )
         )
         logger.info(f"用例查询完成 | 命中: {len(result)}条")
+        return result
+
+    # ------------------------------------------------------------------
+    # 用例分页查询（第三阶段Day19，Web列表API专用）
+    # ------------------------------------------------------------------
+    @classmethod
+    def list_cases_paged(
+        cls,
+        module: Optional[Union[str, list]] = None,
+        priority: Optional[Union[str, list]] = None,
+        case_type: Optional[str] = None,
+        status: Optional[str] = "active",
+        keyword: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict:
+        """
+        多维度分页用例查询（Web用例列表API专用）
+
+        与list_cases的关系:
+            - list_cases返回全量命中列表，供执行调度等内部链路使用，
+              签名与行为保持不变（向后兼容）
+            - 本方法面向Web分页场景，limit/offset在数据库层完成分页，
+              避免大表全量加载到内存后切片的开销
+
+        筛选规则（与list_cases口径一致）:
+            - module    精确匹配（str或list任一命中）
+            - priority  精确匹配、统一大写（str或list任一命中）
+            - status    精确匹配（active/disabled），传None查全部状态
+            - case_type 精确匹配（api/chip），传None不过滤
+            - keyword   模糊匹配case_id/name/description三字段，
+                        SQL LIKE实现，不区分大小写
+
+        排序规则（与list_cases一致）:
+            priority权重升序（P0→P3，未知优先级排最后） -> case_id升序；
+            priority权重经SQL CASE表达式在数据库层映射（复用
+            PRIORITY_ORDER常量），保证跨页顺序稳定
+
+        参数:
+            module (str | list | None): 模块筛选值，默认None不过滤
+            priority (str | list | None): 优先级筛选值，默认None不过滤
+            case_type (str | None): 用例类型（api/chip），默认None不过滤
+            status (str | None): 用例状态，默认"active"，传None查全部
+            keyword (str | None): 关键字（模糊匹配case_id/name/
+                                  description三字段），默认None不过滤
+            page (int): 页码，从1开始，默认1
+            page_size (int): 每页条数，1到MAX_PAGE_SIZE，默认20
+
+        返回:
+            dict: {"items": 当前页用例列表(list[dict]),
+                   "total": 命中总数（过滤后、分页前）,
+                   "page": 当前页码,
+                   "page_size": 每页条数,
+                   "total_pages": 总页数，ceil(total/page_size)}
+
+        异常:
+            CaseManagerError: 分页参数非法 / 数据库查询异常时抛出，
+                              context携带operation定位信息
+        """
+        # 分页参数防御校验（bool是int子类需显式排除；非法limit/offset
+        # 会在数据库层直接报错，此处提前拦截给出业务友好提示）
+        if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+            raise CaseManagerError(
+                f"page必须为大于等于1的整数: {page!r}",
+                context={"operation": "list_cases_paged", "page": page},
+            )
+        if (
+            not isinstance(page_size, int)
+            or isinstance(page_size, bool)
+            or page_size < 1
+            or page_size > MAX_PAGE_SIZE
+        ):
+            raise CaseManagerError(
+                f"page_size必须在1到{MAX_PAGE_SIZE}之间: {page_size!r}",
+                context={
+                    "operation": "list_cases_paged",
+                    "page_size": page_size,
+                },
+            )
+
+        try:
+            session = DatabaseSession.get_session()
+            try:
+                query = session.query(TestCase)
+
+                # module筛选（与list_cases口径一致）
+                if module is not None:
+                    module_list = cls._normalize_values(module, "module")
+                    if module_list:
+                        query = query.filter(TestCase.module.in_(module_list))
+
+                # priority筛选（统一大写后匹配，与入库规范化格式对齐）
+                if priority is not None:
+                    priority_list = [
+                        str(item).strip().upper()
+                        for item in cls._normalize_values(priority, "priority")
+                    ]
+                    if priority_list:
+                        query = query.filter(
+                            TestCase.priority.in_(priority_list)
+                        )
+
+                # status筛选（默认active，显式传None查全部状态）
+                if status is not None and str(status).strip():
+                    query = query.filter(
+                        TestCase.status == str(status).strip()
+                    )
+
+                # case_type筛选
+                if case_type is not None and str(case_type).strip():
+                    query = query.filter(
+                        TestCase.case_type == str(case_type).strip()
+                    )
+
+                # keyword模糊搜索: case_id/name/description三字段任一命中，
+                # 统一转小写实现跨库（SQLite/MySQL）不区分大小写匹配
+                if keyword is not None and str(keyword).strip():
+                    pattern = f"%{str(keyword).strip().lower()}%"
+                    query = query.filter(
+                        or_(
+                            func.lower(TestCase.case_id).like(pattern),
+                            func.lower(TestCase.name).like(pattern),
+                            func.lower(TestCase.description).like(pattern),
+                        )
+                    )
+
+                # 命中总数（过滤后、分页前，独立count查询）
+                total = query.count()
+
+                # 排序: priority权重CASE表达式（复用PRIORITY_ORDER，与
+                # list_cases的Python层排序口径一致）+ case_id升序
+                priority_weight = case(
+                    *[
+                        (TestCase.priority == name, weight)
+                        for name, weight in PRIORITY_ORDER.items()
+                    ],
+                    else_=len(PRIORITY_ORDER),
+                )
+                # 数据库层分页: limit/offset，不将全表拉入内存切片
+                rows = (
+                    query.order_by(priority_weight, TestCase.case_id.asc())
+                    .limit(page_size)
+                    .offset((page - 1) * page_size)
+                    .all()
+                )
+            finally:
+                session.close()
+        except SQLAlchemyError as exc:
+            logger.error(f"用例分页查询数据库异常 | {exc}")
+            raise CaseManagerError(
+                f"用例分页查询数据库异常: {exc}",
+                context={"operation": "list_cases_paged"},
+            ) from exc
+
+        # 总页数: 整数运算实现向上取整（避免浮点精度问题），0条时为0页
+        total_pages = (total + page_size - 1) // page_size
+        result = {
+            "items": [cls._to_dict(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+        }
+        logger.info(
+            f"用例分页查询完成 | 命中: {total}条 | 页: {page}/{total_pages} | "
+            f"每页: {page_size}"
+        )
         return result
 
     # ------------------------------------------------------------------

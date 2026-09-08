@@ -5,7 +5,7 @@ TestMatrix Day17: Flask应用工厂与蓝图架构测试
     1. 应用工厂: 默认/测试/生产三环境配置注入
     2. 环境变量: TM_ENV 驱动配置加载
     3. 蓝图注册: 四个蓝图(base/cases/executions/reports)正确注册
-    4. 接口响应: 首页/健康检查/占位接口JSON格式正确
+    4. 接口响应: 首页/健康检查/用例列表接口JSON格式正确
     5. 错误处理: 404返回JSON而非HTML错误页
     6. 安全响应头: X-Content-Type-Options/X-Frame-Options
 """
@@ -15,6 +15,7 @@ import os
 import pytest
 from flask import Flask
 
+from src.db.db_session import DatabaseSession
 from src.web import create_app
 from src.web.config import DevelopmentConfig, TestingConfig, ProductionConfig
 
@@ -110,15 +111,30 @@ class TestWebEndpoints:
         assert "timestamp" in data["data"], "health应包含timestamp"
         assert "env" in data["data"], "health应包含env"
 
-    def test_cases_placeholder(self, client) -> None:
+    def test_cases_list_endpoint(
+        self, client, tmp_path, monkeypatch, request
+    ) -> None:
         """
-        测试GET /api/cases: 确认200，message含placeholder
+        测试GET /api/cases: 确认200，返回统一格式且data含
+        items/total分页字段（Day19占位接口替换为真实实现，
+        断言同步更新；临时SQLite库隔离，空库查询返回0条）
         """
+        monkeypatch.setenv("TM_DB_TYPE", "sqlite")
+        monkeypatch.setenv(
+            "TM_DB_SQLITE_PATH", str(tmp_path / "cases_list_endpoint.db")
+        )
+        DatabaseSession.reset()
+        DatabaseSession.init_db()
+        request.addfinalizer(DatabaseSession.reset)
+
         response = client.get("/api/cases/")
         data = response.get_json()
 
-        assert response.status_code == 200, "占位接口应返回200"
-        assert "placeholder" in data["message"], "message应含placeholder"
+        assert response.status_code == 200, "用例列表接口应返回200"
+        assert data["code"] == 200, "响应体code应为200"
+        assert "items" in data["data"], "data应包含items分页字段"
+        assert "total" in data["data"], "data应包含total分页字段"
+        assert data["data"]["total"] == 0, "空库默认查询应为0条"
 
     def test_404_handler(self, client) -> None:
         """
