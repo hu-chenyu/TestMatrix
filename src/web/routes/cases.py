@@ -5,20 +5,34 @@
     - GET /api/cases/  用例列表（分页 + module/priority/case_type/
       status/keyword六维筛选，全部可选、可组合使用）
 
-后续Day20实现:
-    - POST   /api/cases/          创建用例
-    - GET    /api/cases/<id>      用例详情
-    - PUT    /api/cases/<id>      更新用例
-    - DELETE /api/cases/<id>      删除用例
+功能（第三阶段Day20交付）:
+    - POST   /api/cases/          创建用例（marshmallow入参校验，
+      case_id重复返回409）
+    - GET    /api/cases/<case_id> 用例详情（不存在返回404）
+    - PUT    /api/cases/<case_id> 更新用例（只更新传入字段，
+      case_id业务编号不可修改，空body返回400）
+    - DELETE /api/cases/<case_id> 删除用例（物理删除，成功204无响应体）
+
+入参校验说明:
+    - 请求体经marshmallow Schema校验（必填/长度/枚举），
+      校验失败抛ValidationError(400)，message含具体字段错误
+    - case_id重复创建转ConflictError(409)；
+      用例不存在转NotFoundError(404)
 """
 
 from typing import Optional
 
+import marshmallow
 from flask import Blueprint, request
+from marshmallow import EXCLUDE, Schema, fields, validate
 
-from src.core.case_manager import MAX_PAGE_SIZE, CaseManager
-from src.web.exceptions import ValidationError
-from src.web.response import success
+from src.core.case_manager import MAX_PAGE_SIZE, CaseManager, CaseManagerError
+from src.web.exceptions import (
+    ConflictError,
+    NotFoundError,
+    ValidationError,
+)
+from src.web.response import created, no_content, success
 
 cases_bp = Blueprint("cases", __name__, url_prefix="/api/cases")
 
@@ -31,6 +45,81 @@ VALID_CASE_STATUSES = ("active", "disabled", "all")
 # 分页参数默认值
 DEFAULT_PAGE = 1
 DEFAULT_PAGE_SIZE = 20
+
+
+# ===========================================================================
+# marshmallow入参校验Schema（Day20，创建/更新用例请求体）
+# ===========================================================================
+class CaseCreateSchema(Schema):
+    """
+    创建用例入参校验Schema
+
+    校验规则:
+        - case_id/name必填且非空（case_id长度1-64，name长度1-200）
+        - module/priority/case_type/status/description/creator可选，
+          缺省值与数据库模型默认值一致（default/P2/api/active/""/admin）
+        - priority只允许P0-P3，case_type只允许api/chip，
+          status只允许active/disabled（枚举校验）
+
+    说明:
+        缺省值用load_default而非missing（marshmallow 3.13起missing
+        已废弃，使用会触发RemovedInMarshmallow4Warning）
+    """
+
+    case_id = fields.String(
+        required=True, validate=validate.Length(min=1, max=64)
+    )
+    name = fields.String(
+        required=True, validate=validate.Length(min=1, max=200)
+    )
+    module = fields.String(
+        load_default="default", validate=validate.Length(max=64)
+    )
+    priority = fields.String(
+        load_default="P2", validate=validate.OneOf(["P0", "P1", "P2", "P3"])
+    )
+    case_type = fields.String(
+        load_default="api", validate=validate.OneOf(["api", "chip"])
+    )
+    status = fields.String(
+        load_default="active", validate=validate.OneOf(["active", "disabled"])
+    )
+    description = fields.String(load_default="")
+    creator = fields.String(
+        load_default="admin", validate=validate.Length(max=64)
+    )
+
+
+class CaseUpdateSchema(Schema):
+    """
+    更新用例入参校验Schema（所有字段可选）
+
+    与CaseCreateSchema的差异:
+        - 全部字段可选（partial更新，只校验传入字段）
+        - 不含case_id字段（业务编号不可修改，由URL路径参数定位）
+        - unknown=EXCLUDE: body中回传的case_id等未知字段静默忽略，
+          兼容前端编辑表单回传完整对象的习惯
+
+    校验规则（传入才校验）:
+        - name长度1-200，module长度最大64，creator长度最大64
+        - priority只允许P0-P3，case_type只允许api/chip，
+          status只允许active/disabled
+    """
+
+    class Meta:
+        """未知字段处理策略: 静默忽略（case_id回传不报错也不生效）"""
+
+        unknown = EXCLUDE
+
+    name = fields.String(validate=validate.Length(min=1, max=200))
+    module = fields.String(validate=validate.Length(max=64))
+    priority = fields.String(
+        validate=validate.OneOf(["P0", "P1", "P2", "P3"])
+    )
+    case_type = fields.String(validate=validate.OneOf(["api", "chip"]))
+    status = fields.String(validate=validate.OneOf(["active", "disabled"]))
+    description = fields.String()
+    creator = fields.String(validate=validate.Length(max=64))
 
 
 def _parse_int_param(name: str, default: int) -> int:
@@ -79,6 +168,86 @@ def _parse_optional_str(name: str) -> Optional[str]:
         return None
     stripped = raw_value.strip()
     return stripped if stripped else None
+
+
+def _get_json_body() -> dict:
+    """
+    获取JSON请求体（内部方法）
+
+    请求体缺失、非JSON格式或非JSON对象（如数组）时抛ValidationError；
+    空对象{}为合法请求体（由后续Schema校验兜底必填字段）。
+
+    参数:
+        无
+
+    返回:
+        dict: 解析后的JSON对象请求体
+
+    异常:
+        ValidationError: 请求体缺失/非JSON格式/非JSON对象时抛出
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise ValidationError("请求体必须为JSON格式")
+    return body
+
+
+def _format_field_errors(messages: dict) -> str:
+    """
+    格式化marshmallow字段校验错误（内部方法）
+
+    将形如{"priority": ["Must be one of: P0..."]}的错误字典
+    拼接为"priority: Must be one of: P0..."的可读文本，
+    保证错误message中包含具体字段名，便于客户端定位问题字段。
+
+    参数:
+        messages (dict): marshmallow ValidationError.messages错误字典
+
+    返回:
+        str: "字段名: 错误1; 错误2"格式文本，多字段以中文逗号分隔
+
+    异常:
+        无
+    """
+    parts: list[str] = []
+    for field, errors in messages.items():
+        if isinstance(errors, (list, tuple)):
+            text = "; ".join(str(item) for item in errors)
+        else:
+            text = str(errors)
+        parts.append(f"{field}: {text}")
+    return "，".join(parts)
+
+
+def _load_case_payload(
+    schema: Schema, body: dict, partial: bool = False
+) -> dict:
+    """
+    用marshmallow Schema校验并加载请求体（内部方法）
+
+    校验失败时将marshmallow.ValidationError转换为项目统一
+    ValidationError(400)，message含具体字段错误，detail携带
+    结构化错误字典（字段名→错误列表）。
+
+    参数:
+        schema (Schema): marshmallow Schema实例
+                         （CaseCreateSchema/CaseUpdateSchema）
+        body (dict): JSON请求体字典
+        partial (bool): 是否partial校验（更新场景全字段可选），默认False
+
+    返回:
+        dict: 校验通过并应用缺省值后的字段字典
+
+    异常:
+        ValidationError: 入参校验失败时抛出（已转换项目统一格式）
+    """
+    try:
+        return schema.load(body, partial=partial)
+    except marshmallow.ValidationError as exc:
+        raise ValidationError(
+            f"用例入参校验失败: {_format_field_errors(exc.messages)}",
+            detail=exc.messages,
+        ) from exc
 
 
 @cases_bp.route("/")
@@ -139,3 +308,133 @@ def list_cases():
         page_size=page_size,
     )
     return success(data=result)
+
+
+@cases_bp.route("/", methods=["POST"])
+def create_case():
+    """
+    创建用例接口
+
+    请求体（JSON，经CaseCreateSchema校验）:
+        case_id     必填，长度1-64，业务编号唯一
+        name        必填，长度1-200
+        module      可选，默认"default"
+        priority    可选，P0-P3，默认"P2"
+        case_type   可选，api/chip，默认"api"
+        status      可选，active/disabled，默认"active"
+        description 可选，默认""
+        creator     可选，长度最大64，默认"admin"
+
+    参数:
+        无（从request.get_json解析请求体）
+
+    返回:
+        tuple[dict, int]: (统一响应体, 201)，data为新建用例完整字段
+
+    异常:
+        ValidationError: 请求体非JSON / 入参校验失败时抛出（400）
+        ConflictError: case_id已存在时抛出（409）
+    """
+    # 1. 请求体解析与Schema校验
+    body = _get_json_body()
+    data = _load_case_payload(CaseCreateSchema(), body)
+
+    # 2. 调用核心层创建（编号重复转409，数据库异常原样上抛兜底500）
+    try:
+        case = CaseManager.create_case(data)
+    except CaseManagerError as exc:
+        if "已存在" in str(exc):
+            raise ConflictError(
+                "用例编号已存在", detail={"case_id": data.get("case_id")}
+            ) from exc
+        raise
+
+    return created(data=case)
+
+
+@cases_bp.route("/<case_id>")
+def get_case(case_id: str):
+    """
+    用例详情接口
+
+    参数:
+        case_id (str): 业务用例编号（URL路径参数）
+
+    返回:
+        tuple[dict, int]: (统一响应体, 200)，data为用例完整字段
+
+    异常:
+        NotFoundError: 用例不存在时抛出（404）
+    """
+    case = CaseManager.get_case(case_id)
+    if case is None:
+        raise NotFoundError("用例不存在", detail={"case_id": case_id})
+    return success(data=case)
+
+
+@cases_bp.route("/<case_id>", methods=["PUT"])
+def update_case(case_id: str):
+    """
+    更新用例接口（只更新传入字段）
+
+    请求体（JSON，经CaseUpdateSchema校验，全字段可选）:
+        name/module/priority/case_type/status/description/creator
+        任意子集；case_id不可修改（body中回传被静默忽略）
+
+    参数:
+        case_id (str): 业务用例编号（URL路径参数定位目标用例）
+
+    返回:
+        tuple[dict, int]: (统一响应体, 200)，data为更新后用例完整字段
+
+    异常:
+        ValidationError: 请求体非JSON / 入参校验失败 /
+                         无任何待更新字段时抛出（400）
+        NotFoundError: 用例不存在时抛出（404）
+    """
+    # 1. 请求体解析与Schema校验（partial=True全字段可选）
+    body = _get_json_body()
+    data = _load_case_payload(CaseUpdateSchema(), body, partial=True)
+
+    # 2. 空更新防御: 校验后无任何可更新字段直接拒绝
+    if not data:
+        raise ValidationError("至少提供一个待更新字段")
+
+    # 3. 调用核心层更新（用例不存在转404，数据库异常原样上抛兜底500）
+    try:
+        case = CaseManager.update_case(case_id, data)
+    except CaseManagerError as exc:
+        if "不存在" not in str(exc):
+            raise
+        raise NotFoundError(
+            "用例不存在", detail={"case_id": case_id}
+        ) from exc
+
+    return success(data=case)
+
+
+@cases_bp.route("/<case_id>", methods=["DELETE"])
+def delete_case(case_id: str):
+    """
+    删除用例接口（物理删除）
+
+    参数:
+        case_id (str): 业务用例编号（URL路径参数）
+
+    返回:
+        tuple[str, int]: ("", 204)，按HTTP语义204不携带响应体
+
+    异常:
+        NotFoundError: 用例不存在时抛出（404）
+    """
+    # 核心层删除（用例不存在转404，数据库异常原样上抛兜底500）
+    try:
+        CaseManager.delete_case(case_id)
+    except CaseManagerError as exc:
+        if "不存在" not in str(exc):
+            raise
+        raise NotFoundError(
+            "用例不存在", detail={"case_id": case_id}
+        ) from exc
+
+    return no_content()
