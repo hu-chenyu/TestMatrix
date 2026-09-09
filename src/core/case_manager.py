@@ -42,6 +42,15 @@
       LIKE不区分大小写），返回items/total/page/page_size/total_pages
       分页结构；与list_cases并存（后者为内部链路保留，保持向后兼容）
 
+功能（第三阶段Day20交付）:
+    - 用例详情查询 get_case: 按业务编号查询单条用例，不存在返回None
+      （由路由层负责转NotFoundError，核心层不感知HTTP语义）
+    - 用例创建 create_case: case_id查重（已存在抛CaseManagerError）后
+      插入，priority统一转大写入库（与list_cases查询口径对齐）
+    - 用例更新 update_case: 只更新传入字段、未传字段保持不变，case_id
+      业务编号不可变，updated_at由模型onupdate=func.now()自动刷新
+    - 用例删除 delete_case: 按业务编号物理删除，不存在抛CaseManagerError
+
 使用示例:
     from src.core.case_manager import CaseManager, generate_execution_id
 
@@ -531,6 +540,254 @@ class CaseManager:
             f"每页: {page_size}"
         )
         return result
+
+    # ------------------------------------------------------------------
+    # 用例CRUD（第三阶段Day20，Web用例管理API专用）
+    # ------------------------------------------------------------------
+    @classmethod
+    def get_case(cls, case_id: str) -> Optional[dict]:
+        """
+        按业务编号查询单条用例
+
+        查询规则:
+            - 按业务编号case_id精确匹配（非自增主键id）
+            - 不存在时返回None，由路由层负责转NotFoundError，
+              核心层不感知HTTP语义
+
+        参数:
+            case_id (str): 业务用例编号，如TM-API-0001
+
+        返回:
+            dict | None: 命中时返回含全部字段的用例字典（时间为ISO
+                         格式字符串）；未命中返回None
+
+        异常:
+            CaseManagerError: 数据库查询异常时抛出（context携带
+                              operation与case_id定位信息）
+        """
+        try:
+            with DatabaseSession.session_scope() as session:
+                row = (
+                    session.query(TestCase).filter_by(case_id=case_id).first()
+                )
+                return cls._to_dict(row) if row is not None else None
+        except SQLAlchemyError as exc:
+            logger.error(f"用例详情查询数据库异常 | 用例: {case_id} | {exc}")
+            raise CaseManagerError(
+                f"用例详情查询数据库异常: {exc}",
+                context={"operation": "get_case", "case_id": case_id},
+            ) from exc
+
+    @classmethod
+    def create_case(cls, data: dict) -> dict:
+        """
+        创建用例
+
+        执行流程:
+            1. 防御校验case_id/name非空（路由层Schema已校验，两层各自兜底）
+            2. priority统一转大写后入库（与list_cases查询口径对齐）
+            3. case_id查重: 已存在则抛CaseManagerError（由路由层转
+               ConflictError，防唯一约束在数据库层裸抛）
+            4. 插入TestCase实例，flush+refresh取回库端生成字段
+               （自增id/created_at/updated_at），提交后返回_to_dict结果
+
+        参数:
+            data (dict): 已校验的字段字典（case_id/name必填，
+                         module/priority/case_type/status/description/
+                         creator可选，缺省走模型默认值）
+
+        返回:
+            dict: 新建用例的完整字段字典（含库端生成的
+                  id/created_at/updated_at）
+
+        异常:
+            CaseManagerError: case_id或name为空 / case_id已存在 /
+                              数据库操作异常时抛出，context携带
+                              operation与case_id定位信息
+        """
+        # 防御校验: 必填字段非空（路由层Schema已拦截，此处兜底）
+        case_id_value = str(data.get("case_id") or "").strip()
+        name_value = str(data.get("name") or "").strip()
+        if not case_id_value:
+            raise CaseManagerError(
+                "用例编号不能为空",
+                context={"operation": "create_case"},
+            )
+        if not name_value:
+            raise CaseManagerError(
+                "用例名称不能为空",
+                context={"operation": "create_case", "case_id": case_id_value},
+            )
+
+        # priority统一大写（与list_cases/list_cases_paged查询口径对齐）
+        payload = dict(data)
+        payload["case_id"] = case_id_value
+        payload["name"] = name_value
+        payload["priority"] = str(payload.get("priority", "P2")).strip().upper()
+
+        try:
+            with DatabaseSession.session_scope() as session:
+                # 查重: 唯一冲突提前转为业务异常（防数据库层裸抛IntegrityError）
+                existing = (
+                    session.query(TestCase)
+                    .filter_by(case_id=case_id_value)
+                    .first()
+                )
+                if existing is not None:
+                    raise CaseManagerError(
+                        "用例编号已存在",
+                        context={
+                            "operation": "create_case",
+                            "case_id": case_id_value,
+                        },
+                    )
+
+                case = TestCase(
+                    case_id=case_id_value,
+                    name=name_value,
+                    module=payload.get("module", "default"),
+                    priority=payload["priority"],
+                    case_type=payload.get("case_type", "api"),
+                    status=payload.get("status", "active"),
+                    description=payload.get("description", ""),
+                    creator=payload.get("creator", "admin"),
+                )
+                session.add(case)
+                # flush触发INSERT，refresh取回库端生成字段
+                # （自增id/created_at），保证_to_dict字段完整
+                session.flush()
+                session.refresh(case)
+                result = cls._to_dict(case)
+        except SQLAlchemyError as exc:
+            logger.error(
+                f"用例创建数据库异常 | 用例: {case_id_value} | {exc}"
+            )
+            raise CaseManagerError(
+                f"用例创建数据库异常: {exc}",
+                context={"operation": "create_case", "case_id": case_id_value},
+            ) from exc
+
+        logger.info(
+            f"用例已创建 | 编号: {case_id_value} | 名称: {name_value} | "
+            f"优先级: {payload['priority']}"
+        )
+        return result
+
+    @classmethod
+    def update_case(cls, case_id: str, data: dict) -> dict:
+        """
+        按业务编号更新用例（只更新传入字段）
+
+        更新规则:
+            - 未传字段保持原值不变（逐字段setattr，不做全量覆盖）
+            - case_id业务编号不可变（id/case_id/created_at防御性剔除，
+              路由层UpdateSchema同样不含case_id，两层保障）
+            - priority若传入则统一转大写（与查询口径对齐）
+            - updated_at由模型onupdate=func.now()自动刷新，
+              无需手动设置
+
+        参数:
+            case_id (str): 业务用例编号（URL路径参数定位目标用例）
+            data (dict): 待更新字段字典（name/module/priority/case_type/
+                         status/description/creator任意子集）
+
+        返回:
+            dict: 更新后用例的完整字段字典
+
+        异常:
+            CaseManagerError: case_id为空 / 用例不存在 / 数据库操作
+                              异常时抛出，context携带operation与
+                              case_id定位信息
+        """
+        if not case_id or not str(case_id).strip():
+            raise CaseManagerError(
+                "用例编号不能为空",
+                context={"operation": "update_case"},
+            )
+
+        # 防御性剔除不可变字段（业务编号/主键/创建时间不随更新变化）
+        payload = dict(data)
+        for immutable_field in ("id", "case_id", "created_at"):
+            payload.pop(immutable_field, None)
+        # priority统一大写（与list_cases/list_cases_paged查询口径对齐）
+        if "priority" in payload:
+            payload["priority"] = str(payload["priority"]).strip().upper()
+
+        try:
+            with DatabaseSession.session_scope() as session:
+                row = (
+                    session.query(TestCase).filter_by(case_id=case_id).first()
+                )
+                if row is None:
+                    raise CaseManagerError(
+                        "用例不存在",
+                        context={"operation": "update_case", "case_id": case_id},
+                    )
+                for field, value in payload.items():
+                    setattr(row, field, value)
+                # flush触发UPDATE（onupdate自动刷新updated_at），
+                # refresh取回库端最新值
+                session.flush()
+                session.refresh(row)
+                result = cls._to_dict(row)
+        except SQLAlchemyError as exc:
+            logger.error(f"用例更新数据库异常 | 用例: {case_id} | {exc}")
+            raise CaseManagerError(
+                f"用例更新数据库异常: {exc}",
+                context={"operation": "update_case", "case_id": case_id},
+            ) from exc
+
+        logger.info(
+            f"用例已更新 | 编号: {case_id} | 更新字段: {sorted(payload.keys())}"
+        )
+        return result
+
+    @classmethod
+    def delete_case(cls, case_id: str) -> bool:
+        """
+        按业务编号物理删除用例
+
+        删除规则:
+            - 物理删除（DELETE行级删除，非status=disabled软删除）
+            - 不存在时抛CaseManagerError（由路由层转NotFoundError）
+
+        参数:
+            case_id (str): 业务用例编号
+
+        返回:
+            bool: 删除成功返回True（不存在时抛异常，不返回False）
+
+        异常:
+            CaseManagerError: case_id为空 / 用例不存在 / 数据库操作
+                              异常时抛出，context携带operation与
+                              case_id定位信息
+        """
+        if not case_id or not str(case_id).strip():
+            raise CaseManagerError(
+                "用例编号不能为空",
+                context={"operation": "delete_case"},
+            )
+
+        try:
+            with DatabaseSession.session_scope() as session:
+                row = (
+                    session.query(TestCase).filter_by(case_id=case_id).first()
+                )
+                if row is None:
+                    raise CaseManagerError(
+                        "用例不存在",
+                        context={"operation": "delete_case", "case_id": case_id},
+                    )
+                session.delete(row)
+        except SQLAlchemyError as exc:
+            logger.error(f"用例删除数据库异常 | 用例: {case_id} | {exc}")
+            raise CaseManagerError(
+                f"用例删除数据库异常: {exc}",
+                context={"operation": "delete_case", "case_id": case_id},
+            ) from exc
+
+        logger.info(f"用例已删除 | 编号: {case_id}")
+        return True
 
     # ------------------------------------------------------------------
     # 执行调度（第二阶段Day2）
