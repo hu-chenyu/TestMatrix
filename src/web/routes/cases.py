@@ -13,6 +13,10 @@
       case_id业务编号不可修改，空body返回400）
     - DELETE /api/cases/<case_id> 删除用例（物理删除，成功204无响应体）
 
+功能（第三阶段Day21交付）:
+    - POST /api/cases/import      用例批量导入（YAML/Excel上传 →
+      DataDriver解析 → 幂等upsert入库，返回导入统计）
+
 入参校验说明:
     - 请求体经marshmallow Schema校验（必填/长度/枚举），
       校验失败抛ValidationError(400)，message含具体字段错误
@@ -20,11 +24,16 @@
       用例不存在转NotFoundError(404)
 """
 
+import os
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Optional
 
 import marshmallow
 from flask import Blueprint, request
 from marshmallow import EXCLUDE, Schema, fields, validate
+from werkzeug.utils import secure_filename
 
 from src.core.case_manager import MAX_PAGE_SIZE, CaseManager, CaseManagerError
 from src.web.exceptions import (
@@ -45,6 +54,9 @@ VALID_CASE_STATUSES = ("active", "disabled", "all")
 # 分页参数默认值
 DEFAULT_PAGE = 1
 DEFAULT_PAGE_SIZE = 20
+
+# 批量导入支持的文件后缀（与DataDriver支持的格式对齐）
+IMPORT_SUFFIXES = (".yaml", ".yml", ".xlsx")
 
 
 # ===========================================================================
@@ -438,3 +450,85 @@ def delete_case(case_id: str):
         ) from exc
 
     return no_content()
+
+
+@cases_bp.route("/import", methods=["POST"])
+def import_cases():
+    """
+    用例批量导入接口（YAML/Excel上传 → DataDriver解析 → 幂等upsert入库）
+
+    请求格式:
+        multipart/form-data，文件字段名固定为"file"，
+        文件后缀仅支持.yaml/.yml/.xlsx
+
+    查询参数（均可选）:
+        sheet_name (str): Excel的sheet名称（仅.xlsx生效），默认None读活动sheet
+        creator (str): 用例创建人（仅首次插入时写入），默认"admin"
+
+    执行流程:
+        1. 校验上传文件存在性与后缀合法性（未上传/格式不支持 → 400）
+        2. secure_filename清洗文件名后保存到临时目录（防路径遍历攻击）
+        3. 调CaseManager.sync_cases_from_file解析并逐条upsert入库
+           （case_id存在则更新业务字段，不存在则插入，天然幂等）
+        4. finally清理临时文件与临时目录，防止磁盘泄漏
+
+    参数:
+        无（从request.files与request.args解析）
+
+    返回:
+        tuple[dict, int]: (统一响应体, 200)，data为导入统计:
+            {"file_name": 原始文件名, "total": 加载总数,
+             "inserted": 新增数, "updated": 更新数}
+
+    异常:
+        ValidationError: 未上传文件 / 后缀不支持 / 数据校验失败
+                       （DataDriver校验错误透传，含行号与字段名）时抛出（400）
+        CaseManagerError: 其他核心层异常原样上抛（兜底500）
+    """
+    # 1. 获取上传文件（未上传或文件名为空视为非法请求）
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        raise ValidationError("未上传用例数据文件")
+    original_name = upload.filename
+
+    # 2. 后缀白名单校验（空后缀时用文件名定位问题）
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in IMPORT_SUFFIXES:
+        raise ValidationError(
+            f"不支持的文件格式: {suffix or original_name}，"
+            f"仅支持 {'/'.join(IMPORT_SUFFIXES)}"
+        )
+
+    # 3. 查询参数解析（sheet_name仅Excel生效；creator缺省admin）
+    sheet_name = _parse_optional_str("sheet_name")
+    creator = _parse_optional_str("creator") or "admin"
+
+    # 4. 清洗文件名后落盘临时目录（secure_filename剥离路径分隔符等危险字符）
+    tmp_dir = tempfile.mkdtemp(prefix="tm_case_import_")
+    tmp_file = Path(tmp_dir) / secure_filename(original_name)
+    try:
+        upload.save(tmp_file)
+
+        # 5. 调核心层同步入库（数据校验失败转400，数据库异常原样上抛兜底500）
+        try:
+            stats = CaseManager.sync_cases_from_file(
+                tmp_file, sheet_name=sheet_name, creator=creator
+            )
+        except CaseManagerError as exc:
+            if "数据加载失败" in str(exc):
+                raise ValidationError(str(exc)) from exc
+            raise
+    finally:
+        # 临时文件与临时目录必须清理（ignore_errors防Windows句柄残留导致的报错）
+        if tmp_file.exists():
+            os.remove(tmp_file)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return success(
+        data={
+            "file_name": original_name,
+            "total": stats["total"],
+            "inserted": stats["inserted"],
+            "updated": stats["updated"],
+        }
+    )
