@@ -1096,6 +1096,245 @@ class CaseManager:
         return summary
 
     # ------------------------------------------------------------------
+    # 执行记录查询（第三阶段Day22，Web执行记录查询API专用）
+    # ------------------------------------------------------------------
+    @classmethod
+    def list_executions_paged(cls, page: int = 1, page_size: int = 20) -> dict:
+        """
+        执行批次分页查询（Web执行批次列表API专用）
+
+        数据口径:
+            只返回已完成批次（finish_execution后才有defect_statistics
+            汇总记录），未finish的执行中批次不在本接口范围
+
+        排序规则:
+            created_at倒序（最新完成批次在前）+ execution_id倒序，
+            双字段排序保证同秒完成的批次跨页次序稳定
+
+        参数:
+            page (int): 页码，从1开始，默认1
+            page_size (int): 每页条数，1到MAX_PAGE_SIZE，默认20
+
+        返回:
+            dict: {"items": 当前页批次汇总列表(list[dict]),
+                   "total": 已完成批次总数,
+                   "page": 当前页码,
+                   "page_size": 每页条数,
+                   "total_pages": 总页数，ceil(total/page_size)}
+
+        异常:
+            CaseManagerError: 分页参数非法 / 数据库查询异常时抛出，
+                              context携带operation定位信息
+        """
+        # 分页参数防御校验（口径与list_cases_paged一致: bool是int子类
+        # 需显式排除，非法limit/offset提前拦截给出业务友好提示）
+        if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+            raise CaseManagerError(
+                f"page必须为大于等于1的整数: {page!r}",
+                context={"operation": "list_executions_paged", "page": page},
+            )
+        if (
+            not isinstance(page_size, int)
+            or isinstance(page_size, bool)
+            or page_size < 1
+            or page_size > MAX_PAGE_SIZE
+        ):
+            raise CaseManagerError(
+                f"page_size必须在1到{MAX_PAGE_SIZE}之间: {page_size!r}",
+                context={
+                    "operation": "list_executions_paged",
+                    "page_size": page_size,
+                },
+            )
+
+        try:
+            session = DatabaseSession.get_session()
+            try:
+                # 已完成批次总数（独立count查询，空表时为0不报错）
+                total = session.query(DefectStatistic).count()
+
+                # 数据库层分页: created_at倒序（最新完成批次在前）+
+                # execution_id倒序做次级排序，保证同秒批次跨页次序稳定
+                rows = (
+                    session.query(DefectStatistic)
+                    .order_by(
+                        DefectStatistic.created_at.desc(),
+                        DefectStatistic.execution_id.desc(),
+                    )
+                    .limit(page_size)
+                    .offset((page - 1) * page_size)
+                    .all()
+                )
+            finally:
+                session.close()
+        except SQLAlchemyError as exc:
+            logger.error(f"执行批次分页查询数据库异常 | {exc}")
+            raise CaseManagerError(
+                f"执行批次分页查询数据库异常: {exc}",
+                context={"operation": "list_executions_paged"},
+            ) from exc
+
+        # 总页数: 整数运算实现向上取整（与list_cases_paged口径一致），
+        # 0条时为0页
+        total_pages = (total + page_size - 1) // page_size
+        result = {
+            "items": [cls._execution_summary_to_dict(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+        }
+        logger.info(
+            f"执行批次分页查询完成 | 命中: {total}个批次 | "
+            f"页: {page}/{total_pages} | 每页: {page_size}"
+        )
+        return result
+
+    @classmethod
+    def get_execution_detail(cls, execution_id: str) -> Optional[dict]:
+        """
+        查询执行批次详情（汇总统计 + 单用例执行明细）
+
+        执行流程:
+            1. 查defect_statistics汇总记录，不存在返回None
+               （路由层据此转404；未finish的执行中批次无汇总记录）
+            2. 查test_executions该批次全部明细，按id升序
+               （与record_execution写入顺序一致，即执行先后顺序）
+            3. 汇总与明细组装为summary/items双层数据结构返回
+
+        参数:
+            execution_id (str): 执行批次号
+
+        返回:
+            dict | None: {"summary": 批次汇总字典,
+                          "items": 单用例明细列表(list[dict])}；
+                         批次不存在（无汇总记录）时返回None
+
+        异常:
+            CaseManagerError: 批次号为空 / 数据库查询异常时抛出，
+                              context携带operation定位信息
+        """
+        # 批次号基础校验（空字符串/空白串直接拒绝）
+        if not execution_id or not str(execution_id).strip():
+            raise CaseManagerError(
+                "执行批次号不能为空",
+                context={"operation": "get_execution_detail"},
+            )
+
+        try:
+            session = DatabaseSession.get_session()
+            try:
+                # 先查汇总记录（批次完成的标志），无记录即批次不存在
+                summary_row = (
+                    session.query(DefectStatistic)
+                    .filter_by(execution_id=execution_id)
+                    .first()
+                )
+                if summary_row is None:
+                    logger.debug(
+                        f"执行批次不存在（无汇总记录）| 批次: {execution_id}"
+                    )
+                    return None
+
+                # 再查明细: 按id升序保持执行先后顺序
+                records = (
+                    session.query(TestExecution)
+                    .filter_by(execution_id=execution_id)
+                    .order_by(TestExecution.id.asc())
+                    .all()
+                )
+            finally:
+                session.close()
+        except SQLAlchemyError as exc:
+            logger.error(
+                f"执行批次详情查询数据库异常 | 批次: {execution_id} | {exc}"
+            )
+            raise CaseManagerError(
+                f"执行批次详情查询数据库异常: {exc}",
+                context={
+                    "operation": "get_execution_detail",
+                    "execution_id": execution_id,
+                },
+            ) from exc
+
+        result = {
+            "summary": cls._execution_summary_to_dict(summary_row),
+            "items": [
+                cls._execution_record_to_dict(record) for record in records
+            ],
+        }
+        logger.info(
+            f"执行批次详情查询完成 | 批次: {execution_id} | "
+            f"明细: {len(records)}条"
+        )
+        return result
+
+    @staticmethod
+    def _execution_summary_to_dict(row: DefectStatistic) -> dict:
+        """
+        DefectStatistic模型行转字典（内部方法）
+
+        参数:
+            row (DefectStatistic): 批次汇总统计模型实例
+
+        返回:
+            dict: 批次汇总字段字典（created_at转ISO格式字符串，
+                  便于JSON序列化）
+
+        异常:
+            无
+        """
+        return {
+            "execution_id": row.execution_id,
+            "total_cases": row.total_cases,
+            "passed": row.passed,
+            "failed": row.failed,
+            "error": row.error,
+            "skipped": row.skipped,
+            "pass_rate": row.pass_rate,
+            "created_at": (
+                row.created_at.isoformat() if row.created_at else None
+            ),
+        }
+
+    @staticmethod
+    def _execution_record_to_dict(row: TestExecution) -> dict:
+        """
+        TestExecution模型行转字典（内部方法）
+
+        参数:
+            row (TestExecution): 单用例执行明细模型实例
+
+        返回:
+            dict: 单用例明细全量字段字典；start_time/end_time/
+                  error_message可空字段原样保留None（不转空串，
+                  保持与库内一致的空值语义，error_message即失败
+                  堆栈原样透传不截断）；datetime字段转ISO格式
+                  字符串便于JSON序列化
+
+        异常:
+            无
+        """
+        return {
+            "id": row.id,
+            "execution_id": row.execution_id,
+            "case_id": row.case_id,
+            "case_name": row.case_name,
+            "result": row.result,
+            "start_time": (
+                row.start_time.isoformat() if row.start_time else None
+            ),
+            "end_time": row.end_time.isoformat() if row.end_time else None,
+            "duration": row.duration,
+            "error_message": row.error_message,
+            "environment": row.environment,
+            "executor": row.executor,
+            "created_at": (
+                row.created_at.isoformat() if row.created_at else None
+            ),
+        }
+
+    # ------------------------------------------------------------------
     # 批次完成通知集成（第二阶段Day15）
     # ------------------------------------------------------------------
     @classmethod
