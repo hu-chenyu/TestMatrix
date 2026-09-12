@@ -33,6 +33,16 @@
         * get_pass_rate_trend   通过率浮点列表（前端折线图直接消费）
     - db模型采用函数内延迟导入，规避core与db模块循环依赖
 
+已实现能力（Day23）:
+    - ReportRepository统计聚合扩展（Web报告统计/质量度量API数据源）:
+        * get_overview_summary       全局汇总（批次数/累计执行/加权通过率/
+                                     最新批次）
+        * get_module_distribution    模块执行分布（明细outerjoin用例表，
+                                     悬空历史归unknown模块）
+        * get_failed_top             失败用例Top榜（失败次数聚合+最近堆栈）
+        * get_quality_metrics        质量度量（覆盖率/缺陷密度/问题用例占比/
+                                     执行效率，code_coverage契约预留null）
+
 规划能力:
     - 测试报告邮件推送（基于smtplib，依赖TM_EMAIL_*配置）
 """
@@ -1096,3 +1106,463 @@ class ReportRepository:
         return [
             item["pass_rate"] for item in ReportRepository.get_trend_data(limit=limit)
         ]
+
+    # ------------------------------------------------------------------
+    # 统计聚合扩展（Day23，Web报告统计/质量度量API专用）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def get_overview_summary() -> Dict[str, Any]:
+        """
+        全局执行汇总（Web报告汇总API数据源）
+
+        基于 defect_statistics 全表聚合：批次数/累计执行用例次/各结果
+        累计计数/加权通过率/最新批次。overall_pass_rate 必须用
+        总通过数/总执行数的加权口径（而非批次pass_rate算术平均，
+        小批次与大批次等权平均会歪曲真实质量水位）。
+
+        参数:
+            无
+
+        返回:
+            Dict[str, Any]: {"total_batches": 批次数,
+                             "total_executed": 累计执行用例次,
+                             "passed"/"failed"/"error"/"skipped": 各结果累计数,
+                             "overall_pass_rate": 加权通过率（round 4位，
+                               分母为0时0.0）,
+                             "latest_batch": 最近批次
+                               {"execution_id", "pass_rate", "created_at"}，
+                               空表时为None}
+
+        异常:
+            sqlalchemy.exc.SQLAlchemyError: 数据库异常时记录error日志后
+                                            原样上抛（不吞异常）
+        """
+        # 延迟导入: 规避core与db模块循环依赖
+        from sqlalchemy import func
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from src.db.db_session import DatabaseSession
+        from src.db.models import DefectStatistic
+
+        try:
+            session = DatabaseSession.get_session()
+            try:
+                # 单条聚合查询取全部计数（空表时count=0、sum经coalesce为0）
+                agg_row = (
+                    session.query(
+                        func.count(DefectStatistic.id),
+                        func.coalesce(
+                            func.sum(DefectStatistic.total_cases), 0
+                        ),
+                        func.coalesce(func.sum(DefectStatistic.passed), 0),
+                        func.coalesce(func.sum(DefectStatistic.failed), 0),
+                        func.coalesce(func.sum(DefectStatistic.error), 0),
+                        func.coalesce(func.sum(DefectStatistic.skipped), 0),
+                    )
+                    .one()
+                )
+                # 最新批次（与get_latest_statistics排序口径一致:
+                # created_at倒序+id倒序）
+                latest = (
+                    session.query(DefectStatistic)
+                    .order_by(
+                        DefectStatistic.created_at.desc(),
+                        DefectStatistic.id.desc(),
+                    )
+                    .first()
+                )
+            finally:
+                session.close()
+        except SQLAlchemyError as exc:
+            logger.error(f"全局汇总查询数据库异常 | {exc}")
+            raise
+
+        # int()统一类型（跨库SUM可能返回Decimal，保证JSON可序列化）
+        total_batches = int(agg_row[0])
+        total_executed = int(agg_row[1])
+        passed = int(agg_row[2])
+        failed = int(agg_row[3])
+        error = int(agg_row[4])
+        skipped = int(agg_row[5])
+
+        # 加权通过率: 总通过数/总执行数（分母0时0.0）
+        overall_pass_rate = (
+            round(passed / total_executed, 4) if total_executed else 0.0
+        )
+
+        latest_batch = None
+        if latest is not None:
+            latest_batch = {
+                "execution_id": latest.execution_id,
+                "pass_rate": latest.pass_rate,
+                "created_at": (
+                    latest.created_at.isoformat()
+                    if latest.created_at
+                    else None
+                ),
+            }
+
+        logger.info(
+            f"全局汇总查询完成 | 批次: {total_batches} | "
+            f"累计执行: {total_executed} | 加权通过率: {overall_pass_rate:.2%}"
+        )
+        return {
+            "total_batches": total_batches,
+            "total_executed": total_executed,
+            "passed": passed,
+            "failed": failed,
+            "error": error,
+            "skipped": skipped,
+            "overall_pass_rate": overall_pass_rate,
+            "latest_batch": latest_batch,
+        }
+
+    @staticmethod
+    def get_module_distribution() -> List[Dict[str, Any]]:
+        """
+        模块执行分布（Web模块分布饼图数据源）
+
+        test_executions LEFT OUTER JOIN test_cases（两表case_id相等）后
+        按 module + result 分组计数，Python层透视为每模块一条汇总。
+        必须outerjoin: Day20用例是物理删除，历史执行明细的case_id可能
+        在用例表已不存在，这类悬空记录module为None，Python层归
+        "unknown"模块（inner join会丢弃历史数据，违反统计完整性）。
+
+        参数:
+            无
+
+        返回:
+            List[Dict[str, Any]]: 每模块一条，字段:
+                {"module", "total", "passed", "failed", "error", "skipped",
+                 "pass_rate"}（pass_rate=passed/total，round 4位，
+                total为0时0.0）；排序: total降序 -> module升序；
+                空表返回[]
+
+        异常:
+            sqlalchemy.exc.SQLAlchemyError: 数据库异常时记录error日志后
+                                            原样上抛（不吞异常）
+        """
+        # 延迟导入: 规避core与db模块循环依赖
+        from sqlalchemy import func
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from src.db.db_session import DatabaseSession
+        from src.db.models import TestCase, TestExecution
+
+        try:
+            session = DatabaseSession.get_session()
+            try:
+                # outerjoin保证悬空明细不丢（module为None）
+                rows = (
+                    session.query(
+                        TestCase.module,
+                        TestExecution.result,
+                        func.count(TestExecution.id),
+                    )
+                    .outerjoin(
+                        TestCase, TestExecution.case_id == TestCase.case_id
+                    )
+                    .group_by(TestCase.module, TestExecution.result)
+                    .all()
+                )
+            finally:
+                session.close()
+        except SQLAlchemyError as exc:
+            logger.error(f"模块分布聚合查询数据库异常 | {exc}")
+            raise
+
+        if not rows:
+            return []
+
+        # pivot: (module, result, count) -> 每模块一条全结果计数
+        valid_results = ("passed", "failed", "error", "skipped")
+        modules: Dict[str, Dict[str, Any]] = {}
+        for module, result, count in rows:
+            # 悬空明细module为None/空串时归unknown（不丢历史数据）
+            module_name = module if module else UNKNOWN_LABEL
+            bucket = modules.setdefault(
+                module_name,
+                {
+                    "module": module_name,
+                    "total": 0,
+                    "passed": 0,
+                    "failed": 0,
+                    "error": 0,
+                    "skipped": 0,
+                },
+            )
+            bucket["total"] += count
+            if result in valid_results:
+                bucket[result] += count
+
+        # 补pass_rate后排序: total降序 -> module升序（输出稳定）
+        distribution: List[Dict[str, Any]] = []
+        for bucket in modules.values():
+            total = bucket["total"]
+            bucket["pass_rate"] = (
+                round(bucket["passed"] / total, 4) if total else 0.0
+            )
+            distribution.append(bucket)
+        distribution.sort(key=lambda item: (-item["total"], item["module"]))
+
+        logger.info(
+            f"模块分布聚合完成 | 模块数: {len(distribution)} | "
+            f"明细分布: {[(item['module'], item['total']) for item in distribution]}"
+        )
+        return distribution
+
+    @staticmethod
+    def get_failed_top(limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        失败用例Top榜（Web失败Top数据源）
+
+        筛选 result in (failed, error) 的明细，按 case_id 分组聚合
+        失败次数，取Top N；每个入围case补查最近一次失败记录的
+        error_message（原样透传不截断，供失败详情展示）。
+
+        参数:
+            limit (int): 返回条数上限，默认10，1到100
+
+        返回:
+            List[Dict[str, Any]]: 每失败用例一条，字段:
+                {"case_id", "case_name", "fail_count",
+                 "last_failed_at": 最近一次失败created_at（ISO字符串）,
+                 "last_error_message": 最近一次失败的异常信息（可能为None）}；
+                排序: fail_count降序 -> case_id升序；无失败记录返回[]
+
+        异常:
+            ValueError: limit非整数/为bool/不在1到100区间时抛出
+            sqlalchemy.exc.SQLAlchemyError: 数据库异常时记录error日志后
+                                            原样上抛（不吞异常）
+        """
+        # limit防御校验（bool是int子类需显式排除）
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 1
+            or limit > 100
+        ):
+            raise ValueError(f"limit必须在1到100之间: {limit!r}")
+
+        # 延迟导入: 规避core与db模块循环依赖
+        from sqlalchemy import func
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from src.db.db_session import DatabaseSession
+        from src.db.models import TestExecution
+
+        failed_results = ("failed", "error")
+        try:
+            session = DatabaseSession.get_session()
+            try:
+                # 分组聚合: case_id+case_name -> 失败次数
+                grouped = (
+                    session.query(
+                        TestExecution.case_id,
+                        TestExecution.case_name,
+                        func.count(TestExecution.id).label("fail_count"),
+                    )
+                    .filter(TestExecution.result.in_(failed_results))
+                    .group_by(TestExecution.case_id, TestExecution.case_name)
+                    .order_by(
+                        func.count(TestExecution.id).desc(),
+                        TestExecution.case_id.asc(),
+                    )
+                    .limit(limit)
+                    .all()
+                )
+                if not grouped:
+                    return []
+
+                # 入围case补查最近一次失败记录（Top榜最多limit条，
+                # 小样本N+1查询可接受；created_at+id双字段保证同秒稳定）
+                top_items: List[Dict[str, Any]] = []
+                for case_id, case_name, fail_count in grouped:
+                    last_record = (
+                        session.query(TestExecution)
+                        .filter(
+                            TestExecution.case_id == case_id,
+                            TestExecution.result.in_(failed_results),
+                        )
+                        .order_by(
+                            TestExecution.created_at.desc(),
+                            TestExecution.id.desc(),
+                        )
+                        .first()
+                    )
+                    top_items.append(
+                        {
+                            "case_id": case_id,
+                            "case_name": case_name,
+                            "fail_count": fail_count,
+                            "last_failed_at": (
+                                last_record.created_at.isoformat()
+                                if last_record and last_record.created_at
+                                else None
+                            ),
+                            "last_error_message": (
+                                last_record.error_message
+                                if last_record
+                                else None
+                            ),
+                        }
+                    )
+            finally:
+                session.close()
+        except SQLAlchemyError as exc:
+            logger.error(f"失败Top聚合查询数据库异常 | {exc}")
+            raise
+
+        logger.info(
+            f"失败Top聚合完成 | 入围: {len(top_items)}个用例 | "
+            f"榜首: {top_items[0]['case_id']} x{top_items[0]['fail_count']}次"
+        )
+        return top_items
+
+    @staticmethod
+    def get_quality_metrics() -> Dict[str, Any]:
+        """
+        质量度量指标（Web质量度量API数据源）
+
+        三组指标全部来自三张表现有数据（不引入外部覆盖率工具）:
+            - case_execution_coverage 用例执行覆盖率 =
+              历史明细distinct case_id数 / active用例总数
+            - defect_density 缺陷密度 =
+              failed+error明细数 / 全部明细数
+            - problem_case_ratio 问题用例占比 =
+              出现过failed/error的distinct case_id数 / active用例总数
+            - execution_efficiency 执行效率:
+              avg_duration_sec（全部明细耗时均值）、p95_duration_sec
+              （样本不足P95_MIN_SAMPLE_SIZE时取最大值近似，口径对齐
+              ReportStatistics._calc_duration_stats）、
+              avg_cases_per_batch（明细总数/批次数）
+
+        code_coverage为预留契约字段，当前恒为None（真实代码覆盖率
+        待Day81 pytest-cov接入后填充，禁止编造数值）。
+
+        参数:
+            无
+
+        返回:
+            Dict[str, Any]: {"case_execution_coverage", "defect_density",
+                             "problem_case_ratio",
+                             "execution_efficiency": {"avg_duration_sec",
+                             "p95_duration_sec", "avg_cases_per_batch"},
+                             "code_coverage": None}；
+                             比率round 4位、耗时round 2位，
+                             空表/零除全部返回0.0
+
+        异常:
+            sqlalchemy.exc.SQLAlchemyError: 数据库异常时记录error日志后
+                                            原样上抛（不吞异常）
+        """
+        # 延迟导入: 规避core与db模块循环依赖
+        from sqlalchemy import func
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from src.db.db_session import DatabaseSession
+        from src.db.models import DefectStatistic, TestCase, TestExecution
+
+        failed_results = ("failed", "error")
+        try:
+            session = DatabaseSession.get_session()
+            try:
+                # 分母: active用例总数（disabled不计入覆盖率口径）
+                active_count = (
+                    session.query(func.count(TestCase.id))
+                    .filter(TestCase.status == "active")
+                    .scalar()
+                )
+                # 明细总数 与 执行过的distinct case_id数
+                detail_total = session.query(
+                    func.count(TestExecution.id)
+                ).scalar()
+                executed_case_count = session.query(
+                    func.count(func.distinct(TestExecution.case_id))
+                ).scalar()
+                # failed/error明细数 与 出过问题的distinct case_id数
+                problem_detail_count = (
+                    session.query(func.count(TestExecution.id))
+                    .filter(TestExecution.result.in_(failed_results))
+                    .scalar()
+                )
+                problem_case_count = (
+                    session.query(
+                        func.count(func.distinct(TestExecution.case_id))
+                    )
+                    .filter(TestExecution.result.in_(failed_results))
+                    .scalar()
+                )
+                # 批次数（avg_cases_per_batch分母）
+                batch_count = session.query(
+                    func.count(DefectStatistic.id)
+                ).scalar()
+                # 全部耗时（Python层算avg/p95，口径与_calc_duration_stats对齐）
+                duration_rows = session.query(TestExecution.duration).all()
+            finally:
+                session.close()
+        except SQLAlchemyError as exc:
+            logger.error(f"质量度量查询数据库异常 | {exc}")
+            raise
+
+        # 统一int()（跨库count返回类型差异）
+        active_count = int(active_count or 0)
+        detail_total = int(detail_total or 0)
+        executed_case_count = int(executed_case_count or 0)
+        problem_detail_count = int(problem_detail_count or 0)
+        problem_case_count = int(problem_case_count or 0)
+        batch_count = int(batch_count or 0)
+
+        # 三组比率指标（分母0时0.0）
+        case_execution_coverage = (
+            round(executed_case_count / active_count, 4)
+            if active_count
+            else 0.0
+        )
+        defect_density = (
+            round(problem_detail_count / detail_total, 4)
+            if detail_total
+            else 0.0
+        )
+        problem_case_ratio = (
+            round(problem_case_count / active_count, 4)
+            if active_count
+            else 0.0
+        )
+
+        # 执行效率: 耗时统计（空表明细0条时全部0.0）
+        durations = sorted(float(row[0] or 0.0) for row in duration_rows)
+        count = len(durations)
+        if count:
+            avg_duration_sec = round(sum(durations) / count, 2)
+            if count < P95_MIN_SAMPLE_SIZE:
+                # 小样本百分位无统计意义，取最大值近似（口径对齐_calc_duration_stats）
+                p95_duration_sec = round(durations[-1], 2)
+            else:
+                p95_index = math.ceil(0.95 * count) - 1
+                p95_duration_sec = round(durations[p95_index], 2)
+        else:
+            avg_duration_sec = 0.0
+            p95_duration_sec = 0.0
+        avg_cases_per_batch = (
+            round(count / batch_count, 2) if batch_count else 0.0
+        )
+
+        logger.info(
+            f"质量度量查询完成 | 覆盖率: {case_execution_coverage:.2%} | "
+            f"缺陷密度: {defect_density:.2%} | "
+            f"问题用例占比: {problem_case_ratio:.2%} | "
+            f"平均耗时: {avg_duration_sec}s"
+        )
+        return {
+            "case_execution_coverage": case_execution_coverage,
+            "defect_density": defect_density,
+            "problem_case_ratio": problem_case_ratio,
+            "execution_efficiency": {
+                "avg_duration_sec": avg_duration_sec,
+                "p95_duration_sec": p95_duration_sec,
+                "avg_cases_per_batch": avg_cases_per_batch,
+            },
+            # 预留契约字段: 真实代码覆盖率待Day81 pytest-cov接入后填充
+            "code_coverage": None,
+        }
