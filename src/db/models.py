@@ -1,9 +1,10 @@
 """
 SQLAlchemy数据模型模块
 
-定义测试平台4张核心表:
+定义测试平台5张核心表:
     test_cases               测试用例表（用例元信息管理）
     test_executions          测试执行记录表（单用例执行明细）
+    test_execution_batches   执行批次元信息表（异步批次状态机）
     defect_statistics        缺陷统计表（批次级执行汇总指标）
     notification_dead_letters 通知死信表（重试耗尽的通知留痕）
 
@@ -142,6 +143,107 @@ class TestExecution(Base):
         return (
             f"TestExecution(execution_id={self.execution_id!r}, "
             f"case_id={self.case_id!r}, result={self.result!r}, duration={self.duration}s)"
+        )
+
+
+class TestExecutionBatch(Base):
+    """
+    执行批次元信息表（test_execution_batches）
+
+    记录异步执行批次的元信息与状态机流转（Day24引入）:
+    pending → running → finished（正常）或 failed（批次级异常），
+    状态持久化到库表，进程重启后批次状态仍可查询；
+    finish后冗余存储各结果计数与通过率，批次状态查询接口
+    无需再聚合明细表（单行直查）。
+
+    表字段说明:
+        execution_id  执行批次号（主键），如 RUN-20260822-153000-8f3a
+        trigger       触发方式: manual / cli / web / ci
+        executor      执行人（人工姓名或CI标识，如 jenkins）
+        environment   执行环境: dev / test / prod
+        remark        批次备注（可空）
+        status        批次状态: pending / running / finished / failed
+        total_cases   批次用例总数（start时写入）
+        passed        通过数（finish后冗余写入，未完成为0）
+        failed        失败数（finish后冗余写入，未完成为0）
+        error         错误数（finish后冗余写入，未完成为0）
+        skipped       跳过数（finish后冗余写入，未完成为0）
+        pass_rate     通过率0.0-1.0（finish后冗余写入，未完成为0.0）
+        error_message 批次级异常信息（status=failed时记录，可空）
+        started_at   批次开始执行时间（置running时写入，可空）
+        finished_at  批次执行完成时间（置finished/failed时写入，可空）
+        created_at   批次创建时间（数据库时间自动填充）
+    """
+
+    __tablename__ = "test_execution_batches"
+
+    execution_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, comment="执行批次号，如RUN-20260822-153000-8f3a"
+    )
+    trigger: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="manual", comment="触发方式manual/cli/web/ci"
+    )
+    executor: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="local", comment="执行人/CI标识"
+    )
+    environment: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="dev", comment="执行环境dev/test/prod"
+    )
+    remark: Mapped[str] = mapped_column(Text, nullable=True, comment="批次备注")
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="pending",
+        comment="批次状态pending/running/finished/failed",
+    )
+    total_cases: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="批次用例总数"
+    )
+    passed: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="通过数（finish后冗余）"
+    )
+    failed: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="失败数（finish后冗余）"
+    )
+    error: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="错误数（finish后冗余）"
+    )
+    skipped: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="跳过数（finish后冗余）"
+    )
+    pass_rate: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0, comment="通过率0.0-1.0（finish后冗余）"
+    )
+    error_message: Mapped[str] = mapped_column(
+        Text, nullable=True, comment="批次级异常信息（failed状态时记录）"
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=True, comment="批次开始执行时间"
+    )
+    finished_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=True, comment="批次执行完成时间"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), comment="批次创建时间"
+    )
+
+    # 单列索引: 批次状态查询/按状态筛选运行中批次为高频场景
+    __table_args__ = (
+        Index("idx_teb_status", "status"),
+        {"comment": "执行批次元信息表（异步批次状态机）"},
+    )
+
+    def __repr__(self) -> str:
+        """
+        模型可读化表示（调试与日志打印用）
+
+        返回:
+            str: 形如 TestExecutionBatch(execution_id=RUN-xxx, status=running,
+                  total_cases=50) 的字符串
+        """
+        return (
+            f"TestExecutionBatch(execution_id={self.execution_id!r}, "
+            f"status={self.status!r}, total_cases={self.total_cases})"
         )
 
 
