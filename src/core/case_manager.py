@@ -51,6 +51,16 @@
       业务编号不可变，updated_at由模型onupdate=func.now()自动刷新
     - 用例删除 delete_case: 按业务编号物理删除，不存在抛CaseManagerError
 
+功能（第三阶段Day24交付）:
+    - 启动执行批次 start_execution: 筛选用例+生成批次号+写批次
+      元信息行（pending状态），返回批次号/用例数/用例列表
+    - 批次后台执行编排 _execute_batch_async: 批次状态机
+      pending→running→finished/failed，逐用例经执行器抽象层
+      run_one执行并立即落明细，完成后聚合汇总并冗余统计到批次行；
+      线程目标函数，任何异常置failed绝不向调用线程抛出
+    - 批次状态查询 get_execution_status: 查批次元信息表返回状态
+      字典（含冗余统计与时间字段），不存在返回None
+
 使用示例:
     from src.core.case_manager import CaseManager, generate_execution_id
 
@@ -85,6 +95,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.common.logger import LogManager
 from src.core.data_driver import DataDriver, DataDriverError
+from src.core.executors import get_executor
 from src.core.notification import NotificationRouter
 from src.core.report_analyzer import (
     AllureResult,
@@ -92,7 +103,12 @@ from src.core.report_analyzer import (
     StatisticsResult,
 )
 from src.db.db_session import DatabaseSession
-from src.db.models import DefectStatistic, TestCase, TestExecution
+from src.db.models import (
+    DefectStatistic,
+    TestCase,
+    TestExecution,
+    TestExecutionBatch,
+)
 
 logger = LogManager.get_logger()
 
@@ -1333,6 +1349,396 @@ class CaseManager:
                 row.created_at.isoformat() if row.created_at else None
             ),
         }
+
+    # ------------------------------------------------------------------
+    # 异步执行编排（第三阶段Day24，Web触发执行API专用）
+    # ------------------------------------------------------------------
+    @classmethod
+    def start_execution(
+        cls,
+        trigger: str,
+        executor_name: str = "local",
+        environment: str = "dev",
+        remark: Optional[str] = None,
+        module: Optional[Union[str, list]] = None,
+        priority: Optional[Union[str, list]] = None,
+        tags: Optional[Union[str, list]] = None,
+        case_type: str = "api",
+    ) -> dict:
+        """
+        启动执行批次（筛选用例 + 建批次行，不执行）
+
+        执行流程:
+            1. select_cases_for_execution筛选待执行用例（active状态 +
+               多维过滤），空列表抛CaseManagerError（路由层转400）
+            2. create_execution生成批次号（trigger合法性校验内置）
+            3. 写test_execution_batches行: status="pending" +
+               total_cases=用例数（批次元信息持久化，进程重启后
+               状态仍可查询；内存字典方案重启即丢，不采用）
+
+        参数:
+            trigger (str): 触发方式，可选manual/cli/web/ci
+            executor_name (str): 执行人（人工姓名或CI标识），默认"local"
+            environment (str): 执行环境（dev/test/prod），默认"dev"
+            remark (str | None): 批次备注，默认None
+            module (str | list | None): 模块筛选值，默认None不过滤
+            priority (str | list | None): 优先级筛选值，默认None不过滤
+            tags (str | list | None): 标签筛选值，默认None不过滤
+            case_type (str): 用例类型（api/chip），默认"api"
+
+        返回:
+            dict: {"execution_id": 批次号, "total_cases": 用例数,
+                   "status": "pending", "cases": 用例字典列表}；
+                   cases供后台线程执行使用（纯字典无ORM对象，
+                   跨线程传递安全），路由层不序列化给客户端
+
+        异常:
+            CaseManagerError: 无符合条件的用例 / trigger非法 /
+                              批次元信息落库数据库异常时抛出，
+                              context携带operation定位
+        """
+        # 1. 筛选待执行用例（空列表直接拒绝，无意义的空批次不落库）
+        cases = cls.select_cases_for_execution(
+            module=module, priority=priority, tags=tags, case_type=case_type
+        )
+        if not cases:
+            raise CaseManagerError(
+                "无符合条件的用例可执行",
+                context={
+                    "operation": "start_execution",
+                    "module": module,
+                    "priority": priority,
+                    "case_type": case_type,
+                },
+            )
+
+        # 2. 生成批次号（trigger合法性由create_execution内置校验）
+        execution_id = cls.create_execution(
+            trigger=trigger,
+            executor=executor_name,
+            environment=environment,
+            remark=remark,
+        )
+
+        # 3. 批次元信息落库（状态机起点pending）
+        try:
+            with DatabaseSession.session_scope() as session:
+                session.add(
+                    TestExecutionBatch(
+                        execution_id=execution_id,
+                        trigger=trigger,
+                        executor=executor_name,
+                        environment=environment,
+                        remark=remark,
+                        status="pending",
+                        total_cases=len(cases),
+                    )
+                )
+        except SQLAlchemyError as exc:
+            logger.error(
+                f"批次元信息入库数据库异常 | 批次: {execution_id} | {exc}"
+            )
+            raise CaseManagerError(
+                f"批次元信息入库数据库异常: {exc}",
+                context={
+                    "operation": "start_execution",
+                    "execution_id": execution_id,
+                },
+            ) from exc
+
+        logger.info(
+            f"执行批次已启动 | 批次: {execution_id} | "
+            f"状态: pending | 用例数: {len(cases)}"
+        )
+        return {
+            "execution_id": execution_id,
+            "total_cases": len(cases),
+            "status": "pending",
+            "cases": cases,
+        }
+
+    @classmethod
+    def _execute_batch_async(
+        cls,
+        execution_id: str,
+        cases: list,
+        executor_kind: Optional[str] = None,
+    ) -> None:
+        """
+        批次后台执行编排（daemon线程目标函数，也可同步调用）
+
+        状态机流转:
+            pending → running → finished（正常完成）
+                              → failed（任何环节异常）
+
+        执行流程:
+            1. 批次行置running + started_at
+            2. 经工厂get_executor取执行器（编排只依赖BaseExecutor
+               抽象契约，具体执行器可插拔替换），逐用例run_one
+               并立即record_execution落明细（含start/end/duration）
+            3. 全部完成调finish_execution聚合写defect_statistics
+            4. 批次行置finished + 冗余各结果计数/通过率 + finished_at
+            5. 全程try/except兜底: 任何异常→批次行置failed +
+               error_message，绝不向调用线程抛异常（守护线程内
+               未捕获异常会静默杀死线程并污染进程状态）
+
+        线程安全说明: 所有数据库操作均各自新建会话
+        （record_execution/finish_execution走session_scope，
+        状态更新同口径），绝不借用请求线程的session——
+        SQLAlchemy Session非线程安全，跨线程复用会话会造成
+        连接状态错乱。
+
+        参数:
+            execution_id (str): 执行批次号
+            cases (list[dict]): 待执行用例字典列表
+                                （start_execution筛选结果）
+            executor_kind (str | None): 执行器类型（simulated/pytest），
+                                        None时工厂读TM_EXECUTOR环境变量
+
+        返回:
+            None
+
+        异常:
+            无（全部异常内部消化为批次failed状态）
+        """
+        try:
+            # a. 置running + 记录批次开始时间
+            cls._update_batch_status(
+                execution_id, status="running", started_at=datetime.now()
+            )
+            logger.info(
+                f"批次开始执行 | 批次: {execution_id} | 用例数: {len(cases)} | "
+                f"执行器: {executor_kind or '(TM_EXECUTOR环境变量)'}"
+            )
+
+            # b. 经工厂取执行器后逐用例执行并立即落明细
+            #    （单用例异常同样走兜底转批次failed，当前粒度为批次级）
+            executor = get_executor(executor_kind)
+            for case in cases:
+                case_start = datetime.now()
+                exec_result = executor.run_one(case)
+                case_end = datetime.now()
+                cls.record_execution(
+                    execution_id=execution_id,
+                    case_id=str(case.get("case_id", "")),
+                    case_name=str(case.get("name", "")),
+                    result=exec_result.result,
+                    start_time=case_start,
+                    end_time=case_end,
+                    duration=exec_result.duration,
+                    error_message=exec_result.error_message,
+                )
+
+            # c. 聚合汇总写defect_statistics
+            summary = cls.finish_execution(execution_id)
+
+            # d. 置finished + 冗余统计（批次状态查询免聚合直查）
+            cls._update_batch_status(
+                execution_id,
+                status="finished",
+                passed=summary["passed"],
+                failed=summary["failed"],
+                error=summary["error"],
+                skipped=summary["skipped"],
+                pass_rate=summary["pass_rate"],
+                finished_at=datetime.now(),
+            )
+            logger.info(
+                f"批次执行完成 | 批次: {execution_id} | "
+                f"通过: {summary['passed']}/{summary['total']} | "
+                f"通过率: {summary['pass_rate']:.2%}"
+            )
+        except Exception as exc:
+            # e. 任何异常: 批次置failed + error_message，不向调用线程抛出
+            logger.error(
+                f"批次执行异常，批次置failed | 批次: {execution_id} | "
+                f"{type(exc).__name__}: {exc}"
+            )
+            try:
+                cls._update_batch_status(
+                    execution_id,
+                    status="failed",
+                    error_message=f"{type(exc).__name__}: {exc}",
+                    finished_at=datetime.now(),
+                )
+            except Exception as mark_exc:
+                # failed状态落库也失败（如库不可用）: 仅记日志，
+                # 双重异常下保证线程安全退出不崩进程
+                logger.error(
+                    f"批次failed状态落库异常 | 批次: {execution_id} | "
+                    f"{mark_exc}"
+                )
+
+    @classmethod
+    def get_execution_status(cls, execution_id: str) -> Optional[dict]:
+        """
+        查询执行批次状态（Web批次状态查询API专用）
+
+        数据口径:
+            直查test_execution_batches批次元信息行（含finish后冗余的
+            各结果计数与通过率），无需聚合明细表；执行中批次
+            （running/pending）同样可查，冗余统计字段为初始值0。
+
+        参数:
+            execution_id (str): 执行批次号
+
+        返回:
+            dict | None: {"execution_id", "status", "total_cases",
+                         "passed", "failed", "error", "skipped",
+                         "pass_rate", "error_message", "started_at",
+                         "finished_at", "created_at"}；
+                         datetime字段转ISO格式字符串（未完成时
+                         started_at/finished_at为None，冗余统计
+                         字段为初始值）；批次不存在返回None
+                         （路由层转404）
+
+        异常:
+            CaseManagerError: 批次号为空 / 数据库查询异常时抛出，
+                              context携带operation定位
+        """
+        # 批次号基础校验（空字符串/空白串直接拒绝）
+        if not execution_id or not str(execution_id).strip():
+            raise CaseManagerError(
+                "执行批次号不能为空",
+                context={"operation": "get_execution_status"},
+            )
+
+        try:
+            session = DatabaseSession.get_session()
+            try:
+                batch_row = (
+                    session.query(TestExecutionBatch)
+                    .filter_by(execution_id=execution_id)
+                    .first()
+                )
+            finally:
+                session.close()
+        except SQLAlchemyError as exc:
+            logger.error(
+                f"批次状态查询数据库异常 | 批次: {execution_id} | {exc}"
+            )
+            raise CaseManagerError(
+                f"批次状态查询数据库异常: {exc}",
+                context={
+                    "operation": "get_execution_status",
+                    "execution_id": execution_id,
+                },
+            ) from exc
+
+        if batch_row is None:
+            logger.debug(f"批次不存在（无批次行）| 批次: {execution_id}")
+            return None
+
+        return {
+            "execution_id": batch_row.execution_id,
+            "status": batch_row.status,
+            "total_cases": batch_row.total_cases,
+            "passed": batch_row.passed,
+            "failed": batch_row.failed,
+            "error": batch_row.error,
+            "skipped": batch_row.skipped,
+            "pass_rate": batch_row.pass_rate,
+            "error_message": batch_row.error_message,
+            "started_at": (
+                batch_row.started_at.isoformat()
+                if batch_row.started_at
+                else None
+            ),
+            "finished_at": (
+                batch_row.finished_at.isoformat()
+                if batch_row.finished_at
+                else None
+            ),
+            "created_at": (
+                batch_row.created_at.isoformat()
+                if batch_row.created_at
+                else None
+            ),
+        }
+
+    @classmethod
+    def _update_batch_status(
+        cls,
+        execution_id: str,
+        status: str,
+        started_at: Optional[datetime] = None,
+        finished_at: Optional[datetime] = None,
+        passed: Optional[int] = None,
+        failed: Optional[int] = None,
+        error: Optional[int] = None,
+        skipped: Optional[int] = None,
+        pass_rate: Optional[float] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """
+        更新批次状态与冗余统计（内部方法）
+
+        仅更新显式传入（非None）的字段，其余字段保持不变；
+        批次行不存在时记warning后静默返回（防御性容错，
+        不阻断调用链——明细写入仍可正常完成）。
+
+        参数:
+            execution_id (str): 执行批次号
+            status (str): 目标状态 pending/running/finished/failed
+            started_at (datetime | None): 批次开始时间，None不更新
+            finished_at (datetime | None): 批次完成时间，None不更新
+            passed (int | None): 通过数，None不更新
+            failed (int | None): 失败数，None不更新
+            error (int | None): 错误数，None不更新
+            skipped (int | None): 跳过数，None不更新
+            pass_rate (float | None): 通过率，None不更新
+            error_message (str | None): 批次级异常信息，None不更新
+
+        返回:
+            None
+
+        异常:
+            CaseManagerError: 数据库操作异常时抛出
+                              （由调用方决定兜底策略）
+        """
+        try:
+            with DatabaseSession.session_scope() as session:
+                batch_row = (
+                    session.query(TestExecutionBatch)
+                    .filter_by(execution_id=execution_id)
+                    .first()
+                )
+                if batch_row is None:
+                    logger.warning(
+                        f"批次行不存在，状态更新跳过 | 批次: {execution_id} | "
+                        f"目标状态: {status}"
+                    )
+                    return
+                batch_row.status = status
+                if started_at is not None:
+                    batch_row.started_at = started_at
+                if finished_at is not None:
+                    batch_row.finished_at = finished_at
+                if passed is not None:
+                    batch_row.passed = passed
+                if failed is not None:
+                    batch_row.failed = failed
+                if error is not None:
+                    batch_row.error = error
+                if skipped is not None:
+                    batch_row.skipped = skipped
+                if pass_rate is not None:
+                    batch_row.pass_rate = pass_rate
+                if error_message is not None:
+                    batch_row.error_message = error_message
+        except SQLAlchemyError as exc:
+            logger.error(
+                f"批次状态更新数据库异常 | 批次: {execution_id} | "
+                f"目标状态: {status} | {exc}"
+            )
+            raise CaseManagerError(
+                f"批次状态更新数据库异常: {exc}",
+                context={
+                    "operation": "_update_batch_status",
+                    "execution_id": execution_id,
+                    "status": status,
+                },
+            ) from exc
 
     # ------------------------------------------------------------------
     # 批次完成通知集成（第二阶段Day15）

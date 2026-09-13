@@ -5,8 +5,16 @@
     case_manager.py    用例调度与管理（第二阶段实现）
     report_analyzer.py 测试报告解析与统计（第二阶段实现）
     notification.py    通知推送（基座/邮件/HTML模板/企微/分级路由/重试与死信）
+    executors.py       用例执行器抽象层（策略模式+依赖倒置，Day24引入）
 """
 
+from src.core.executors import (
+    BaseExecutor,
+    ExecutionResult,
+    PytestRunner,
+    SimulatedExecutor,
+    get_executor,
+)
 from src.core.notification import (
     BaseNotifier,
     EmailNotifier,
@@ -18,11 +26,16 @@ from src.core.notification import (
 )
 
 __all__ = [
+    "BaseExecutor",
     "BaseNotifier",
     "EmailNotifier",
     "EmailReportTemplate",
+    "ExecutionResult",
     "Notification",
     "NotificationDeadLetterRepository",
     "NotificationRouter",
+    "PytestRunner",
+    "SimulatedExecutor",
     "WeChatNotifier",
+    "get_executor",
 ]
