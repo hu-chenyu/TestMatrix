@@ -61,6 +61,13 @@
     - 批次状态查询 get_execution_status: 查批次元信息表返回状态
       字典（含冗余统计与时间字段），不存在返回None
 
+功能（第三阶段Day25交付）:
+    - 执行事件埋点 _publish_execution_event /
+      _close_execution_channel: _execute_batch_async关键节点
+      （batch_start/case_finished/batch_finished/batch_failed）
+      向事件通道发布事件，批次终态后关闭并清理通道；埋点全程
+      try/except兜底只记日志，日志通道故障绝不影响真实执行
+
 使用示例:
     from src.core.case_manager import CaseManager, generate_execution_id
 
@@ -95,6 +102,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.common.logger import LogManager
 from src.core.data_driver import DataDriver, DataDriverError
+from src.core.event_bus import ExecutionEvent, close_channel, get_channel
 from src.core.executors import get_executor
 from src.core.notification import NotificationRouter
 from src.core.report_analyzer import (
@@ -1458,6 +1466,71 @@ class CaseManager:
         }
 
     @classmethod
+    def _publish_execution_event(
+        cls, execution_id: str, event_type: str, data: dict
+    ) -> None:
+        """
+        发布执行事件到批次事件通道（内部方法，SSE埋点专用）
+
+        event_bus.publish自身已保证绝不抛异常，本层再包一层
+        try/except双保险（含get_channel建通道环节）: 日志通道任何
+        故障只记error日志，绝不影响真实执行主流程。
+
+        参数:
+            execution_id (str): 执行批次号
+            event_type (str): 事件类型，合法取值见
+                              event_bus.VALID_EVENT_TYPES
+            data (dict): 事件载荷
+
+        返回:
+            无
+
+        异常:
+            无（全部内部消化，只记error日志）
+        """
+        try:
+            channel = get_channel(execution_id, create=True)
+            if channel is None:
+                return
+            channel.publish(
+                ExecutionEvent(event_type=event_type, data=data)
+            )
+        except Exception as exc:
+            # 兜底铁律: 事件发布任何故障只记日志，不影响执行主流程
+            logger.error(
+                f"执行事件发布异常（不影响执行主流程）| "
+                f"批次: {execution_id} | 类型: {event_type} | {exc}"
+            )
+
+    @classmethod
+    def _close_execution_channel(
+        cls, execution_id: str, reason: str
+    ) -> None:
+        """
+        关闭并清理批次事件通道（内部方法，批次终态后调用）
+
+        与_publish_execution_event同口径兜底吞异常: 通道清理故障
+        只记error日志，绝不影响真实执行主流程。
+
+        参数:
+            execution_id (str): 执行批次号
+            reason (str): 关闭原因（"finished"/"failed"）
+
+        返回:
+            无
+
+        异常:
+            无（全部内部消化，只记error日志）
+        """
+        try:
+            close_channel(execution_id, reason=reason)
+        except Exception as exc:
+            logger.error(
+                f"事件通道关闭异常（不影响执行主流程）| "
+                f"批次: {execution_id} | 原因: {reason} | {exc}"
+            )
+
+    @classmethod
     def _execute_batch_async(
         cls,
         execution_id: str,
@@ -1481,6 +1554,10 @@ class CaseManager:
             5. 全程try/except兜底: 任何异常→批次行置failed +
                error_message，绝不向调用线程抛异常（守护线程内
                未捕获异常会静默杀死线程并污染进程状态）
+            6. 事件埋点（Day25）: 关键节点向事件通道发布
+               batch_start/case_finished/batch_finished/batch_failed
+               事件（SSE流式接口消费），批次终态后关闭并清理通道；
+               埋点全程兜底，日志通道故障绝不影响真实执行
 
         线程安全说明: 所有数据库操作均各自新建会话
         （record_execution/finish_execution走session_scope，
@@ -1510,6 +1587,16 @@ class CaseManager:
                 f"批次开始执行 | 批次: {execution_id} | 用例数: {len(cases)} | "
                 f"执行器: {executor_kind or '(TM_EXECUTOR环境变量)'}"
             )
+            # 事件埋点: 批次开始（executor_kind为None表示读TM_EXECUTOR
+            # 环境变量的默认执行器，载荷原样透传null）
+            cls._publish_execution_event(
+                execution_id,
+                "batch_start",
+                {
+                    "total_cases": len(cases),
+                    "executor_kind": executor_kind,
+                },
+            )
 
             # b. 经工厂取执行器后逐用例执行并立即落明细
             #    （单用例异常同样走兜底转批次failed，当前粒度为批次级）
@@ -1527,6 +1614,18 @@ class CaseManager:
                     end_time=case_end,
                     duration=exec_result.duration,
                     error_message=exec_result.error_message,
+                )
+                # 事件埋点: 单条用例执行完成（与明细表同口径字段）
+                cls._publish_execution_event(
+                    execution_id,
+                    "case_finished",
+                    {
+                        "case_id": str(case.get("case_id", "")),
+                        "case_name": str(case.get("name", "")),
+                        "result": exec_result.result,
+                        "duration": exec_result.duration,
+                        "error_message": exec_result.error_message,
+                    },
                 )
 
             # c. 聚合汇总写defect_statistics
@@ -1548,17 +1647,32 @@ class CaseManager:
                 f"通过: {summary['passed']}/{summary['total']} | "
                 f"通过率: {summary['pass_rate']:.2%}"
             )
+            # 事件埋点: 批次正常完成 → 发布终态事件并关闭清理通道
+            cls._publish_execution_event(
+                execution_id,
+                "batch_finished",
+                {
+                    "total": summary["total"],
+                    "passed": summary["passed"],
+                    "failed": summary["failed"],
+                    "error": summary["error"],
+                    "skipped": summary["skipped"],
+                    "pass_rate": summary["pass_rate"],
+                },
+            )
+            cls._close_execution_channel(execution_id, reason="finished")
         except Exception as exc:
             # e. 任何异常: 批次置failed + error_message，不向调用线程抛出
             logger.error(
                 f"批次执行异常，批次置failed | 批次: {execution_id} | "
                 f"{type(exc).__name__}: {exc}"
             )
+            error_summary = f"{type(exc).__name__}: {exc}"
             try:
                 cls._update_batch_status(
                     execution_id,
                     status="failed",
-                    error_message=f"{type(exc).__name__}: {exc}",
+                    error_message=error_summary,
                     finished_at=datetime.now(),
                 )
             except Exception as mark_exc:
@@ -1568,6 +1682,14 @@ class CaseManager:
                     f"批次failed状态落库异常 | 批次: {execution_id} | "
                     f"{mark_exc}"
                 )
+            # 事件埋点: 批次异常失败 → 发布终态事件并关闭清理通道
+            # （置于状态落库之后，即使落库失败也向订阅方发终态事件）
+            cls._publish_execution_event(
+                execution_id,
+                "batch_failed",
+                {"error_message": error_summary},
+            )
+            cls._close_execution_channel(execution_id, reason="failed")
 
     @classmethod
     def get_execution_status(cls, execution_id: str) -> Optional[dict]:
