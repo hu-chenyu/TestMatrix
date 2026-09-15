@@ -14,20 +14,34 @@
     - GET /api/executions/<execution_id>/status 批次状态查询
       （pending/running/finished/failed状态机直查批次元信息表）
 
+功能（第三阶段Day25交付）:
+    - GET /api/executions/<execution_id>/events 批次SSE实时事件流
+      （text/event-stream流式响应，逐帧转发事件通道中的
+      batch_start/case_finished/batch_finished/batch_failed事件；
+      已终态批次立即快照直发关闭流，不挂死等待）
+
 数据口径:
     - 批次列表只含已完成批次（finish_execution后才有defect_statistics
       汇总记录），未finish的执行中批次不在列表范围；执行中批次的
       状态查询走 /<execution_id>/status 接口
     - 查询接口纯GET无请求体不引入marshmallow；触发接口入参全部
       可选（无请求体即全量回归），走手动校验（简单参数不上Schema）
+    - events接口三分支: 通道存在且运行中→订阅实时转发；
+      通道存在但已终态（publish后close前的竞态窗口）→snapshot
+      补发积压事件；通道不存在（pending极早期/CLI批次/终态已
+      清理）→按批次状态降级直发（finished批次从DB重建完整事件
+      序列，其余单帧快照），全部有限帧后关闭流
 """
 
+import json
 import threading
-from typing import Optional
+import time
+from typing import Iterator, Optional
 
-from flask import Blueprint, request
+from flask import Blueprint, Response, request, stream_with_context
 
 from src.core.case_manager import MAX_PAGE_SIZE, CaseManager, CaseManagerError
+from src.core.event_bus import get_channel
 from src.core.executors import VALID_EXECUTORS
 from src.web.exceptions import NotFoundError, ValidationError
 from src.web.response import success
@@ -37,6 +51,13 @@ executions_bp = Blueprint("executions", __name__, url_prefix="/api/executions")
 # 分页参数默认值（与cases.py口径一致）
 DEFAULT_PAGE = 1
 DEFAULT_PAGE_SIZE = 20
+
+# 批次终态事件类型（流式接口收到后立即关闭流的信号）
+TERMINAL_EVENT_TYPES = ("batch_finished", "batch_failed")
+
+# 相邻SSE帧之间的短暂让出间隔（秒）: 开发服务器下让出GIL，
+# 保证流式响应不被缓冲、生产方线程得以持续publish
+FRAME_INTERVAL_SECONDS = 0.05
 
 
 def _parse_int_param(name: str, default: int) -> int:
@@ -288,3 +309,192 @@ def get_execution_status(execution_id: str):
             "执行批次不存在", detail={"execution_id": execution_id}
         )
     return success(data=status_data)
+
+
+def _format_sse_frame(event_type: str, data: dict) -> str:
+    """
+    格式化单条SSE帧（内部方法）
+
+    帧格式严格按SSE规范三要素:
+        event: {事件类型}\\n
+        data: {JSON字符串}\\n
+        \\n（空行结束一帧）
+
+    参数:
+        event_type (str): 事件类型（合法取值见
+                          event_bus.VALID_EVENT_TYPES）
+        data (dict): 事件载荷，序列化为JSON字符串
+                     （ensure_ascii=False，中文原样输出）
+
+    返回:
+        str: 单条完整SSE帧文本（以空行结尾）
+
+    异常:
+        无
+    """
+    payload = json.dumps(data, ensure_ascii=False)
+    return f"event: {event_type}\ndata: {payload}\n\n"
+
+
+def _terminal_snapshot_frame(status_data: dict) -> str:
+    """
+    构造批次终态快照帧（内部方法，降级补发专用）
+
+    按批次状态机当前状态构造对应的终态SSE帧:
+        failed   → batch_failed {error_message}
+        finished → batch_finished {total, passed, failed, error,
+                                  skipped, pass_rate}
+    （载荷字段与case_manager埋点口径完全一致）
+
+    参数:
+        status_data (dict): get_execution_status返回的批次状态字典
+
+    返回:
+        str: 终态快照SSE帧文本
+
+    异常:
+        无
+    """
+    if status_data["status"] == "failed":
+        return _format_sse_frame(
+            "batch_failed",
+            {"error_message": status_data.get("error_message")},
+        )
+    return _format_sse_frame(
+        "batch_finished",
+        {
+            "total": status_data["total_cases"],
+            "passed": status_data["passed"],
+            "failed": status_data["failed"],
+            "error": status_data["error"],
+            "skipped": status_data["skipped"],
+            "pass_rate": status_data["pass_rate"],
+        },
+    )
+
+
+@executions_bp.route("/<execution_id>/events")
+def stream_execution_events(execution_id: str):
+    """
+    执行批次SSE实时事件流接口
+
+    text/event-stream流式响应，逐帧转发事件通道中的执行事件
+    （batch_start/case_finished/batch_finished/batch_failed），
+    收到终态事件后关闭流。
+
+    分支口径（通道先查再查批次状态，防"状态读到running后通道
+    又被终态清理"的竞态）:
+        1. 批次不存在: 404（统一错误格式）
+        2. 通道不存在（pending极早期 / CLI批次 / 终态已清理）:
+           按状态降级直发——finished批次从DB（汇总+明细）重建
+           batch_start→case_finished×N→batch_finished完整事件
+           序列；failed/pending批次单帧快照直发；全部有限帧
+           后关闭流，不挂死等待
+        3. 通道存在且批次已终态（publish后close注册表移除前的
+           竞态窗口）: channel.snapshot()补发积压事件（此时积压
+           已含终态事件），无终态事件时补一条终态快照帧
+        4. 通道存在且运行中: subscribe()阻塞订阅实时转发，
+           收到batch_finished/batch_failed后关闭流
+
+    SSE帧格式: event: {类型}\\ndata: {JSON}\\n\\n（空行结束一帧）
+
+    参数:
+        execution_id (str): 执行批次号（URL路径参数）
+
+    返回:
+        Response: text/event-stream流式响应（stream_with_context
+                 包装的生成器；帧间sleep 0.05s让出GIL防开发
+                 服务器缓冲）
+
+    异常:
+        NotFoundError: 批次不存在（无批次元信息行）时抛出（404）
+        CaseManagerError: 核心层数据库异常原样上抛（兜底500，
+                          仅发生在流开始前的状态查询阶段）
+    """
+    # 1. 先查通道再查批次状态: 本地channel引用在批次终态后仍
+    #    有效（注册表移除不影响已获取引用的drain语义），避免
+    #    "状态读到running、通道已被close_channel清理"时误走
+    #    降级分支丢实时事件
+    channel = get_channel(execution_id, create=False)
+
+    # 2. 批次存在性: 不存在统一404
+    status_data = CaseManager.get_execution_status(execution_id)
+    if status_data is None:
+        raise NotFoundError(
+            "执行批次不存在", detail={"execution_id": execution_id}
+        )
+
+    # 3. 流式生成器（三分支: 降级快照 / 终态补发 / 实时订阅）
+    @stream_with_context
+    def event_generator() -> Iterator[str]:
+        # 分支一: 通道不在注册表（pending极早期/CLI批次/终态已清理）
+        if channel is None:
+            if status_data["status"] == "finished":
+                # 已完成批次: 从DB重建完整事件序列直发
+                # （汇总+明细与埋点载荷同口径，客户端离线后补看
+                # 全量日志不依赖通道存活）
+                detail = None
+                try:
+                    detail = CaseManager.get_execution_detail(execution_id)
+                except CaseManagerError:
+                    # 明细查询异常不阻断流: 降级为单条终态快照帧
+                    detail = None
+                if detail is not None:
+                    yield _format_sse_frame(
+                        "batch_start",
+                        {
+                            "total_cases": detail["summary"]["total_cases"],
+                            "executor_kind": None,
+                        },
+                    )
+                    for item in detail["items"]:
+                        yield _format_sse_frame(
+                            "case_finished",
+                            {
+                                "case_id": item["case_id"],
+                                "case_name": item["case_name"],
+                                "result": item["result"],
+                                "duration": item["duration"],
+                                "error_message": item["error_message"],
+                            },
+                        )
+                yield _terminal_snapshot_frame(status_data)
+                return
+            if status_data["status"] == "failed":
+                # 失败批次: 无defect_statistics汇总行，单帧终态直发
+                yield _terminal_snapshot_frame(status_data)
+                return
+            # pending极早期/CLI运行中批次: 单帧进行中快照直发
+            # （不挂死等待——CLI批次在Web进程内永远等不到publish）
+            yield _format_sse_frame(
+                "batch_start",
+                {
+                    "total_cases": status_data["total_cases"],
+                    "status": status_data["status"],
+                },
+            )
+            return
+
+        # 分支二: 通道存在但批次已终态（publish后close前的竞态窗口）
+        if status_data["status"] in ("finished", "failed"):
+            saw_terminal = False
+            for event in channel.snapshot():
+                yield _format_sse_frame(event.event_type, event.data)
+                if event.event_type in TERMINAL_EVENT_TYPES:
+                    saw_terminal = True
+            # 积压无终态事件时补一条终态快照帧（防御性兜底）
+            if not saw_terminal:
+                yield _terminal_snapshot_frame(status_data)
+            return
+
+        # 分支三: 运行中批次: 订阅通道实时转发
+        # （本线程持有channel引用，即使批次此刻终态且close_channel
+        # 从注册表移除，残余事件仍能被读完，不丢终态事件）
+        for event in channel.subscribe():
+            yield _format_sse_frame(event.event_type, event.data)
+            if event.event_type in TERMINAL_EVENT_TYPES:
+                break
+            # 帧间短暂让出GIL，防开发服务器流式被缓冲
+            time.sleep(FRAME_INTERVAL_SECONDS)
+
+    return Response(event_generator(), mimetype="text/event-stream")
