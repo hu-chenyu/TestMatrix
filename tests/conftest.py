@@ -251,6 +251,35 @@ def case_trace_logger(request):
     case_logger.info(f"用例结束 <<< {request.node.name} | 耗时: {elapsed:.3f}s")
 
 
+@pytest.fixture(autouse=True)
+def _disable_real_notification_channels(monkeypatch):
+    """
+    全局禁用真实通知渠道fixture（autouse，全用例自动生效）
+
+    纵深防御（Day27）: 批次执行编排已接入自动通知（_execute_batch_async
+    终态旁路调用notify_execution_result），任何测试路径触及该链路时，
+    通过环境变量保证零真实邮件/零真实网络连接:
+        - TM_EMAIL_ENABLED=false   邮件渠道send内部直接跳过
+        - TM_WECHAT_ENABLED=false  企微渠道send内部直接跳过
+        - TM_NOTIFY_MAX_RETRIES=0  失败重试次数归零（消除退避等待）
+
+    实现说明: env_manager.get实时读os.getenv，load_dotenv(override=False)
+    不会覆盖已存在的环境变量，monkeypatch.setenv必然生效；测试内自行
+    setenv同名变量时后写覆盖（既有通知测试均mock env_manager.get，
+    与本fixture零冲突）。
+
+    参数:
+        monkeypatch (pytest.MonkeyPatch): 环境变量补丁工具
+
+    返回:
+        Generator: yield无数据，环境变量仅在本用例作用域内生效
+    """
+    monkeypatch.setenv("TM_EMAIL_ENABLED", "false")
+    monkeypatch.setenv("TM_WECHAT_ENABLED", "false")
+    monkeypatch.setenv("TM_NOTIFY_MAX_RETRIES", "0")
+    yield
+
+
 # ===========================================================================
 # 日志与报告钩子
 # ===========================================================================

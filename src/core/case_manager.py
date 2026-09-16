@@ -1536,6 +1536,7 @@ class CaseManager:
         execution_id: str,
         cases: list,
         executor_kind: Optional[str] = None,
+        notification_router: Optional[NotificationRouter] = None,
     ) -> None:
         """
         批次后台执行编排（daemon线程目标函数，也可同步调用）
@@ -1558,6 +1559,10 @@ class CaseManager:
                batch_start/case_finished/batch_finished/batch_failed
                事件（SSE流式接口消费），批次终态后关闭并清理通道；
                埋点全程兜底，日志通道故障绝不影响真实执行
+            7. 批次终态且通道关闭后（Day27）: 旁路调用
+               notify_execution_result推送邮件/企微通知（异常双层
+               兜底不影响主流程；通知含指数退避重试可能耗时数秒，
+               置于通道关闭之后确保SSE客户端先收到终态事件）
 
         线程安全说明: 所有数据库操作均各自新建会话
         （record_execution/finish_execution走session_scope，
@@ -1571,6 +1576,11 @@ class CaseManager:
                                 （start_execution筛选结果）
             executor_kind (str | None): 执行器类型（simulated/pytest），
                                         None时工厂读TM_EXECUTOR环境变量
+            notification_router (NotificationRouter | None): 通知路由器
+                                        （仅测试注入用；Web触发路径不传，
+                                        None时notify_execution_result内部
+                                        默认实例化，策略由TM_NOTIFY_STRATEGY
+                                        环境变量控制，与CLI默认行为一致）
 
         返回:
             None
@@ -1661,6 +1671,20 @@ class CaseManager:
                 },
             )
             cls._close_execution_channel(execution_id, reason="finished")
+            # 7. 通道关闭后旁路推送批次通知（SSE终态事件先送达
+            #    客户端；通知含指数退避重试可能耗时数秒，不能阻塞
+            #    订阅方收终态事件）；外层try兜底（口径同run_batch
+            #    第8步）: 通知异常仅记error日志，绝不向上抛
+            try:
+                cls.notify_execution_result(
+                    execution_id, router=notification_router
+                )
+            except Exception as notify_exc:
+                logger.error(
+                    f"批次自动通知异常已捕获（不影响主流程） | "
+                    f"批次: {execution_id} | "
+                    f"{type(notify_exc).__name__}: {notify_exc}"
+                )
         except Exception as exc:
             # e. 任何异常: 批次置failed + error_message，不向调用线程抛出
             logger.error(
@@ -1690,6 +1714,20 @@ class CaseManager:
                 {"error_message": error_summary},
             )
             cls._close_execution_channel(execution_id, reason="failed")
+            # failed批次同样旁路推送通知: strategy=failed_only时是否
+            # 实际发送由Router内部裁决，接入层不判断；except分支内
+            # 的通知调用必须自带try兜底——此处已无外层try可接盘，
+            # 裸抛异常会杀死daemon线程
+            try:
+                cls.notify_execution_result(
+                    execution_id, router=notification_router
+                )
+            except Exception as notify_exc:
+                logger.error(
+                    f"批次自动通知异常已捕获（不影响主流程） | "
+                    f"批次: {execution_id} | "
+                    f"{type(notify_exc).__name__}: {notify_exc}"
+                )
 
     @classmethod
     def get_execution_status(cls, execution_id: str) -> Optional[dict]:
