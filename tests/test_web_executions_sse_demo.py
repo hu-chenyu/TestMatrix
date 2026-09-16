@@ -1040,3 +1040,43 @@ class TestExecutionSseApi:
             "慢速桩批次应正常完成"
         )
         assert final["passed"] == 4, "慢速桩执行器应4条全过"
+
+    def test_events_last_event_id_at_terminal_no_duplicate(
+        self,
+        sse_client: FlaskClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        终态帧断点守卫（Day26遗留顺手项）: 同步跑完4条全过批次
+        （通道已清理→DB重建分支，6帧合成id 1-6），带Last-Event-ID=6
+        （已等于终态帧id）请求events——终态帧id6不大于resume_after=6
+        被过滤，响应有效帧数为0且不含batch_finished事件（重连不
+        重复收终态帧）
+        """
+        result = CaseManager.start_execution(
+            trigger="web", executor_name="web", case_type="api"
+        )
+        execution_id = result["execution_id"]
+        monkeypatch.setattr(
+            "src.core.case_manager.get_executor",
+            lambda kind=None: _AllPassExecutor(),
+        )
+        # 同步执行完成（通道随之关闭清理，events走DB重建分支）
+        CaseManager._execute_batch_async(execution_id, result["cases"], None)
+        assert get_channel(execution_id, create=False) is None
+
+        response = sse_client.get(
+            f"/api/executions/{execution_id}/events",
+            headers={"Last-Event-ID": "6"},
+        )
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+
+        # 有效帧数为0: 终态帧id6不大于resume_after=6，被断点守卫过滤
+        frames = [f for f in body.split("\n\n") if f.strip()]
+        assert len(frames) == 0, (
+            f"Last-Event-ID已含终态帧时应零帧输出 | 实际: {len(frames)}帧"
+        )
+        assert "batch_finished" not in body, (
+            "终态帧不应在断点之后重复补发"
+        )

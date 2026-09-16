@@ -548,9 +548,11 @@ def stream_execution_events(execution_id: str):
                                 event_id=next_frame_id,
                             )
                         next_frame_id += 1
-                yield _terminal_snapshot_frame(
-                    status_data, event_id=next_frame_id
-                )
+                # 终态帧同样按断点过滤: 客户端已收到过该id则不重复补发
+                if next_frame_id > resume_after:
+                    yield _terminal_snapshot_frame(
+                        status_data, event_id=next_frame_id
+                    )
                 return
             if status_data["status"] == "failed":
                 # 失败批次: 无defect_statistics汇总行，单帧终态直发
