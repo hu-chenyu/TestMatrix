@@ -13,7 +13,8 @@ Flask Web应用工厂（第二阶段实现）
         ├── 注册蓝图（base / cases / executions / reports）
         ├── 注册全局异常处理器（APIError/404/405/500/Exception兜底，
         │   由exceptions.register_error_handlers统一提供）
-        ├── 注册请求钩子（before_request 日志 / after_request 安全头）
+        ├── 注册请求钩子（before_request 记请求日志与开始时间 /
+        │   after_request 安全头 + 响应状态码与耗时配对日志）
         └── 返回 app
 
 使用示例:
@@ -26,7 +27,9 @@ Flask Web应用工厂（第二阶段实现）
     # python -c "from src.web import create_app; create_app().run(port=5000)"
 """
 
-from flask import Flask, request
+import time
+
+from flask import Flask, g, request
 
 from src.common.logger import LogManager
 from src.web.config import get_config
@@ -88,7 +91,14 @@ def create_app(config_name: str | None = None) -> Flask:
 
 def _register_request_hooks(app: Flask) -> None:
     """
-    注册请求前后钩子
+    注册请求前后钩子（Day29改造: 请求/响应日志配对 + 安全头合并）
+
+    钩子职责:
+        - before_request: 记"请求:"入口日志（method/path/remote_addr），
+          同时用flask.g存高精度开始时间，供after_request计算耗时
+        - after_request: 一个函数内完成两件事——补两个安全响应头；
+          记"响应:"配对日志（状态码/耗时/客户端地址），与入口日志
+          按method+path一一对应，形成单请求全链路日志
 
     参数:
         app (Flask): Flask应用实例
@@ -99,15 +109,64 @@ def _register_request_hooks(app: Flask) -> None:
 
     @app.before_request
     def log_request() -> None:
-        """记录每个请求的基本信息（method/path/remote_addr）"""
+        """
+        请求前置钩子: 记录入口日志并保存开始时间
+
+        入参:
+            无（从flask.request与flask.g读取/写入请求上下文）
+
+        返回:
+            None
+
+        说明:
+            g.request_start使用time.perf_counter()高精度单调时钟，
+            仅用于同请求内的耗时差值计算，不携带墙钟语义
+        """
+        # 入口日志保持既有格式不变（历史日志检索口径不被破坏）
         logger.info(
             f"请求: {request.method} {request.path} "
             f"from {request.remote_addr}"
         )
+        # 开始时间挂到g上: g为单请求生命周期对象，after_request可直接读取
+        g.request_start = time.perf_counter()
 
     @app.after_request
-    def add_security_headers(response):
-        """为每个响应添加安全头"""
+    def process_response(response):
+        """
+        响应后置钩子: 添加安全头并记录响应配对日志（安全头+日志合一）
+
+        入参:
+            response (flask.Response): 视图函数或错误处理器产出的
+                                       响应对象（可原地修改响应头）
+
+        返回:
+            flask.Response: 补齐安全头后的原响应对象
+
+        说明:
+            - 耗时 = 当前perf_counter - g.request_start，转毫秒保留1位；
+              g.request_start可能不存在（异常发生在before_request之前
+              等极端场景），用getattr兜底为None，此时耗时字段打"-"
+            - SSE流式接口（/api/executions/<id>/events）的after_request
+              在流生成器完整跑完后才触发，耗时长属正常现象，不做过滤
+        """
+        # 1. 安全响应头（保持既有两行原样，浏览器侧基础防护）
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
+
+        # 2. 取请求开始时间（不存在时None兜底，绝不因日志缺计时搞挂响应）
+        request_start = getattr(g, "request_start", None)
+        if request_start is None:
+            # before_request未正常执行: 耗时不可计算，打"-"占位保持日志结构
+            duration_text = "-"
+        else:
+            # perf_counter差值单位为秒，乘1000转毫秒并保留1位小数
+            duration_ms = (time.perf_counter() - request_start) * 1000
+            duration_text = f"{duration_ms:.1f}ms"
+
+        # 3. 响应配对日志: 与"请求:"日志同method/path，额外携带状态码与耗时
+        logger.info(
+            f"响应: {request.method} {request.path} "
+            f"-> {response.status_code}, 耗时 {duration_text} "
+            f"from {request.remote_addr}"
+        )
         return response

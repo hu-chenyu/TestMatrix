@@ -35,6 +35,7 @@ from flask import Blueprint, request
 from marshmallow import EXCLUDE, Schema, fields, validate
 from werkzeug.utils import secure_filename
 
+from src.common.logger import LogManager
 from src.core.case_manager import MAX_PAGE_SIZE, CaseManager, CaseManagerError
 from src.web.exceptions import (
     ConflictError,
@@ -42,6 +43,8 @@ from src.web.exceptions import (
     ValidationError,
 )
 from src.web.response import created, no_content, success
+
+logger = LogManager.get_logger()
 
 cases_bp = Blueprint("cases", __name__, url_prefix="/api/cases")
 
@@ -361,6 +364,13 @@ def create_case():
             ) from exc
         raise
 
+    # 创建成功业务埋点（Day29）: 业务编号/模块/优先级落日志，
+    # 便于按用例维度检索创建轨迹；仅记日志不改响应结构
+    logger.info(
+        f"用例已创建 | case_id={data['case_id']} | "
+        f"module={data['module']} | priority={data['priority']}"
+    )
+
     return created(data=case)
 
 
@@ -523,6 +533,13 @@ def import_cases():
         if tmp_file.exists():
             os.remove(tmp_file)
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # 导入完成业务埋点（Day29）: 新增/更新计数与原始文件名落日志
+    # （文件名取原始上传名，非secure_filename清洗名，口径同响应data）
+    logger.info(
+        f"用例导入完成 | inserted={stats['inserted']} | "
+        f"updated={stats['updated']} | 文件={original_name}"
+    )
 
     return success(
         data={

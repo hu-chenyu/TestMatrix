@@ -28,6 +28,12 @@
       时发送": heartbeat"注释帧（SSE注释行以冒号开头，浏览器
       EventSource静默忽略），防中间代理/负载均衡掐断空闲连接
 
+功能（第三阶段Day29交付）:
+    - trigger接口case_type枚举校验（api/chip，复用cases.py的
+      VALID_CASE_TYPES单一事实来源，非法值400不再静默走默认）
+    - 批次受理成功后落业务埋点日志（execution_id/筛选用例数/
+      executor/四维筛选条件），与请求级"请求:/响应:"日志分层
+
 数据口径:
     - 批次列表只含已完成批次（finish_execution后才有defect_statistics
       汇总记录），未finish的执行中批次不在列表范围；执行中批次的
@@ -52,11 +58,16 @@ from typing import Iterator, Optional
 
 from flask import Blueprint, Response, request, stream_with_context
 
+from src.common.logger import LogManager
 from src.core.case_manager import MAX_PAGE_SIZE, CaseManager, CaseManagerError
 from src.core.event_bus import get_channel
 from src.core.executors import VALID_EXECUTORS
 from src.web.exceptions import NotFoundError, ValidationError
 from src.web.response import success
+# case_type合法枚举复用cases.py常量（单一事实来源，防两处定义漂移）
+from src.web.routes.cases import VALID_CASE_TYPES
+
+logger = LogManager.get_logger()
 
 executions_bp = Blueprint("executions", __name__, url_prefix="/api/executions")
 
@@ -224,10 +235,13 @@ def trigger_execution():
         1. trigger固定"web"（Web触发来源由服务端裁定，
            不可由前端伪造传入）
         2. executor非法值手动校验转400（简单参数不上marshmallow）
-        3. CaseManager.start_execution筛选用例并落pending批次行，
+        3. case_type枚举校验（api/chip，复用cases.py的
+           VALID_CASE_TYPES），非法值转400（Day29新增）
+        4. CaseManager.start_execution筛选用例并落pending批次行，
            空用例集转400
-        4. daemon后台线程执行批次（_execute_batch_async内部
-           自管session与异常兜底），接口立即返回202不阻塞
+        5. daemon后台线程执行批次（_execute_batch_async内部
+           自管session与异常兜底），接口立即返回202不阻塞；
+           受理成功后落业务埋点日志（Day29新增）
 
     参数:
         无（从request.get_json解析可选请求体）
@@ -238,8 +252,8 @@ def trigger_execution():
              "total_cases": 用例数}
 
     异常:
-        ValidationError: executor非法/请求体非JSON对象/
-                         无符合条件的用例时抛出（400）
+        ValidationError: executor非法/case_type非法/请求体非JSON
+                         对象/无符合条件的用例时抛出（400）
         CaseManagerError: 其他核心层异常原样上抛（兜底500）
     """
     # 请求体可选: 无请求体(None)视为空对象走全量回归
@@ -257,6 +271,18 @@ def trigger_execution():
             f"executor非法: {executor_kind!r}，合法取值: {list(VALID_EXECUTORS)}"
         )
 
+    # 四维筛选条件先解析到局部变量（供核心层透传与受理埋点共用，
+    # 避免日志与实际入参因两次解析发生漂移）
+    module_filter = body.get("module")
+    priority_filter = body.get("priority")
+    tags_filter = body.get("tags")
+    # case_type缺省归一化为api（Day29前非法值静默走默认，此处补齐枚举校验）
+    case_type = _parse_optional_body_str(body, "case_type") or "api"
+    if case_type not in VALID_CASE_TYPES:
+        raise ValidationError(
+            f"case_type非法: {case_type!r}，合法取值: api/chip"
+        )
+
     # 可选筛选与环境参数透传核心层（module/priority/tags/case_type）
     try:
         result = CaseManager.start_execution(
@@ -264,10 +290,10 @@ def trigger_execution():
             executor_name="web",
             environment=_parse_optional_body_str(body, "environment") or "dev",
             remark=_parse_optional_body_str(body, "remark"),
-            module=body.get("module"),
-            priority=body.get("priority"),
-            tags=body.get("tags"),
-            case_type=_parse_optional_body_str(body, "case_type") or "api",
+            module=module_filter,
+            priority=priority_filter,
+            tags=tags_filter,
+            case_type=case_type,
         )
     except CaseManagerError as exc:
         # 关键字分流（口径同6.9/6.10）: 无符合条件的用例转400，
@@ -284,6 +310,22 @@ def trigger_execution():
         args=(result["execution_id"], result["cases"], executor_kind),
         daemon=True,
     ).start()
+
+    # 业务受理埋点（在start之后、return之前）: 记录批次号/筛选用例数/
+    # executor/四维筛选条件，便于后台批次检索与问题定位；未传入
+    # （None）的字段统一打"-"，executor未显式指定同样打"-"（实际
+    # 执行器由工厂按TM_EXECUTOR环境变量裁定，默认simulated）
+    module_text = module_filter if module_filter is not None else "-"
+    priority_text = priority_filter if priority_filter is not None else "-"
+    tags_text = tags_filter if tags_filter is not None else "-"
+    executor_text = executor_kind if executor_kind is not None else "-"
+    logger.info(
+        f"批次已受理 | execution_id={result['execution_id']} | "
+        f"trigger=web | total_cases={result['total_cases']} | "
+        f"executor={executor_text} | "
+        f"筛选=module:{module_text}/priority:{priority_text}/"
+        f"tags:{tags_text}/case_type:{case_type}"
+    )
 
     return success(
         data={
