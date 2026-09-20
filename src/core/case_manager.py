@@ -68,6 +68,13 @@
       向事件通道发布事件，批次终态后关闭并清理通道；埋点全程
       try/except兜底只记日志，日志通道故障绝不影响真实执行
 
+功能（第三阶段Day31交付）:
+    - 缓存失效埋点: create_case/update_case/delete_case/
+      sync_cases_from_file成功后失效用例列表缓存；
+      _execute_batch_async的finished/failed收尾处失效报告统计
+      缓存。失效调用统一走cache_client，Redis故障静默降级，
+      业务代码零try/except
+
 使用示例:
     from src.core.case_manager import CaseManager, generate_execution_id
 
@@ -101,6 +108,7 @@ from sqlalchemy import case, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.common.logger import LogManager
+from src.core.cache import cache_client
 from src.core.data_driver import DataDriver, DataDriverError
 from src.core.event_bus import ExecutionEvent, close_channel, get_channel
 from src.core.executors import get_executor
@@ -310,6 +318,9 @@ class CaseManager:
             f"case_type: {case_type} | 总数: {result['total']} | "
             f"新增: {inserted} | 更新: {updated}"
         )
+        # Day31: 用例数据变更后失效列表缓存（封装内部兜底，
+        # 缓存故障不影响导入主流程，业务代码无需try/except）
+        cache_client.invalidate_cases_list()
         return result
 
     # ------------------------------------------------------------------
@@ -695,6 +706,8 @@ class CaseManager:
             f"用例已创建 | 编号: {case_id_value} | 名称: {name_value} | "
             f"优先级: {payload['priority']}"
         )
+        # Day31: 创建成功后失效用例列表缓存（异常由缓存层静默消化）
+        cache_client.invalidate_cases_list()
         return result
 
     @classmethod
@@ -764,6 +777,8 @@ class CaseManager:
         logger.info(
             f"用例已更新 | 编号: {case_id} | 更新字段: {sorted(payload.keys())}"
         )
+        # Day31: 更新成功后失效用例列表缓存（异常由缓存层静默消化）
+        cache_client.invalidate_cases_list()
         return result
 
     @classmethod
@@ -811,6 +826,8 @@ class CaseManager:
             ) from exc
 
         logger.info(f"用例已删除 | 编号: {case_id}")
+        # Day31: 删除成功后失效用例列表缓存（异常由缓存层静默消化）
+        cache_client.invalidate_cases_list()
         return True
 
     # ------------------------------------------------------------------
@@ -1563,6 +1580,10 @@ class CaseManager:
                notify_execution_result推送邮件/企微通知（异常双层
                兜底不影响主流程；通知含指数退避重试可能耗时数秒，
                置于通道关闭之后确保SSE客户端先收到终态事件）
+            8. 报告统计缓存失效（Day31）: finished分支在finish落库
+               与批次状态更新成功后、failed分支在failed状态收尾后，
+               调cache_client.invalidate_reports清五类报告缓存，
+               缓存故障静默降级不影响执行主流程
 
         线程安全说明: 所有数据库操作均各自新建会话
         （record_execution/finish_execution走session_scope，
@@ -1657,6 +1678,10 @@ class CaseManager:
                 f"通过: {summary['passed']}/{summary['total']} | "
                 f"通过率: {summary['pass_rate']:.2%}"
             )
+            # Day31: finish_execution汇总落库且批次finished状态更新
+            # 成功后失效报告统计缓存（五类聚合结果已变化；缓存层
+            # 静默兜底，故障不影响执行主流程）
+            cache_client.invalidate_reports()
             # 事件埋点: 批次正常完成 → 发布终态事件并关闭清理通道
             cls._publish_execution_event(
                 execution_id,
@@ -1706,6 +1731,10 @@ class CaseManager:
                     f"批次failed状态落库异常 | 批次: {execution_id} | "
                     f"{mark_exc}"
                 )
+            # Day31: 批次终态（failed）收尾处同样失效报告统计缓存，
+            # 与finished分支口径一致（部分明细可能已落库，统计聚合
+            # 存在可见性变化；缓存层静默兜底绝不抛异常）
+            cache_client.invalidate_reports()
             # 事件埋点: 批次异常失败 → 发布终态事件并关闭清理通道
             # （置于状态落库之后，即使落库失败也向订阅方发终态事件）
             cls._publish_execution_event(

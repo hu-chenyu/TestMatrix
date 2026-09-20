@@ -31,6 +31,10 @@ cryptography==41.0.7             # MySQL 8.0 caching_sha2_password认证依赖
 Flask==2.3.3                     # Web后端框架
 Jinja2==3.1.2                    # Flask模板引擎（随Flask安装，显式锁定版本）
 
+# ------------------------------ 缓存层 ------------------------------
+redis==5.0.8                     # Redis客户端（读多写少查询加速，TM_REDIS_ENABLED默认关闭）
+fakeredis==2.23.5                # Redis内存替身（测试专用，fake://协议触发，零真实Redis依赖）
+
 # ------------------------------ 辅助工具 ------------------------------
 python-dotenv==1.0.0             # 环境变量管理
 marshmallow==3.20.1              # 数据序列化与校验
