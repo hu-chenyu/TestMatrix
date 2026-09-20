@@ -36,6 +36,7 @@ from marshmallow import EXCLUDE, Schema, fields, validate
 from werkzeug.utils import secure_filename
 
 from src.common.logger import LogManager
+from src.core.cache import cache_client, cases_list_key
 from src.core.case_manager import MAX_PAGE_SIZE, CaseManager, CaseManagerError
 from src.web.exceptions import (
     ConflictError,
@@ -287,6 +288,11 @@ def list_cases():
             {"items": list[dict], "total": int, "page": int,
              "page_size": int, "total_pages": int}
 
+    缓存（Day31）:
+        规范化七维参数哈希为key，命中缓存直接返回；写操作经
+        CaseManager失效埋点主动清缓存，TM_CACHE_TTL兜底。
+        TM_REDIS_ENABLED=false时整段no-op，行为与未接入一致。
+
     异常:
         ValidationError: 分页参数非法 / case_type或status取值非法时
                          抛出（全局异常处理器统一转400响应）
@@ -312,16 +318,30 @@ def list_cases():
     if status not in VALID_CASE_STATUSES:
         raise ValidationError("status只能为active、disabled或all")
 
-    # 3. 调用核心层分页查询（status=all转None查全部状态）
-    result = CaseManager.list_cases_paged(
-        module=module,
-        priority=priority,
-        case_type=case_type,
-        status=None if status == "all" else status,
-        keyword=keyword,
-        page=page,
-        page_size=page_size,
-    )
+    # 3. 规范化查询参数（与透传核心层的实参口径完全一致，
+    #    缺失维度统一None；status=all转None查全部状态）
+    normalized_status = None if status == "all" else status
+    cache_params = {
+        "module": module,
+        "priority": priority,
+        "case_type": case_type,
+        "status": normalized_status,
+        "keyword": keyword,
+        "page": page,
+        "page_size": page_size,
+    }
+
+    # 4. 先查缓存（Day31）: 命中直接返回，未启用/未命中/Redis
+    #    故障时get_json返回None走回源，对调用方完全透明
+    cache_key = cases_list_key(cache_params)
+    cached_result = cache_client.get_json(cache_key)
+    if cached_result is not None:
+        return success(data=cached_result)
+
+    # 5. 缓存未命中: 调用核心层分页查询并回写缓存（空结果也缓存，
+    #    防穿透；TTL到期前同参数请求不再查库）
+    result = CaseManager.list_cases_paged(**cache_params)
+    cache_client.set_json(cache_key, result)
     return success(data=result)
 
 

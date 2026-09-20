@@ -24,6 +24,14 @@
 
 from flask import Blueprint, request
 
+from src.core.cache import (
+    cache_client,
+    reports_failed_top_key,
+    reports_module_distribution_key,
+    reports_quality_metrics_key,
+    reports_summary_key,
+    reports_trend_key,
+)
 from src.core.report_analyzer import ReportRepository
 from src.web.exceptions import ValidationError
 from src.web.response import success
@@ -82,10 +90,23 @@ def report_summary():
              "error", "skipped", "overall_pass_rate"（加权口径）,
              "latest_batch"（最近批次或null）}
 
+    缓存（Day31）:
+        固定key tm:reports:summary，批次终态后由CaseManager
+        主动失效，TM_CACHE_TTL兜底；空库汇总（空字典结构）
+        同样缓存防穿透。
+
     异常:
         无业务异常（数据库异常由全局处理器兜底500）
     """
-    return success(data=ReportRepository.get_overview_summary())
+    # 缓存命中直接返回；未启用/未命中/故障时静默回源
+    cache_key = reports_summary_key()
+    cached_data = cache_client.get_json(cache_key)
+    if cached_data is not None:
+        return success(data=cached_data)
+
+    data = ReportRepository.get_overview_summary()
+    cache_client.set_json(cache_key, data)
+    return success(data=data)
 
 
 @reports_bp.route("/trend")
@@ -105,13 +126,25 @@ def report_trend():
             "total_cases", "passed", "failed", "error", "created_at"}]；
             空表返回[]
 
+    缓存（Day31）:
+        key含limit（tm:reports:trend:{limit}），不同limit互不
+        干扰；空列表同样缓存防穿透；批次终态后统一按前缀失效。
+
     异常:
         ValidationError: limit非法（非整数/越界）时抛出（400）
     """
     limit = _parse_int_param("limit", DEFAULT_TREND_LIMIT)
     if limit < 1 or limit > MAX_LIMIT:
         raise ValidationError(f"limit必须在1到{MAX_LIMIT}之间")
-    return success(data=ReportRepository.get_trend_data(limit=limit))
+
+    cache_key = reports_trend_key(limit)
+    cached_data = cache_client.get_json(cache_key)
+    if cached_data is not None:
+        return success(data=cached_data)
+
+    data = ReportRepository.get_trend_data(limit=limit)
+    cache_client.set_json(cache_key, data)
+    return success(data=data)
 
 
 @reports_bp.route("/module-distribution")
@@ -130,10 +163,21 @@ def report_module_distribution():
             [{"module", "total", "passed", "failed", "error",
               "skipped", "pass_rate"}]；空表返回[]
 
+    缓存（Day31）:
+        固定key tm:reports:module_distribution，空列表同样
+        缓存防穿透；批次终态后统一按前缀失效。
+
     异常:
         无业务异常（数据库异常由全局处理器兜底500）
     """
-    return success(data=ReportRepository.get_module_distribution())
+    cache_key = reports_module_distribution_key()
+    cached_data = cache_client.get_json(cache_key)
+    if cached_data is not None:
+        return success(data=cached_data)
+
+    data = ReportRepository.get_module_distribution()
+    cache_client.set_json(cache_key, data)
+    return success(data=data)
 
 
 @reports_bp.route("/failed-top")
@@ -154,6 +198,10 @@ def report_failed_top():
               "last_error_message"（最近一次失败堆栈，原样透传）}]；
             排序fail_count降序 -> case_id升序；无失败记录返回[]
 
+    缓存（Day31）:
+        key含limit（tm:reports:failed_top:{limit}），不同limit
+        互不干扰；空列表同样缓存防穿透；批次终态后统一按前缀失效。
+
     异常:
         ValidationError: limit非法（非整数/越界）时抛出（400）
     """
@@ -161,12 +209,18 @@ def report_failed_top():
     if limit < 1 or limit > MAX_LIMIT:
         raise ValidationError(f"limit必须在1到{MAX_LIMIT}之间")
 
+    cache_key = reports_failed_top_key(limit)
+    cached_data = cache_client.get_json(cache_key)
+    if cached_data is not None:
+        return success(data=cached_data)
+
     # 核心层limit防御（ValueError）转400（路由层已先行拦截，
     # 此处为双保险兜底）
     try:
         data = ReportRepository.get_failed_top(limit=limit)
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
+    cache_client.set_json(cache_key, data)
     return success(data=data)
 
 
@@ -192,7 +246,18 @@ def report_quality_metrics():
         tuple[dict, int]: (统一响应体, 200)，data为质量度量字典
             （空库全部指标0.0，不报错）
 
+    缓存（Day31）:
+        固定key tm:reports:quality_metrics，空库指标同样
+        缓存防穿透；批次终态后统一按前缀失效。
+
     异常:
         无业务异常（数据库异常由全局处理器兜底500）
     """
-    return success(data=ReportRepository.get_quality_metrics())
+    cache_key = reports_quality_metrics_key()
+    cached_data = cache_client.get_json(cache_key)
+    if cached_data is not None:
+        return success(data=cached_data)
+
+    data = ReportRepository.get_quality_metrics()
+    cache_client.set_json(cache_key, data)
+    return success(data=data)
