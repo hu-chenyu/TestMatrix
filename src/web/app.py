@@ -27,11 +27,13 @@ Flask Web应用工厂（第二阶段实现）
     # python -c "from src.web import create_app; create_app().run(port=5000)"
 """
 
+import atexit
 import time
 
 from flask import Flask, g, request
 
 from src.common.logger import LogManager
+from src.core.task_queue import start_worker, stop_worker
 from src.web.config import get_config
 from src.web.exceptions import register_error_handlers
 from src.web.routes import base_bp, cases_bp, executions_bp, reports_bp
@@ -85,6 +87,13 @@ def create_app(config_name: str | None = None) -> Flask:
 
     # 5. 注册请求钩子
     _register_request_hooks(app)
+
+    # 6. 任务队列worker启停（Day32）: 仅TM_TASK_WORKER_ENABLED=true
+    #    时start_worker内部实际创建daemon消费线程，默认关闭时
+    #    返回None零开销；atexit兜底保证进程退出时通知worker停止
+    #    （幂等，测试中反复create_app/stop_worker也安全）
+    start_worker()
+    atexit.register(stop_worker)
 
     return app
 

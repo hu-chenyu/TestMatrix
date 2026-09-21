@@ -54,6 +54,7 @@
 import json
 import threading
 import time
+from datetime import datetime
 from typing import Iterator, Optional
 
 from flask import Blueprint, Response, request, stream_with_context
@@ -62,6 +63,7 @@ from src.common.logger import LogManager
 from src.core.case_manager import MAX_PAGE_SIZE, CaseManager, CaseManagerError
 from src.core.event_bus import get_channel
 from src.core.executors import VALID_EXECUTORS
+from src.core.task_queue import STATUS_PENDING, task_queue_client
 from src.web.exceptions import NotFoundError, ValidationError
 from src.web.response import success
 # case_type合法枚举复用cases.py常量（单一事实来源，防两处定义漂移）
@@ -242,6 +244,10 @@ def trigger_execution():
         5. daemon后台线程执行批次（_execute_batch_async内部
            自管session与异常兜底），接口立即返回202不阻塞；
            受理成功后落业务埋点日志（Day29新增）
+        6. 队列调度（Day32）: TM_TASK_QUEUE_ENABLED=true时任务
+           LPUSH到Redis队列由应用内单worker串行消费；未启用或
+           enqueue失败（Redis故障）自动fallback第5步裸线程，
+           202响应格式在两种模式下完全一致
 
     参数:
         无（从request.get_json解析可选请求体）
@@ -302,14 +308,38 @@ def trigger_execution():
             raise
         raise ValidationError(str(exc)) from exc
 
-    # daemon后台线程执行批次，接口立即返回不阻塞
-    # （_execute_batch_async内部自建session、异常兜底置failed，
-    # 绝不向请求线程抛异常）
-    threading.Thread(
-        target=CaseManager._execute_batch_async,
-        args=(result["execution_id"], result["cases"], executor_kind),
-        daemon=True,
-    ).start()
+    # 后台执行调度（Day32）: 队列启用时优先LPUSH投递任务由
+    # 单worker串行消费；未启用或enqueue失败（Redis故障）时
+    # fallback原裸线程——任务不丢、接口不500（铁律）
+    execution_id = result["execution_id"]
+    queued = False
+    if task_queue_client.enabled:
+        # payload严格对齐_execute_batch_async真实签名:
+        # execution_id/cases/executor_kind（筛选与批次行落库已由
+        # start_execution在本请求内完成，worker不重复筛选）
+        task_payload = {
+            "execution_id": execution_id,
+            "cases": result["cases"],
+            "executor_kind": executor_kind,
+        }
+        # 调度层状态hash先落pending+入队时刻（权威状态仍以
+        # SQLite批次行为准，Redis hash仅队列视角快查）
+        task_queue_client.set_status(
+            execution_id,
+            STATUS_PENDING,
+            queued_at=datetime.now().isoformat(),
+        )
+        queued = task_queue_client.enqueue(execution_id, task_payload)
+
+    if not queued:
+        # fallback原裸线程链路（Day24既有行为，队列关闭时逐字节一致）:
+        # _execute_batch_async内部自建session、异常兜底置failed，
+        # 绝不向请求线程抛异常
+        threading.Thread(
+            target=CaseManager._execute_batch_async,
+            args=(execution_id, result["cases"], executor_kind),
+            daemon=True,
+        ).start()
 
     # 业务受理埋点（在start之后、return之前）: 记录批次号/筛选用例数/
     # executor/四维筛选条件，便于后台批次检索与问题定位；未传入
