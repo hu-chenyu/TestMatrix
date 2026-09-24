@@ -2,28 +2,30 @@
 Redis缓存层量化基准脚本（Day33）
 
 定位:
-    - Day31缓存层此前仅在fakeredis内存后端上做过功能测试，本脚本
-      首次在**真实Redis进程**上量化缓存开启前后的应用层性能差异，
-      并验证三项缓存正确性（空结果缓存防穿透/写操作主动失效/
-      TTL到期兜底）
+    - Day31缓存层此前仅在fakeredis内存后端上做过功能测试，
+      本脚本首次在**真实Redis进程**上量化缓存开启前后的
+      应用层性能差异，并验证三项缓存正确性（空结果缓存防
+      穿透/写操作主动失效/TTL到期兜底）
     - 只读测量工具: 不改动src/任何一行，仅通过环境变量切换
       TM_REDIS_ENABLED唯一变量，用Flask test_client发请求
       （排除HTTP网络栈开销，测纯应用层+DB+缓存链路耗时）
 
 唯一变量控制:
     - 两组（缓存关=直连DB / 缓存开=回源一次后命中）使用同一套
-      造好的数据、完全相同的请求序列，唯一差别是TM_REDIS_ENABLED
+      造好的数据、完全相同的请求序列，唯一差别是
+      TM_REDIS_ENABLED
     - 每场景预热10次不计入统计，正式请求默认200次，取
-      P50/P95/P99/平均/最小/最大与QPS（标准库statistics，不引numpy）
+      P50/P95/P99/平均/最小/最大与QPS（标准库statistics，
+      不引numpy）
 
 造量规模:
-    - 1000条用例: 10模块×100条，P0(15%)/P1(25%)/P2(40%)/P3(20%)，
-      api:chip=7:3，全部active，case_id统一BM-前缀
+    - 1000条用例: 10模块×100条，P0(15%)/P1(25%)/P2(40%)/
+      P3(20%)，api:chip=7:3，全部active，case_id统一BM-前缀
     - 100个执行批次: 每批随机20-50条、通过率随机0.3-0.95，
-      经create_execution/record_execution/finish_execution落库
-      （defect_statistics约100行、test_executions约3500行）
-    - 脚本结束默认cleanup全部BM-数据（独立benchmark SQLite库，
-      库文件也一并删除），绝不污染回归测试数据
+      经create_execution/record_execution/finish_execution
+      落库（defect_statistics约100行、test_executions约3500行）
+    - 脚本结束默认cleanup全部BM-数据（独立benchmark SQLite
+      库，库文件也一并删除），绝不污染回归测试数据
 
 命令行用法（PowerShell，须先启动真实Redis并ping通）:
     py -m scripts.benchmark_cache --help
@@ -31,6 +33,11 @@ Redis缓存层量化基准脚本（Day33）
     py -m scripts.benchmark_cache --scenario cases-list --no-cleanup
     # 真实Redis启动（Docker）:
     # docker run -d --name tm-redis -p 6379:6379 redis:7-alpine
+
+运行方式兼容:
+    同时支持 py -m scripts.benchmark_cache 与直接
+    py scripts/benchmark_cache.py；后者sys.path默认只含
+    scripts/目录，故在此先把项目根插入sys.path再导入src.*
 """
 
 import argparse
@@ -46,6 +53,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+# 项目根目录（scripts/的上一级）必须在import src.*之前确定并加入
+# sys.path，保证"直接脚本运行"与"-m模块运行"两种方式均可导入
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import redis
 from flask import Flask
 
@@ -60,9 +73,6 @@ from src.db.db_session import DatabaseSession
 from src.web import create_app
 
 logger = LogManager.get_logger()
-
-# 项目根目录（scripts/的上一级），benchmark独立库与报告均落项目内
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # BM-前缀: 基准数据统一标识，造量与cleanup都按此前缀过滤
 BM_CASE_PREFIX = "BM-"
@@ -932,6 +942,22 @@ class BenchmarkReportGenerator:
     """基准Markdown报告渲染器（所有数字均来自results，禁止编造）"""
 
     @staticmethod
+    def _verdict_text(passed: bool) -> str:
+        """
+        布尔验证结论转展示文本（内部方法）
+
+        参数:
+            passed (bool): 该项验证是否通过
+
+        返回:
+            str: 通过"✅ True"，未通过"❌ False"
+
+        异常:
+            无
+        """
+        return "✅ True" if passed else "❌ False"
+
+    @staticmethod
     def _improvement(disabled_value: float, enabled_value: float) -> str:
         """
         计算改善百分比（内部方法）
@@ -970,7 +996,9 @@ class BenchmarkReportGenerator:
             "| 指标 | 缓存关闭(直连DB) | 缓存开启 | 改善幅度 |",
             "| --- | --- | --- | --- |",
         ]
-        # 延迟指标: 下降即改善，_improvement正值代表变快
+        # 延迟指标: 下降即改善。方向标签必须按实际正负动态给，
+        # 正值（延迟下降）=更快；负值（延迟反而上升，统计波动）
+        # =更慢；N/A不附标签，避免"负值配更快"的自相矛盾
         for metric, label in (
             ("p50", "P50延迟(ms)"),
             ("p95", "P95延迟(ms)"),
@@ -979,11 +1007,19 @@ class BenchmarkReportGenerator:
             ("min", "最小延迟(ms)"),
             ("max", "最大延迟(ms)"),
         ):
+            improvement = BenchmarkReportGenerator._improvement(
+                disabled[metric], enabled[metric]
+            )
+            if improvement == "N/A":
+                direction = ""
+            elif improvement.startswith("-"):
+                direction = "（更慢）"
+            else:
+                direction = "（更快）"
             lines.append(
                 f"| {label} | {disabled[metric]:.3f} | "
                 f"{enabled[metric]:.3f} | "
-                f"{BenchmarkReportGenerator._improvement(disabled[metric], enabled[metric])}"
-                f"（更快） |"
+                f"{improvement}{direction} |"
             )
         # QPS: 上升为改善，单独计算方向
         qps_delta = (
@@ -1037,6 +1073,16 @@ class BenchmarkReportGenerator:
             else 0.0
         )
         all_passed = all(bool(value) for value in penetration.values())
+        # 三项布尔结论预先转文本（缩短表格行，避免emoji全角超行长）
+        verdict_empty = BenchmarkReportGenerator._verdict_text(
+            penetration["empty_result_cached"]
+        )
+        verdict_invalidation = BenchmarkReportGenerator._verdict_text(
+            penetration["invalidation_works"]
+        )
+        verdict_ttl = BenchmarkReportGenerator._verdict_text(
+            penetration["ttl_expires"]
+        )
 
         lines = [
             "# Redis缓存层量化对比报告",
@@ -1089,17 +1135,20 @@ class BenchmarkReportGenerator:
             "",
             "| 验证项 | 结果 | 说明 |",
             "| --- | --- | --- |",
-            f"| 空结果缓存（防穿透） | {'✅ True' if penetration['empty_result_cached'] else '❌ False'} "
-            "| 不存在模块空页被缓存，TTL内不再查库 |",
-            f"| 写操作主动失效 | {'✅ True' if penetration['invalidation_works'] else '❌ False'} "
+            f"| 空结果缓存（防穿透） | "
+            f"{verdict_empty} | 不存在模块空页被缓存，TTL内不再查库 |",
+            f"| 写操作主动失效 | {verdict_invalidation} "
             "| 新建用例后tm:cases:list缓存立即清除 |",
-            f"| TTL到期兜底 | {'✅ True' if penetration['ttl_expires'] else '❌ False'} "
+            f"| TTL到期兜底 | {verdict_ttl} "
             "| TTL=1秒写入后1.5秒自动过期 |",
             "",
             "## 7. 结论与建议",
             "",
-            f"1. 用例列表接口开启缓存后平均延迟降低{list_mean_gain.lstrip('+-')}%、",
-            f"   P95延迟降低{list_p95_gain.lstrip('+-')}%（缓存关闭"
+            # _improvement返回值已含"%"（形如"+57.2%"），此处
+            # 去掉正负号后直接用，禁止再拼一个%造成双百分号
+            f"1. 用例列表接口开启缓存后平均延迟降低"
+            f"{list_mean_gain.lstrip('+-')}、",
+            f"   P95延迟降低{list_p95_gain.lstrip('+-')}（缓存关闭"
             f"{cases_list['disabled']['mean']:.3f}ms → "
             f"{cases_list['enabled']['mean']:.3f}ms），",
             "   读多写少场景命中缓存可显著降低数据库分页查询开销。",
