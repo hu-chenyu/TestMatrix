@@ -6,6 +6,8 @@ Flask蓝图路由包
     - cases_bp:       用例管理API，URL前缀 /api/cases
     - executions_bp:  执行记录API，URL前缀 /api/executions
     - reports_bp:     报告API，URL前缀 /api/reports
+    - pages_bp:       HTML页面路由（Day35前端骨架），URL前缀 /，
+                      与 /api/* 数据接口严格分离
 
 蓝图拆分原则:
     按业务领域垂直拆分，每个蓝图独立管理自己的路由，
@@ -15,6 +17,13 @@ Flask蓝图路由包
 from src.web.routes.base import base_bp
 from src.web.routes.cases import cases_bp
 from src.web.routes.executions import executions_bp
+from src.web.routes.pages import pages_bp
 from src.web.routes.reports import reports_bp
 
-__all__ = ["base_bp", "cases_bp", "executions_bp", "reports_bp"]
+__all__ = [
+    "base_bp",
+    "cases_bp",
+    "executions_bp",
+    "reports_bp",
+    "pages_bp",
+]
