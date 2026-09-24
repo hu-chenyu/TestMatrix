@@ -58,8 +58,9 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 pytest                  # 全量用例
 pytest -m smoke         # 仅冒烟用例
 
-# 3. 启动Web平台（Web后端交付后生效）
-python -m src.web.app   # 访问 http://localhost:5000
+# 3. 一键启动 Web 平台（零外部依赖，纯 SQLite 即可运行）
+python run.py             # 启动后浏览器访问 http://localhost:5000/dashboard
+# 可选参数：--port 8080 指定端口 / --host 0.0.0.0 开放局域网 / --debug 调试模式
 ```
 
 ### 更多体验命令
