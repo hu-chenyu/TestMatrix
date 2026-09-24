@@ -1,0 +1,19 @@
+{# 执行记录页面（Day35 骨架占位，Day46-49 上线批次列表/详情/触发/SSE 日志） #}
+{% extends "base.html" %}
+
+{% block title %}执行记录 - TestMatrix{% endblock %}
+
+{% block content %}
+<!-- 骨架阶段占位卡片：仅渲染静态结构，数据由 Day46+ 前端 JS 异步调 /api/executions 获取 -->
+<div class="card placeholder-card">
+    <div class="card-body py-5">
+        <div class="placeholder-icon mb-3">
+            <i class="bi bi-play-circle"></i>
+        </div>
+        <h2 class="h4 mb-3">执行记录建设中（Day46-49 上线）</h2>
+        <p class="text-secondary mb-0">
+            将提供批次列表、用例详情、执行触发与实时日志能力。
+        </p>
+    </div>
+</div>
+{% endblock %}

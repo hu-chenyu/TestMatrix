@@ -1,0 +1,19 @@
+{# 用例管理页面（Day35 骨架占位，Day41-45 上线列表/筛选/表单/导入） #}
+{% extends "base.html" %}
+
+{% block title %}用例管理 - TestMatrix{% endblock %}
+
+{% block content %}
+<!-- 骨架阶段占位卡片：仅渲染静态结构，数据由 Day41+ 前端 JS 异步调 /api/cases 获取 -->
+<div class="card placeholder-card">
+    <div class="card-body py-5">
+        <div class="placeholder-icon mb-3">
+            <i class="bi bi-list-check"></i>
+        </div>
+        <h2 class="h4 mb-3">用例管理建设中（Day41-45 上线）</h2>
+        <p class="text-secondary mb-0">
+            将提供用例列表、筛选搜索、新增编辑与批量导入能力。
+        </p>
+    </div>
+</div>
+{% endblock %}

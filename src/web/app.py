@@ -10,7 +10,7 @@ Flask Web应用工厂（第二阶段实现）
 架构:
     create_app(config_name) -> Flask 实例
         ├── 加载配置（Config/DevelopmentConfig/TestingConfig/ProductionConfig）
-        ├── 注册蓝图（base / cases / executions / reports）
+        ├── 注册蓝图（base / cases / executions / reports / pages）
         ├── 注册全局异常处理器（APIError/404/405/500/Exception兜底，
         │   由exceptions.register_error_handlers统一提供）
         ├── 注册请求钩子（before_request 记请求日志与开始时间 /
@@ -36,7 +36,13 @@ from src.common.logger import LogManager
 from src.core.task_queue import start_worker, stop_worker
 from src.web.config import get_config
 from src.web.exceptions import register_error_handlers
-from src.web.routes import base_bp, cases_bp, executions_bp, reports_bp
+from src.web.routes import (
+    base_bp,
+    cases_bp,
+    executions_bp,
+    pages_bp,
+    reports_bp,
+)
 
 logger = LogManager.get_logger()
 
@@ -76,6 +82,9 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(cases_bp)             # URL前缀: /api/cases
     app.register_blueprint(executions_bp)        # URL前缀: /api/executions
     app.register_blueprint(reports_bp)           # URL前缀: /api/reports
+    # Day35: HTML页面蓝图（无/api前缀），页面路由与JSON接口严格分离，
+    # 根路径 / 仍由 base_bp 返回 JSON，前端入口为 /dashboard
+    app.register_blueprint(pages_bp)             # URL前缀: /（HTML页面）
 
     logger.debug(
         f"已注册蓝图: {', '.join(app.blueprints.keys())}"

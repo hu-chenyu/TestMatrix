@@ -1,0 +1,99 @@
+/* ==========================================================================
+   TestMatrix 全局自定义样式（Day35 前端骨架）
+   作用：在 Bootstrap5 基础上补充平台级布局与视觉微调，
+   各子页面通过 {% block extra_css %} 追加页面级样式。
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. 全局 CSS 变量：主色、导航高度、背景色等平台级设计令牌单一事实来源
+   -------------------------------------------------------------------------- */
+:root {
+    --tm-primary: #0d6efd;              /* 平台主色（与 Bootstrap primary 对齐） */
+    --tm-navbar-height: 72px;           /* 顶部固定导航栏高度，用于内容区避让 */
+    --tm-bg-color: #f5f7fa;             /* 页面浅灰背景色，降低卡片对比刺激 */
+    --tm-footer-bg: #e9ecef;            /* 页脚背景色 */
+    --tm-text-muted: #6c757d;           /* 次要文字色 */
+    --tm-border-radius: 0.5rem;         /* 卡片统一圆角 */
+}
+
+/* --------------------------------------------------------------------------
+   2. 基础布局：flex 纵向列 + 最小满屏高度，配合 main 伸缩实现 sticky footer
+   -------------------------------------------------------------------------- */
+body {
+    display: flex;                       /* 纵向 flex 容器：导航/main/footer 三段 */
+    flex-direction: column;
+    min-height: 100vh;                   /* 内容不足一屏时 footer 仍贴底 */
+    padding-top: var(--tm-navbar-height);/* 避让 fixed-top 固定导航栏 */
+    background-color: var(--tm-bg-color);
+}
+
+/* 主内容区：占满除导航与页脚外的全部剩余空间 */
+main {
+    flex: 1 0 auto;                      /* 可伸不可缩，撑开页脚到视口底部 */
+    padding-top: 1.5rem;
+    padding-bottom: 2rem;
+}
+
+/* --------------------------------------------------------------------------
+   3. 顶部导航栏微调：品牌字重与导航链接最小点击宽度
+   -------------------------------------------------------------------------- */
+.navbar-brand {
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.navbar-nav .nav-link {
+    min-width: 96px;                     /* 保证三个导航项点击区域一致 */
+}
+
+/* 右侧健康状态占位（Day36+ 接入 /health 后由 JS 改写颜色与文案） */
+.health-status {
+    color: var(--tm-text-muted);
+    font-size: 0.875rem;
+}
+
+/* --------------------------------------------------------------------------
+   4. 页脚：sticky footer 末段，flex-shrink:0 防止被压缩
+   -------------------------------------------------------------------------- */
+.app-footer {
+    flex-shrink: 0;
+    background-color: var(--tm-footer-bg);
+    color: var(--tm-text-muted);
+    font-size: 0.8125rem;
+}
+
+.app-footer a {
+    color: var(--tm-text-muted);
+    text-decoration: none;
+}
+
+/* --------------------------------------------------------------------------
+   5. 卡片/表格/徽章视觉微调：统一圆角与阴影，弱化默认边框突兀感
+   -------------------------------------------------------------------------- */
+.card {
+    border-radius: var(--tm-border-radius);
+    border: none;
+    box-shadow: 0 1px 4px rgba(13, 110, 253, 0.08);
+}
+
+.table thead th {
+    background-color: #f1f3f7;           /* 表头浅底，提升长表格可读性 */
+    white-space: nowrap;
+}
+
+.badge {
+    font-weight: 500;
+    padding: 0.4em 0.65em;
+}
+
+/* 骨架阶段占位卡片垂直居中，Day36+ 接入真实内容后仍可复用 */
+.placeholder-card {
+    max-width: 720px;
+    margin: 3rem auto;
+    text-align: center;
+}
+
+.placeholder-card .placeholder-icon {
+    font-size: 3rem;
+    color: var(--tm-primary);
+}
