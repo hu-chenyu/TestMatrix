@@ -85,20 +85,23 @@ class TestFrontendSkeleton:
         self, client: FlaskClient
     ) -> None:
         """
-        测试模板继承: /dashboard 页面应含Bootstrap5 CDN标识与导航栏，
+        测试模板继承: /dashboard 页面应含Bootstrap5 本地静态资源与导航栏，
         证明子页面通过 {% extends "base.html" %} 继承了统一HTML骨架
         """
         # 请求看板页并解码为文本便于做子串断言
         response = client.get("/dashboard")
         html = response.data.decode("utf-8")
 
-        # Bootstrap5 CSS/JS 走 jsdelivr CDN（固定版本号5.3.3）
-        assert "cdn.jsdelivr.net/npm/bootstrap@5.3.3" in html, (
-            "页面应经CDN加载Bootstrap5 5.3.3"
+        # Bootstrap5 CSS/JS 走本地静态资源（离线可用，不依赖外网CDN）
+        assert "/static/css/bootstrap.min.css" in html, (
+            "页面应经本地静态资源加载 Bootstrap5 CSS"
         )
-        # Bootstrap Icons 图标字体CDN
-        assert "bootstrap-icons@1.11.3" in html, (
-            "页面应经CDN加载Bootstrap Icons 1.11.3"
+        assert "/static/js/bootstrap.bundle.min.js" in html, (
+            "页面应经本地静态资源加载 Bootstrap5 JS bundle"
+        )
+        # Bootstrap Icons 图标字体本地静态资源
+        assert "/static/css/bootstrap-icons.min.css" in html, (
+            "页面应经本地静态资源加载 Bootstrap Icons"
         )
         # 导航栏与全局样式均由基模板提供
         assert "navbar" in html, "继承base.html后页面应含导航栏"
