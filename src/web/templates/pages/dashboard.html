@@ -1,19 +1,169 @@
-{# 质量看板页面（Day35 骨架占位，Day36-40 上线统计卡片与 ECharts 图表） #}
+{# 质量看板页面（Day36 框架：分区布局 + ECharts 基础设施 + summary/health 链路打通）
+   边界：卡片数值（Day37）、趋势折线（Day38）、饼图/柱状/失败Top（Day39）不在本日实现，
+   本日各待填充区域仅呈现 loading/error/empty 三态占位。 #}
 {% extends "base.html" %}
 
 {% block title %}质量看板 - TestMatrix{% endblock %}
 
 {% block content %}
-<!-- 骨架阶段占位卡片：仅渲染静态结构，数据由 Day36+ 前端 JS 异步调 /api 获取 -->
-<div class="card placeholder-card">
-    <div class="card-body py-5">
-        <div class="placeholder-icon mb-3">
-            <i class="bi bi-speedometer2"></i>
-        </div>
-        <h2 class="h4 mb-3">质量看板建设中</h2>
-        <p class="text-secondary mb-0">
-            Day36-40 上线统计卡片与图表，敬请期待。
-        </p>
+<!-- ========== 1. 页头行：标题 + 最后更新时间 + 手动刷新 ========== -->
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">
+        <i class="bi bi-speedometer2 me-2 text-primary"></i>质量看板
+    </h1>
+    <div class="d-flex align-items-center gap-2">
+        <small class="text-muted">
+            最后更新：<span id="lastUpdated">--</span>
+        </small>
+        <!-- 刷新按钮：加载中时禁用并显示内置 spinner（loading 态视觉钩子） -->
+        <button id="refreshBtn" class="btn btn-outline-primary btn-sm" type="button">
+            <span class="spinner-border spinner-border-sm d-none me-1"
+                  id="refreshSpinner" aria-hidden="true"></span>
+            <i class="bi bi-arrow-clockwise me-1" id="refreshIcon"></i>刷新
+        </button>
     </div>
 </div>
+
+<!-- summary 加载失败提示条（error 态，默认隐藏，由 dashboard.js 切换） -->
+<div class="alert alert-danger d-none py-2 mb-3" id="statsErrorAlert" role="alert">
+    <i class="bi bi-exclamation-triangle-fill me-1"></i>
+    统计数据加载失败，请点击右上角“刷新”重试。
+</div>
+
+<!-- ========== 2. 统计卡片区：4 个等宽卡片，数值位 Day37 才渲染（本日统一 “--” 占位） ========== -->
+<div class="row g-3 mb-3" id="statsCardsRow" aria-busy="true">
+    <!-- 累计执行：total_executed -->
+    <div class="col-sm-6 col-lg-3">
+        <div class="card h-100">
+            <div class="card-body d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="text-muted small mb-1">累计执行</div>
+                    <div class="fs-3 fw-bold stat-value text-muted"
+                         id="statTotal" data-state="loading">--</div>
+                </div>
+                <i class="bi bi-list-ul fs-3 text-primary opacity-75"></i>
+            </div>
+        </div>
+    </div>
+    <!-- 通过率：overall_pass_rate（百分比文案由 Day37 格式化） -->
+    <div class="col-sm-6 col-lg-3">
+        <div class="card h-100">
+            <div class="card-body d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="text-muted small mb-1">通过率</div>
+                    <div class="fs-3 fw-bold stat-value text-muted"
+                         id="statPassRate" data-state="loading">--</div>
+                </div>
+                <i class="bi bi-percent fs-3 text-success opacity-75"></i>
+            </div>
+        </div>
+    </div>
+    <!-- 执行批次：total_batches -->
+    <div class="col-sm-6 col-lg-3">
+        <div class="card h-100">
+            <div class="card-body d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="text-muted small mb-1">执行批次</div>
+                    <div class="fs-3 fw-bold stat-value text-muted"
+                         id="statBatches" data-state="loading">--</div>
+                </div>
+                <i class="bi bi-layers fs-3 text-info opacity-75"></i>
+            </div>
+        </div>
+    </div>
+    <!-- 失败数：failed + broken 合计口径由 Day37 处理 -->
+    <div class="col-sm-6 col-lg-3">
+        <div class="card h-100">
+            <div class="card-body d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="text-muted small mb-1">失败数</div>
+                    <div class="fs-3 fw-bold stat-value text-muted"
+                         id="statFailed" data-state="loading">--</div>
+                </div>
+                <i class="bi bi-x-octagon fs-3 text-danger opacity-75"></i>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 3. 图表区：ECharts 容器本日初始化并显示“暂无数据”空态 ========== -->
+<!-- 3.1 通过率趋势折线（Day38 上线） -->
+<div class="row g-3 mb-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-white fw-semibold">
+                <i class="bi bi-graph-up me-1 text-primary"></i>通过率趋势
+            </div>
+            <div class="card-body">
+                <div id="trendChart" style="height:320px"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 3.2 模块分布饼图 + 优先级柱状图（Day39 上线） -->
+<div class="row g-3 mb-3">
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header bg-white fw-semibold">
+                <i class="bi bi-pie-chart me-1 text-primary"></i>模块分布
+            </div>
+            <div class="card-body">
+                <div id="modulePieChart" style="height:320px"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header bg-white fw-semibold">
+                <i class="bi bi-bar-chart me-1 text-primary"></i>优先级分布
+            </div>
+            <div class="card-body">
+                <div id="priorityBarChart" style="height:320px"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 4. 失败用例 Top 榜（Day39 填充 tbody，本日为空态占位行） ========== -->
+<div class="row g-3 mb-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-white fw-semibold">
+                <i class="bi bi-trophy me-1 text-danger"></i>失败用例 Top 榜
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0" id="failedTopTable">
+                    <thead>
+                        <tr>
+                            <th>用例编号</th>
+                            <th>用例名称</th>
+                            <th>所属模块</th>
+                            <th class="text-end">失败次数</th>
+                            <th>最近失败时间</th>
+                        </tr>
+                    </thead>
+                    <!-- empty 态占位行：Day39 拿到数据后移除本行再渲染真实行 -->
+                    <tbody id="failedTopTableBody">
+                        <tr id="failedTopEmpty">
+                            <td colspan="5" class="text-center text-muted py-4">
+                                <i class="bi bi-inbox me-1"></i>暂无数据
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<!-- ECharts5 仅看板页加载（不进 base.html 全局，避免其他页面白加载）；
+     CDN 开发阶段策略，SRI hash 未随版本发布故此处省略 integrity -->
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<!-- ECharts 统一封装（初始化/防抖resize/空态/调色板），Day38/39 复用 -->
+<script src="{{ url_for('static', filename='js/chart-helper.js') }}"></script>
+<!-- 看板业务脚本：summary 链路 + /health 健康状态 + 页面初始化 -->
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 {% endblock %}
