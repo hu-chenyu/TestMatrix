@@ -135,17 +135,17 @@ class TestDashboardFramework:
         self, client: FlaskClient
     ) -> None:
         """
-        测试 ECharts CDN 与子脚本引用: 页面应含 echarts CDN 标识及
-        chart-helper.js、dashboard.js 的 url_for 静态路径，
+        测试 ECharts 本地静态资源与子脚本引用: 页面应含 echarts.min.js
+        本地路径及 chart-helper.js、dashboard.js 的 url_for 静态路径，
         且 ECharts 仅由看板页 extra_js 引入（不进 base.html 全局）
         """
         # 请求看板页
         response = client.get("/dashboard")
         html = response.data.decode("utf-8")
 
-        # ECharts5 CDN（5.5.1，仅本页 extra_js 加载）
-        assert "cdn.jsdelivr.net/npm/echarts@5.5.1" in html, (
-            "看板页应经CDN引入 echarts 5.5.1"
+        # ECharts5 本地静态资源（版本5.5.0，仅本页 extra_js 加载，离线可用）
+        assert "/static/js/echarts.min.js" in html, (
+            "看板页应经本地静态资源引入 echarts.min.js"
         )
         # 两个新增脚本的静态资源路径（url_for 产物）
         assert "/static/js/chart-helper.js" in html, (

@@ -159,9 +159,8 @@
 {% endblock %}
 
 {% block extra_js %}
-<!-- ECharts5 仅看板页加载（不进 base.html 全局，避免其他页面白加载）；
-     CDN 开发阶段策略，SRI hash 未随版本发布故此处省略 integrity -->
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<!-- ECharts5 仅看板页加载（本地静态资源，离线可用；版本5.5.0，国内镜像无5.5.1故取兼容patch版） -->
+<script src="{{ url_for('static', filename='js/echarts.min.js') }}"></script>
 <!-- ECharts 统一封装（初始化/防抖resize/空态/调色板），Day38/39 复用 -->
 <script src="{{ url_for('static', filename='js/chart-helper.js') }}"></script>
 <!-- 看板业务脚本：summary 链路 + /health 健康状态 + 页面初始化 -->
