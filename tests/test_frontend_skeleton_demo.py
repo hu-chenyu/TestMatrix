@@ -156,12 +156,16 @@ class TestFrontendSkeleton:
 
     def test_page_placeholders_render(self, client: FlaskClient) -> None:
         """
-        测试占位内容与导航高亮: 三个页面分别渲染各自占位标题，
+        测试页面特征内容与导航高亮: 各页面渲染各自特征标题，
         且当前页对应的导航项唯一带active类
+
+        说明: Day36 起 /dashboard 已由占位卡片重写为真实看板框架，
+        其特征文案改为框架分区标题（失败用例 Top 榜）；
+        /cases、/executions 仍为 Day35 占位页。
         """
-        # 页面路径 → 占位标题（占位文案与pages子模板逐一对应）
+        # 页面路径 → 特征标题（与pages子模板当前内容逐一对应）
         page_expectations = (
-            ("/dashboard", "质量看板建设中"),
+            ("/dashboard", "失败用例 Top 榜"),
             ("/cases", "用例管理建设中"),
             ("/executions", "执行记录建设中"),
         )
@@ -170,9 +174,9 @@ class TestFrontendSkeleton:
             response = client.get(path)
             html = response.data.decode("utf-8")
 
-            # 占位标题必须渲染（区别于导航栏同名链接文案）
+            # 特征标题必须渲染（区别于导航栏同名链接文案）
             assert placeholder_title in html, (
-                f"{path} 页面应渲染占位标题：{placeholder_title}"
+                f"{path} 页面应渲染特征标题：{placeholder_title}"
             )
             # 当前导航项唯一高亮：恰好一个 nav-link 带 active 类
             assert html.count('nav-link active') == 1, (
