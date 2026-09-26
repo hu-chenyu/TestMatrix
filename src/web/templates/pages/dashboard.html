@@ -1,6 +1,7 @@
-{# 质量看板页面（Day36 框架：分区布局 + ECharts 基础设施 + summary/health 链路打通）
-   边界：卡片数值（Day37）、趋势折线（Day38）、饼图/柱状/失败Top（Day39）不在本日实现，
-   本日各待填充区域仅呈现 loading/error/empty 三态占位。 #}
+{# 质量看板页面（Day36 框架 + Day37 统计卡片渲染）
+   Day37：4 个统计卡片渲染真实数值（用例总数取 cases 列表 total，
+   其余三项取 summary）；趋势折线（Day38）、饼图/柱状/失败Top（Day39）
+   仍保持“暂无数据”空态，本日不提前实现。 #}
 {% extends "base.html" %}
 
 {% block title %}质量看板 - TestMatrix{% endblock %}
@@ -30,18 +31,18 @@
     统计数据加载失败，请点击右上角“刷新”重试。
 </div>
 
-<!-- ========== 2. 统计卡片区：4 个等宽卡片，数值位 Day37 才渲染（本日统一 “--” 占位） ========== -->
+<!-- ========== 2. 统计卡片区：4 个等宽卡片，Day37 由 dashboard.js 渲染真实数值 ========== -->
 <div class="row g-3 mb-3" id="statsCardsRow" aria-busy="true">
-    <!-- 累计执行：total_executed -->
+    <!-- 用例总数：cases 列表 total（用例资产口径，非执行次数） -->
     <div class="col-sm-6 col-lg-3">
         <div class="card h-100">
             <div class="card-body d-flex justify-content-between align-items-start">
                 <div>
-                    <div class="text-muted small mb-1">累计执行</div>
+                    <div class="text-muted small mb-1">用例总数</div>
                     <div class="fs-3 fw-bold stat-value text-muted"
                          id="statTotal" data-state="loading">--</div>
                 </div>
-                <i class="bi bi-list-ul fs-3 text-primary opacity-75"></i>
+                <i class="bi bi-collection fs-3 text-primary opacity-75"></i>
             </div>
         </div>
     </div>
@@ -71,14 +72,20 @@
             </div>
         </div>
     </div>
-    <!-- 失败数：failed + broken 合计口径由 Day37 处理 -->
+    <!-- 失败数：广义未通过口径 failed + error（标题旁“含异常”极小字 + title 双重提示） -->
     <div class="col-sm-6 col-lg-3">
         <div class="card h-100">
             <div class="card-body d-flex justify-content-between align-items-start">
                 <div>
-                    <div class="text-muted small mb-1">失败数</div>
+                    <div class="text-muted small mb-1"
+                         title="失败数=失败(failed)+异常(error)">
+                        失败数
+                        <span class="badge text-bg-light border text-secondary"
+                              style="font-size:0.65rem; font-weight:400;">含异常</span>
+                    </div>
                     <div class="fs-3 fw-bold stat-value text-muted"
-                         id="statFailed" data-state="loading">--</div>
+                         id="statFailed" data-state="loading"
+                         title="失败数=失败(failed)+异常(error)">--</div>
                 </div>
                 <i class="bi bi-x-octagon fs-3 text-danger opacity-75"></i>
             </div>

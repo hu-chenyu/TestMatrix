@@ -72,7 +72,7 @@ class TestDashboardFramework:
     def test_dashboard_stats_cards_layout(self, client: FlaskClient) -> None:
         """
         测试统计卡片区布局: GET /dashboard 应含 statsCardsRow 容器及
-        累计执行/通过率/执行批次/失败数四个数值位 id（本日值为 “--”）
+        用例总数/通过率/执行批次/失败数四个数值位 id（Day37 起渲染真实值）
         """
         # 请求看板页并解码为文本
         response = client.get("/dashboard")
