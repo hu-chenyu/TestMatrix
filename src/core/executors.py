@@ -17,7 +17,7 @@
     - 策略模式: 编排代码（CaseManager._execute_batch_async）只依赖
       BaseExecutor抽象契约，不感知具体执行器实现
     - 依赖倒置: 高层编排模块不直接依赖低层执行细节，二者都依赖
-      抽象接口；后续Day32换Redis任务队列、Day119接入真实pytest
+      抽象接口；后续Day32换Redis任务队列、Day52-79接入真实pytest
       执行器时，编排代码零改动
     - 不引入新第三方依赖: subprocess为标准库
 """
@@ -165,7 +165,7 @@ class PytestRunner(BaseExecutor):
         异常:
             无
         """
-        # TODO(Day25+): 真实测试集执行时按用例数据解析可执行
+        # TODO: 真实测试集执行时按用例数据解析可执行
         # 测试文件路径（当前用例暂无script_path字段，先用case_id占位）
         path = str(case.get("script_path") or case.get("case_id", ""))
         return ["py", "-m", "pytest", path, "-q", "--tb=short"]

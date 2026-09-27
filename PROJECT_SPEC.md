@@ -86,7 +86,8 @@ python -m src.web.app
 | TM_DB_MYSQL_HOST/PORT/USER/PASSWORD/DATABASE | MySQL 连接配置 | 127.0.0.1/3306/root/空/testmatrix |
 | TM_EMAIL_ENABLED / SMTP_HOST / SMTP_PORT / SENDER / PASSWORD / RECEIVERS | 邮件通知（465=SSL，587=STARTTLS） | false / 示例占位 |
 | TM_WECHAT_ENABLED / WEBHOOK_URL | 企微机器人通知 | false / 空 |
-| TM_REDIS_ENABLED / HOST / PORT / PASSWORD / DB | Redis 缓存与队列（**Day31-33 已接入**） | false / 127.0.0.1 / 6379 |
+| TM_REDIS_ENABLED / TM_REDIS_URL / TM_CACHE_TTL | Redis 缓存开关 / 连接 URL（fake:// 为测试内存实例）/ 缓存 TTL 秒（**Day31-33 已接入**） | false / redis://127.0.0.1:6379/0 / 300 |
+| TM_TASK_QUEUE_ENABLED / TM_TASK_WORKER_ENABLED / TM_TASK_QUEUE_KEY / TM_TASK_BRPOP_TIMEOUT | 任务队列开关 / worker 线程开关（缺省跟随队列开关）/ 队列 list key / BRPOP 超时秒 | false / false / tm:queue:tasks / 1.0 |
 
 ## 7. 演示效果
 
