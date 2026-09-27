@@ -15,7 +15,7 @@
 
 **目标用户**：测试工程师（个人/小团队）、开源二开者、测试效能建设参考者。
 
-**为什么不用 pytest 直接跑**：pytest 解决"执行"，不解决"管理"——用例资产化（入库/检索/分级）、执行批次化（历史/趋势/对比）、结果可视化（Dashboard/质量度量）、失败闭环（通知/@人/死信）是平台层的价值；且平台通过 subprocess 反向驱动真实 pytest 执行（Day118-135 交付），两者是包含关系不是替代关系。
+**为什么不用 pytest 直接跑**：pytest 解决"执行"，不解决"管理"——用例资产化（入库/检索/分级）、执行批次化（历史/趋势/对比）、结果可视化（Dashboard/质量度量）、失败闭环（通知/@人/死信）是平台层的价值；且平台通过 subprocess 反向驱动真实 pytest 执行（**Day52-61 + Day70-79 交付**，分两段前移），两者是包含关系不是替代关系。
 
 ## 2. 核心功能与效果
 
@@ -26,8 +26,8 @@
 | 报告分析 | Allure 结果解析、通过率/耗时 P95/失败明细统计、模块与优先级分布、趋势数据入库 | 每个批次自动产出统计，Dashboard 直接消费 |
 | Web 可视化 | Dashboard（统计卡片/趋势折线/模块饼图/失败 Top/质量度量）、用例管理页、执行记录页（批次列表/单用例详情/失败堆栈/SSE 实时日志） | 浏览器里看板式操作，触发执行实时看日志滚动 |
 | 通知推送 | 执行完成自动发邮件（HTML 报告）和企微（markdown 摘要）、失败用例@负责人、分级通知（全量/仅失败）、失败重试（指数退避）+死信记录 | 跑完手机/邮箱收到带颜色（绿/橙/红）的报告，失败有人跟 |
-| 真实执行 | subprocess 封装真实 pytest、钩子/自定义插件、pytest-xdist 并发、模拟/真实双模式切换 | 平台可跑任意 pytest 项目并回传结果（Day118-135 交付） |
-| 进阶能力 | Redis 缓存层+任务队列、MySQL 深度优化（EXPLAIN/索引）、AST 用例静态检查、接口依赖编排（token 传递/场景编排）、k6 性能压测 | 中级偏上~高级技术深度的载体，全部有量化对比数据 |
+| 真实执行 | subprocess 封装真实 pytest、钩子/自定义插件、pytest-xdist 并发、模拟/真实双模式切换 | 平台可跑任意 pytest 项目并回传结果（**Day52-61 + Day70-79 交付**） |
+| 进阶能力 | Redis 缓存层+任务队列、MySQL 深度优化（EXPLAIN/索引）、AST 精准回归选型、接口依赖编排（token 传递/场景编排）、Flaky 用例治理、k6 性能压测 | 中级偏上~高级技术深度的载体，全部有量化对比数据 |
 
 ## 3. 快速开始（3 步跑起来）
 
@@ -45,11 +45,11 @@ python -m src.web.app
 # 浏览器访问 http://localhost:5000 → 看到 Dashboard 与预置示例数据
 ```
 
-> 当前阶段（Day12）第3步尚未生效，可先用 CLI 体验完整调度链路：
+> 当前阶段（Day37）Web 后端已交付，第3步可启动后用浏览器访问验证；CLI 仍可用于体验完整调度链路：
 > `python -m src.core.case_manager -f testdata/yaml/api_user_query_matrix.yaml --dry-run`
 > （入库→批次创建→筛选→执行→汇总统计，`--dry-run` 仅预览不落库；`-p P0` 按优先级筛选）
 
-**预期效果**：`pytest` 全绿（当前基线 189 条）；CLI 输出待执行用例列表与批次汇总报告（总数/通过/失败/通过率）。
+**预期效果**：`pytest` 全绿（**当前基线 422 条通过，覆盖率 82%**）；CLI 输出待执行用例列表与批次汇总报告（总数/通过/失败/通过率）。
 
 ## 4. 使用指南
 
@@ -86,11 +86,11 @@ python -m src.web.app
 | TM_DB_MYSQL_HOST/PORT/USER/PASSWORD/DATABASE | MySQL 连接配置 | 127.0.0.1/3306/root/空/testmatrix |
 | TM_EMAIL_ENABLED / SMTP_HOST / SMTP_PORT / SENDER / PASSWORD / RECEIVERS | 邮件通知（465=SSL，587=STARTTLS） | false / 示例占位 |
 | TM_WECHAT_ENABLED / WEBHOOK_URL | 企微机器人通知 | false / 空 |
-| TM_REDIS_ENABLED / HOST / PORT / PASSWORD / DB | Redis 缓存与队列（Day31-33 启用） | false / 127.0.0.1 / 6379 |
+| TM_REDIS_ENABLED / HOST / PORT / PASSWORD / DB | Redis 缓存与队列（**Day31-33 已接入**） | false / 127.0.0.1 / 6379 |
 
 ## 7. 演示效果
 
-核心功能截图（Dashboard / 用例管理 / 执行记录 / SSE 日志）与 5 分钟 Demo 视频、1 分钟高光视频在项目完成演示打磨阶段（Day139-146）后归档至 docs/ 与 README；当前可在 `output/reports/` 查看 Allure 报告效果、在 README 查看架构与阶段进度。
+核心功能截图（Dashboard / 用例管理 / 执行记录 / SSE 日志）与 5 分钟 Demo 视频、1 分钟高光视频在项目完成演示打磨阶段（**Day138-140**）后归档至 docs/ 与 README；当前可在 `output/reports/` 查看 Allure 报告效果、在 README 查看架构与阶段进度。
 
 ## 8. 常见问题 FAQ
 
@@ -105,41 +105,62 @@ python -m src.web.app
 | 分类 | 技术 |
 | --- | --- |
 | 核心语言 | Python 3.11 |
-| 测试框架 | pytest 7.4.x、allure-pytest、pytest-rerunfailures、pytest-cov、pytest-xdist（真实执行阶段） |
+| 测试框架 | pytest 7.4.x → 8.x（Day100 升级）、allure-pytest、pytest-rerunfailures、pytest-cov、pytest-xdist（Day52-79 真实执行阶段） |
 | 协议层 | Requests（HTTP）、pyserial（串口）、telnetlib（Telnet） |
 | 日志报告 | Loguru、Allure 2.x |
 | 数据驱动 | PyYAML、openpyxl |
 | 数据层 | SQLAlchemy 2.0 ORM（SQLite 3 / MySQL 8.0 双模式） |
-| 缓存与队列 | Redis（Day31-33 接入） |
-| Web平台 | Flask 2.3、Jinja2、Bootstrap 5、ECharts 5 |
-| 代码分析 | AST 静态检查（Day115-116） |
-| 工程化 | Git、Jenkins、Docker、Docker Compose、k6 |
+| 缓存与队列 | Redis（Day31-33 已接入） |
+| Web平台 | Flask 2.3 → 3.x（Day101 升级）、Jinja2、Bootstrap 5、ECharts 5 |
+| 代码分析 | AST 精准回归选型（覆盖映射为主 + import 拓扑为辅，Day127-135） |
+| AI 能力 | LLM 统一适配层（Day158-169）：失败归因 / 用例生成 / 报告摘要，带离线 Mock 与降级 |
+| 工程化 | Git、Jenkins、GitHub Actions（Day38-39 接入 CI）、Docker、Docker Compose、k6 |
 | 辅助 | python-dotenv、smtplib、marshmallow |
 
 ## 10. 阶段规划（对应 PROJECT_PLAN 180 天）
 
-| 阶段 | 内容 | 状态 |
-| --- | --- | --- |
-| 第一阶段 | 架构基座：目录骨架、common 封装层、数据持久层、pytest 体系、Demo 验证 | ✅ 已完成 |
-| 第二阶段 | 核心能力：数据驱动引擎、用例调度、报告解析、通知推送（含重试/死信）、Flask 后端+Redis、Web 三页面、真实 pytest 执行、依赖编排、联调 | 🔄 进行中（data_driver✓ case_manager✓ report_analyzer✓ 通知3/6） |
-| 第三阶段 | 工程化交付：Docker 三服务编排、Jenkins 流水线、k6 基线、深度重构+MySQL 优化、AST 工具、回归/稳定性/文档/演示/博客/开源 | ⏳ 规划中 |
+阶段编号与排期以 `PROJECT_PLAN.md` 第三节为准（Day1 ~ Day180，末日 Day180 = 2027-02-17）。
+
+| 阶段 | 天序 | 内容 | 状态 |
+| --- | --- | --- | --- |
+| 阶段 A-D | Day1-37 | 基座与核心：目录骨架、common 封装层、数据持久层、pytest 体系、数据驱动、用例调度、报告解析、通知推送、Flask 后端 + Redis、Web 骨架与 Dashboard | 已完成 |
+| 阶段一~二 | Day38-51 | CI 与工具链 + Web 前端收尾 | 下一任务（Day38） |
+| 阶段三~五 | Day52-79 | 真实 pytest 执行器 Phase-1 → 前后端联调 → Phase-2 深水区（钩子 + 自研插件 + xdist 并发） | 规划中 |
+| 阶段六~八 | Day80-114 | DevOps（Docker / Jenkins / k6）、全量回归 + pytest 8.x 与 Flask 3.x 升级、质量打磨 | 规划中 |
+| 阶段九~十 | Day115-137 | 三文件差异化重构 + MySQL 深优 + AST 精准回归选型 + 依赖编排 | 规划中 |
+| 阶段十一~十四 | Day138-157 | 演示打磨 + 技术博客 7 篇 + Flaky 用例治理 + 迭代补强（机动缓冲） | 规划中 |
+| 阶段十五~十六 | Day158-180 | AI 扩展（失败归因 / 用例生成 / 报告摘要）+ 开源准备与 v1.0.0 发布 | 规划中 |
 
 ## 11. 验收标准
 
-**第一阶段（已完成）**：[x] 目录结构一致 [x] 三表 ORM+双模式切换 [x] common 六模块 [x] pytest 体系+失败自动记录 [x] pytest 直跑生成 Allure [x] 依赖锁定/.gitignore/.env.example
-
-**第二阶段（进行中）**：
+**已完成（Day1-37，详细逐日记录见 PROJECT_PLAN.md）**：
+- [x] 目录结构一致 [x] 三表 ORM+双模式切换 [x] common 六模块 [x] pytest 体系+失败自动记录 [x] pytest 直跑生成 Allure [x] 依赖锁定/.gitignore/.env.example
 - [x] data_driver：双格式加载、三维筛选、50 条大数据量验证
 - [x] case_manager：入库/批次/分级执行/结果记录/汇总统计全链路 + CLI
 - [x] report_analyzer：解析准确、统计与人工核对一致、入库正常、趋势可查
-- [ ] 通知模块：真实邮箱收 HTML 报告、企微推送成功、重试与死信 mock 全覆盖
-- [ ] Web 平台：test client 全 API 通过、三页面渲染正常、SSE 推送实时日志
-- [ ] Redis：缓存命中前后有量化对比、任务队列可观测
-- [ ] 真实 pytest 执行：subprocess 稳定、xdist 并发结果合并正确、双模式切换
-- [ ] 依赖编排：token 跨用例传递、失败跳过依赖用例
-- [ ] 联调：Web 触发→调度→入库→看板刷新全链路 + 通知真实到达
+- [x] 通知模块三渠道 + 重试退避 + 死信记录（真实送达待凭据）
+- [x] Web 后端：三页面 API + SSE 实时日志；Redis 缓存层与任务队列（Day17-34）
+- [x] 全量用例 422 条通过，覆盖率 82%（3442 stmts / 629 miss）
 
-**第三阶段（规划中）**：[ ] Docker 三服务一条命令 [ ] Jenkins 流水线绿灯 [ ] MySQL 优化 EXPLAIN 对比数据 [ ] AST 工具 CLI 可运行 [ ] 24 小时稳定性 [ ] 陌生人三步启动 [ ] 9 篇博客发布
+**Day38-51（当前）**：
+- [ ] CI：GitHub Actions 绿灯、pyproject + ruff/mypy 落地、覆盖率徽章上 README
+- [ ] 覆盖率修复：serial_client / telnet_client 脱离 0%
+- [ ] Web 前端：Dashboard 图表与三页面数据渲染正常，无控制台报错
+
+**Day52-180（待办）**：
+- [ ] **Day61 门禁**：`TM_EXECUTOR=pytest` 真跑一条 assert True 通过 + 结果入库 + Web 可见
+- [ ] 真实执行深水区：pytest 钩子 + 可打包插件 + xdist 并发结果合并正确 + 396 秒量化对比
+- [ ] 通知真实送达：真实邮箱收 HTML 报告、企微推送成功（需 SMTP/企微凭据）
+- [ ] Redis：缓存命中前后量化对比、任务队列可观测
+- [ ] 依赖编排：token 跨用例传递、失败跳过依赖用例
+- [ ] Docker 三服务一条命令启动，容器内跑通真实执行 → 报告 → 看板
+- [ ] Jenkins 流水线绿灯
+- [ ] MySQL 优化 EXPLAIN 前后对比数据
+- [ ] **AST 精准回归选型 CLI 可运行，产出节省率与漏检率**
+- [ ] **Flaky 治理**：用例可被自动识别隔离，产出标注数据供 AI 消费
+- [ ] **AI 三项**：失败归因 / 用例生成 / 报告摘要，每项有对照组与成本数据
+- [ ] 24 小时稳定性、陌生人三步启动
+- [ ] 7 篇博客发布、5 分钟 Demo + 1 分钟高光视频
 
 ## 12. 开发规范要求
 
