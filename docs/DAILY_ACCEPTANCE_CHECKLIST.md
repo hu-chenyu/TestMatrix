@@ -37,7 +37,7 @@ git --no-pager diff --stat origin/main
 确认项：
 - 远程指向正确仓库。
 - 本地与 origin/main 关系：ahead 1 为正常（当日提交尚未 push）；若 behind 则必须先 `git pull --rebase origin main`。
-- 工作区无未提交的源码/测试改动（PROJECT_PLAN.md / PROJECT_CONTEXT.md 的本地修改除外，这两个不进 git）。
+- 工作区无未提交的源码/测试改动（PROJECT_CONTEXT.md 的本地修改除外（不进 git）；PROJECT_PLAN.md 已入库需正常 commit）。
 
 ### 步骤3：核 commit message（Conventional Commits + 零非技术表述）
 
@@ -58,7 +58,7 @@ git --no-pager show --stat HEAD
 
 确认项：
 - 仅含当日改动的源码文件与测试文件。
-- 绝对不含 `PROJECT_PLAN.md`、`PROJECT_CONTEXT.md`、`output/`。
+- 绝对不含 `PROJECT_CONTEXT.md`、`output/`（PROJECT_PLAN.md 已入库，正常提交）。
 - 任务指令中声明"零改动"的文件不得出现（如 Day26 的 case_manager.py）。
 
 ### 步骤5：核代码变更（diff 逐项审查）
@@ -171,7 +171,7 @@ Day{DAY} 验收评级报告
 二、git 现场（亲核命令，非自述）
 ----------------------------------------------------------------------
 [ ] commit message：Conventional Commits，零非技术表述
-[ ] 改动文件：仅源码+测试，无 PROJECT_PLAN/PROJECT_CONTEXT/output
+[ ] 改动文件：仅源码+测试，无 PROJECT_CONTEXT/output
 [ ] 任务指令声明"零改动"的文件未出现
 [ ] 本地与 origin/main 一致（已 push，无 ahead/behind）
 [ ] git rev-list --count HEAD = {真实提交数}
@@ -186,7 +186,7 @@ Day{DAY} 验收评级报告
 [ ] 过渡方案已标注"Day{N}替换"
 
 ----------------------------------------------------------------------
-四、文档同步（本地文件，不进git但必须更新）
+四、文档同步（PROJECT_PLAN.md 已入库需 commit；PROJECT_CONTEXT.md 本地不进 git 但必须更新）
 ----------------------------------------------------------------------
 [ ] PROJECT_PLAN.md：当日行[✓] + 进度统计同步
 [ ] PROJECT_CONTEXT.md：6.x设计决策 + 7.x踩坑 + 5节模块表 + 10节变更日志 + 基线

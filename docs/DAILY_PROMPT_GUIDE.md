@@ -119,7 +119,7 @@ git add {当日改动的源码文件列表} {当日改动的测试文件列表}
 git --no-pager status
 ```
 
-复查暂存区：`PROJECT_PLAN.md` / `PROJECT_CONTEXT.md` / `output/` 绝不能出现（已在 `.git/info/exclude`，也禁止显式 add）。
+复查暂存区：`PROJECT_CONTEXT.md` / `output/` 不应出现（已在 `.git/info/exclude`）；`PROJECT_PLAN.md` 已入库，正常提交即可。
 
 ### 第 3 步 提交（第 {COMMIT_NO} 次，Conventional Commits）
 
@@ -195,7 +195,7 @@ git --no-pager log --oneline -3
 - [ ] 涉及具体模块时已带入 PROJECT_CONTEXT 第 7 章对应的运行时坑
 - [ ] 测试命名与 fixture/markers 遵循既有约定
 - [ ] Git SOP 五段完整附在末尾，占位符已按当日实际替换
-- [ ] 禁止 git add 的三类文件（PROJECT_PLAN.md / PROJECT_CONTEXT.md / output/）已在任务指令中标注
+- [ ] 禁止 git add 的两类文件（PROJECT_CONTEXT.md / output/）已在任务指令中标注
 - [ ] 过渡方案已标注「Day{DAY} 替换」
 
 ---
