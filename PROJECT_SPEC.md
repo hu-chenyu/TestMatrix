@@ -113,7 +113,7 @@ python -m src.web.app
 | 缓存与队列 | Redis（Day31-33 已接入） |
 | Web平台 | Flask 2.3 → 3.x（Day101 升级）、Jinja2、Bootstrap 5、ECharts 5 |
 | 代码分析 | AST 精准回归选型（覆盖映射为主 + import 拓扑为辅，Day127-135） |
-| AI 能力 | LLM 统一适配层（Day158-169）：失败归因 / 用例生成 / 报告摘要，带离线 Mock 与降级 |
+| AI 能力 | LLM 统一适配层（Day153-164）：失败归因 / 用例生成 / 报告摘要，带离线 Mock 与降级；机动缓冲 Day165-169 |
 | 工程化 | Git、Jenkins、GitHub Actions（Day38-39 接入 CI）、Docker、Docker Compose、k6 |
 | 辅助 | python-dotenv、smtplib、marshmallow |
 
@@ -128,8 +128,8 @@ python -m src.web.app
 | 阶段三~五 | Day52-79 | 真实 pytest 执行器 Phase-1 → 前后端联调 → Phase-2 深水区（钩子 + 自研插件 + xdist 并发） | 规划中 |
 | 阶段六~八 | Day80-114 | DevOps（Docker / Jenkins / k6）、全量回归 + pytest 8.x 与 Flask 3.x 升级、质量打磨 | 规划中 |
 | 阶段九~十 | Day115-137 | 三文件差异化重构 + MySQL 深优 + AST 精准回归选型 + 依赖编排 | 规划中 |
-| 阶段十一~十四 | Day138-157 | 演示打磨 + 技术博客 7 篇 + Flaky 用例治理 + 迭代补强（机动缓冲） | 规划中 |
-| 阶段十五~十六 | Day158-180 | AI 扩展（失败归因 / 用例生成 / 报告摘要）+ 开源准备与 v1.0.0 发布 | 规划中 |
+| 阶段十一~十五 | Day138-169 | 演示打磨 + 技术博客 7 篇 + Flaky 用例治理 + AI 扩展（Day153-164）+ 机动缓冲（Day165-169） | 规划中 |
+| 阶段十六 | Day170-180 | 开源准备与 v1.0.0 发布 | 规划中 |
 
 ## 11. 验收标准
 
