@@ -106,7 +106,7 @@ py -m pytest {当日测试文件} -v
 仅当已确认环境装有 pytest-repeat 插件时，才可一条命令替代手动三连跑：`py -m pytest {当日测试文件} -v --count=3`。
 - 3 次中任一次失败或 flaky：打回，要求编程工具修复时序竞态（如轮询替代固定 sleep、帧数上限保护、autouse 清洁 fixture）后重新验收。
 
-### 步骤8：核本地文档同步（不进 git 但必须更新）
+### 步骤8：本地文档同步（PROJECT_PLAN.md 已入库需 commit；PROJECT_CONTEXT.md 不进 git 但必须更新）
 
 - Read `PROJECT_PLAN.md`：当日行 `[ ]`→`[✓]`、顶部当前进度（天数/基线/提交次数）、第七节进度统计表同步。
 - Read `PROJECT_CONTEXT.md`：第 5 节模块表加当日行、第 6 章新增设计决策小节（编号以现有小节顺延为准）、第 7 章追加新踩坑记录、第 10 节变更日志加当日行、第 4.2 节基线更新。
