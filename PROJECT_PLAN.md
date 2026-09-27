@@ -176,7 +176,7 @@
 
 | 天数 | 日期 | 周次 | 当天任务 | 所属模块 | 预计产出 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Day38 | 09/28（一） | W7 | GitHub Actions 工作流（单 Python 版本 + 全量 422 + 构建徽章上 README）+ `pyproject.toml`（**ruff 全量强制 / mypy 仅新增文件强制**）；**CI 矩阵含 Python 3.11（主）+ 3.12（探测），3.12 仅告警不阻断，为 Day100 pytest 升级提前排雷** | 工程化 | CI 配置 + pyproject.toml + 徽章 | [ ] |
+| Day38 | 09/28（一） | W7 | GitHub Actions 工作流（单 Python 版本 + 全量 422 + 构建徽章上 README）+ `pyproject.toml`（**ruff 全量强制 / mypy 仅新增文件强制**）；**CI 矩阵含 Python 3.11（主）+ 3.12（探测），3.12 仅告警不阻断，为 Day100 pytest 升级提前排雷**；**依赖安全（评估反馈追加）**：(a) 显式 pin 传递依赖 Werkzeug/itsdangerous/blinker（按本机实测 Werkzeug 3.1.8 与 Flask 2.3.3 跑通 422 的兼容组合锁定精确版本）；(b) 升级含已知 CVE 的直接依赖 Jinja2≥3.1.6（修 CVE-2024-22195/34064、CVE-2025-27516）、requests≥2.32.x（修 CVE-2024-35195）、cryptography≥42（修 CVE-2024-26130），升级后跑 422 回归确认零破坏；(c) CI 流水线加 **pip-audit** 步骤（高危项要么修复，要么写带过期日的 allowlist 注释说明） | 工程化 | CI 配置 + pyproject.toml + 徽章；**pip-audit 无未豁免高危项；requirements 全部直接+传递依赖精确锁版；422 测试零回归** | [ ] |
 | Day39 | 09/29（二） | W7 | 覆盖率接入（`--cov=src --cov-report=term-missing`）数字上 README + **serial/telnet 0% 覆盖修复**（pyserial `loop://` 伪串口 + 本地 socket 模拟，**半天**） | 工程化 | 覆盖率徽章 + 串口/telnet 测试补测 | [ ] |
 
 > **为什么先把 CI 做起来**：阶段九要拆分 2438 行的 `case_manager.py`，属于高风险逻辑重构。**没有 CI + 422 条回归护体，这一步必翻车。**
@@ -202,7 +202,7 @@
 
 | 天数 | 日期 | 周次 | 当天任务 | 所属模块 | 预计产出 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Day52 | 10/12（一） | W9 | 接入方案设计（subprocess 封装/结果桥接/source_ref 数据模型设计）+ ADR 即时写 | 真实执行 | 设计文档 + ADR | [ ] |
+| Day52 | 10/12（一） | W9 | 接入方案设计（subprocess 封装/结果桥接/source_ref 数据模型设计）+ ADR 即时写；**AST 精准回归最小 POC（评估反馈追加的前置探索，非正式实现，正式开发仍在 Day127-135）**：(a) 解析 `.coverage` 建立"用例 ↔ 源码文件"映射表；(b) 基于 AST 解析 src/ 的 import 关系，建立"改了文件 A → 影响哪些用例"的反向影响面；(c) 以本仓库自身做实验，人为修改 5 个不同 src 文件，分别输出"应跑用例集/全量用例"比例；(d) 记录选中比例（节省率）与漏检率（有没有该跑没跑的） | 真实执行 | 设计文档 + ADR；**AST POC 实验记录文档（docs/ 下，含 5 组变更的选中比例与漏检率，为 Day127-135 双指标正式开发打地基）** | [ ] |
 | Day53 | 10/13（二） | W9 | **source_ref 字段改造 Day1**：ORM 模型新增字段 + 迁移脚本 | 数据模型 | 模型+迁移~200 行 | [ ] |
 | Day54 | 10/14（三） | W9 | **source_ref 改造 Day2**：存量回填 + 用例录入方式改造（YAML/Excel 新增列） | 数据模型 | 回填脚本~250 行 | [ ] |
 | Day55 | 10/15（四） | W9 | PytestRunner 执行器封装（subprocess+超时控制+输出捕获） | 真实执行 | 执行器~400 行+8 条测试 | [ ] |
@@ -211,9 +211,11 @@
 | Day58 | 10/18（日） | W9 | 输出解析（pytest 终端输出→结构化结果+实时进度解析） | 真实执行 | 解析器~350 行+8 条测试 | [ ] |
 | Day59 | 10/19（一） | W10 | Allure 结果桥接（结果目录隔离→ReportAnalyzer→入库）+数据映射 | 真实执行 | 桥接~350 行+8 条测试 | [ ] |
 | Day60 | 10/20（二） | W10 | 执行状态回写（运行中/完成/失败状态机+批次进度） | 真实执行 | 状态机~300 行+8 条测试 | [ ] |
-| Day61 | 10/21（三） | W10 | **验收门禁**：`TM_EXECUTOR=pytest` 真跑一条 assert True 通过 + 结果入库 + Web 可见 | 真实执行 | **门禁通过才进联调** | [ ] |
+| Day61 | 10/21（三） | W10 | **验收门禁**：`TM_EXECUTOR=pytest` 真跑一条 assert True 通过 + 结果入库 + Web 可见 | 真实执行 | **门禁通过才进联调；追加：kill -9 崩溃场景 pending 任务不丢且自动重投、单任务不被两个 worker 重复执行** | [ ] |
 
 > **Day61 验收门禁（硬性）**：未通过则停下联调，继续补执行器，直到门禁通过为止。
+
+> **Phase-1 追加项（评估反馈）：任务队列 ACK/requeue 健壮性**——在 Day52-61 执行器开发中一并落地，**不新增工期、不改变既有任务顺序**：(a) BRPOP 取出任务后先写入 pending（Redis pending hash 或 DB pending 表）标记"执行中"；(b) 任务正常完成后从 pending 删除并写终态到 DB；(c) worker 崩溃/重启时，启动扫描 pending 中超过超时阈值的任务重新入队（requeue）；(d) pending 条目带 worker_id + 心跳时间戳，只有超时项才重投，防止单任务被两个 worker 重复执行。**Day61 门禁追加验收**：kill -9 模拟 worker 中途崩溃，pending 中的任务不丢且可自动重投；并发场景下单任务不会被两个 worker 重复执行。
 
 ### 阶段四：前后端联调（Day62-69，8天）
 
@@ -247,7 +249,7 @@
 
 | 天数 | 日期 | 周次 | 当天任务 | 所属模块 | 预计产出 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Day80 | 11/09（一） | W13 | Dockerfile 多阶段构建 + 镜像瘦身 + .dockerignore | Docker | 优化 Dockerfile | [ ] |
+| Day80 | 11/09（一） | W13 | **切 MySQL 前 SQLite 并发加固（半天，评估反馈追加）**：(a) 连接加 `busy_timeout=30000ms` 防 database is locked；(b) 启用 WAL（`PRAGMA journal_mode=WAL`）提升并发读；(c) 评估模块级写锁（Web 触发与 worker 同时落库仍有竞争则加）——Day75-76 处理的是应用层幂等/调度，本日做引擎层 PRAGMA 加固；其后做 Dockerfile 多阶段构建 + 镜像瘦身 + .dockerignore | Docker | **5 个批次并发执行无 database is locked、WAL 下读不阻塞写**；优化 Dockerfile | [ ] |
 | Day81 | 11/10（二） | W13 | docker-compose 编排（Web+MySQL+**Redis**）+healthcheck+依赖顺序 | Docker | compose 三服务配置 | [ ] |
 | Day82 | 11/11（三） | W13 | MySQL 容器配置（持久化卷+字符集+初始化 SQL） | Docker | MySQL 配置 | [ ] |
 | Day83 | 11/12（四） | W13 | start.bat/start.sh 一键启动 + 预置示例数据（首启自动导入） | Docker | 双平台启动脚本 | [ ] |
@@ -555,6 +557,8 @@ src/core/report_analyzer/
 | 量化实验（全量 vs 精准，含漏检率） | 2 天 | Day133-134 |
 | 报告与文档 | 1 天 | Day135 |
 | **合计** | **9 天** | Day127-135 |
+
+> **与 Day52 POC 的衔接（评估反馈追加）**：Day52 已完成 POC 与实验数据积累（覆盖映射最小表 + import 拓扑反查 + 5 组人为变更的选中比例/漏检率原始数据），**本阶段做工程化落地，不重复探索**：把 POC 脚本产品化为带测试的平台能力（CLI/执行器集成/答案集扩展到 10 组并按三次取中位复测）。
 
 ### 8.4 量化实验设计（关键，决定这个能力的可信度）
 
