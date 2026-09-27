@@ -1,7 +1,7 @@
 # ADR-0002: 任务调度用 LPUSH/BRPOP list 队列而非 pub/sub；event_bus 与 task_queue 并存
 
 - 状态：已接受
-- 日期：2026-09-08（Day25，event_bus）/ 2026-09-08（Day32，task_queue）；追溯补录于 2026-09-27（Day37）
+- 日期：2026-09-15（Day25，event_bus）/ 2026-09-22（Day32，task_queue）；追溯补录于 2026-09-27（Day37）
 
 ## 背景与问题
 
