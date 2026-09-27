@@ -24,7 +24,7 @@
 | 深度目标 | 同工龄段测试开发工程师第一梯队水平：每个技术栈达中级偏上~高级深度，每个优化阶段有量化对比数据，每个能力边界有明确声明 |
 | 起止日期 | 2026-08-22 ~ 2027-02-17（总跨度 180 天） |
 | 总天数 | 180 天（Day1 ~ Day180；Day180 为 v1.0.0 发布日） |
-| 当前进度 | Day37 / Day180 已完成（21%）；422 条 pytest 用例全部通过；46 次提交已推送 GitHub |
+| 当前进度 | Day37 / Day180 已完成（21%）；422 条 pytest 用例全部通过；50 次提交已推送 GitHub |
 | 技术栈 | Python 3.11 / pytest 7.4→8.x（Day100 升级）/ SQLAlchemy 2.0 / MySQL 8 / Redis / Flask 2.3→3.x（Day101 升级）/ Bootstrap 5 / ECharts 5 / Loguru / Allure 2 / Docker / Jenkins / GitHub Actions / k6 / AST |
 | 面向对象 | ① 测试工程师（fork 二开/参考架构）② 开源社区贡献者 ③ 项目维护者（长期技术积累与迭代） |
 | 可运行性目标 | git clone 后按 README 三步内启动 Web 平台 → 看到 Dashboard → 触发执行 → 看到报告 |
@@ -51,7 +51,7 @@
 | --- | --- | --- |
 | 源码行数（common+db+core+web 后端+前端自研） | **14,443 行** | 已达成终态目标 22k-28k 的 **52%~66%** |
 | tests 行数 | 15,182 行 | 相对终态预估已超额 138%~160% |
-| 用例条数 | 422 条（实跑 422 passed / 396s） | 相对终态目标已达成 94%~106% |
+| 用例条数 | 422 条（实跑 422 passed；基线耗时待 Day79 按协议实测确立） | 相对终态目标已达成 94%~106% |
 | 语句覆盖率 | **82%**（3442 语句 / 629 未覆盖） | 已达成"≥80%"判据；薄弱点为 serial_client 0%、telnet_client 0%、assertion 51% |
 
 > 结论：产量健康、工期宽裕，剩余重点是**把心脏前移、把能力做深**，而非继续堆量。
@@ -94,7 +94,7 @@
 | 阶段二 Web 前端收尾 | Day40-51 | 12 | 09-30 ~ 10-11 | Dashboard 图表（保精）+ 用例管理页/执行记录页 CRUD 骨架，润色后置阶段七 |
 | 阶段三 真实执行器 Phase-1 | Day52-61 | 10 | 10-12 ~ 10-21 | subprocess 真实执行 + 结果回传 + source_ref 字段补齐 + Web 触发打通；**Day61 验收门禁** |
 | 阶段四 前后端联调 | Day62-69 | 8 | 10-22 ~ 10-29 | 联调**真实执行**链路（由 10 天压缩为 8 天，因执行器已在手上） |
-| 阶段五 真实执行器 Phase-2 | Day70-79 | 10 | 10-30 ~ 11-08 | pytest 钩子 + 自研插件 + xdist 并发 + 396 秒量化对比（含 1.5 天写库冲突处理） |
+| 阶段五 真实执行器 Phase-2 | Day70-79 | 10 | 10-30 ~ 11-08 | pytest 钩子 + 自研插件 + xdist 并发 + 全量基线量化对比（含 1.5 天写库冲突处理） |
 | 阶段六 DevOps | Day80-93 | 14 | 11-09 ~ 11-22 | Docker 多阶段构建 + compose 三服务（含 redis）+ Jenkins 流水线 + k6 压测 |
 | 阶段七 全量回归 + 真实场景 + 文档v1 | Day94-106 | 13 | 11-23 ~ 12-05 | 边界/异常/并发用例 + 真实数据入库 + 文档 v1 + **pytest 8.x / Flask 3.x 升级** |
 | 阶段八 质量打磨 | Day107-114 | 8 | 12-06 ~ 12-13 | 性能优化 + 安全加固（含 subprocess 命令注入防护）+ 代码质量（assertion.py 由 51% 补起） |
@@ -241,7 +241,7 @@
 | Day76 | 11/05（四） | W12 | **写库冲突处理 Day2**（1.5 天之二）+ 幂等设计与并发批次调度（资源竞争/锁/队列） | 真实执行 | 幂等+调度~400 行+8 条测试 | [ ] |
 | Day77 | 11/06（五） | W12 | 执行稳定性（超时重试/异常恢复/中断恢复） | 真实执行 | 稳定性~300 行+8 条测试 | [ ] |
 | Day78 | 11/07（六） | W12 | 真实执行全链路集成测试（触发→执行→解析→入库→看板） | 真实执行 | 集成测试~10 条 | [ ] |
-| Day79 | 11/08（日） | W12 | **396 秒 → 并发优化量化对比报告**（测量协议：同机/同数据集/重复 3 次取中位/脚本固化进 `scripts/`）+ 接入文档 + 讲述材料第 6 次 | 真实执行 | 对比报告+文档 | [ ] |
+| Day79 | 11/08（日） | W12 | **全量基线 → 并发优化量化对比报告**（测量协议：同机/同数据集/重复 3 次取中位/脚本固化进 `scripts/`，Day79 确立基线）+ 接入文档 + 讲述材料第 6 次 | 真实执行 | 对比报告+文档 | [ ] |
 
 ### 阶段六：DevOps（Day80-93，14天）
 
@@ -471,7 +471,7 @@
 
 ### 7.1 `notification.py`（1894 行）—— 物理拆分，半天，风险极低
 
-**诊断**：7 个类、46 个方法，**>60 行方法仅占 18.0%**。它不是上帝类，而是**多个职责清晰的类挤在一个文件里**。
+**诊断**：7 个类、46 个方法，**>60 行方法仅占 8.7%（4/46）**。它不是上帝类，而是**多个职责清晰的类挤在一个文件里**。
 
 ```
 src/core/notification/
@@ -488,19 +488,19 @@ src/core/notification/
 
 - **做法**：纯搬迁，**逻辑零改动**，半天完成
 - **额外收益**：拆完后 `router.py` 的 `__init__` 配置化后，正好支撑达标判据 9（《新增一个通知渠道要改几个文件》）
-- **顺手可拆（可选）**：`EmailNotifier.send`（71 行）、`WeChatNotifier.send`（96 行）
+- **顺手可拆（可选）**：`EmailNotifier.send`（67 行）、`WeChatNotifier.send`（92 行）
 
 ### 7.2 `case_manager.py`（2438 行）—— 逻辑重构，高风险，需 CI 护体
 
-**诊断**：2 个类承载 30 个方法，**>60 行方法占 70.4%**；`_to_dict` **单方法 228 行**、`_execute_batch_async` 211 行。这不是拆文件能解决的——228 行的 `_to_dict` 说明在手写一个巨型序列化代码段，**而项目已经装了 marshmallow 3.20.1 却完全没用上**。
+**诊断**：2 个类承载 30 个方法，**>60 行方法占 46.7%（14/30）**；最长方法 `_execute_batch_async` 209 行、`list_cases_paged` 162 行。这不是拆文件能解决的——多个百行级方法说明在手写巨型业务逻辑段，**而项目已经装了 marshmallow 3.20.1 却仅在 web 层使用，core 层序列化仍手写**。
 
 ```
 src/core/case_manager/
-├── crud.py                      sync_cases_from_file(106) / list_cases(86) / list_cases_paged(167) / create / update / delete
-├── execution.py                 create_execution / select_cases_for_execution / record_execution(107) / finish_execution(106)
-├── batch_runner.py              _execute_batch_async(211) → 拆成「执行调度 / 事件发布 / 进度更新」三段
-├── serializer.py                _to_dict(228) 系列 → **改用 marshmallow Schema**（已装未被使用）
-├── notify_bridge.py             build_notification_statistics(89) / notify_execution_result(50)
+├── crud.py                      sync_cases_from_file(101) / list_cases(81) / list_cases_paged(162) / create / update / delete
+├── execution.py                 create_execution / select_cases_for_execution / record_execution(105) / finish_execution(101)
+├── batch_runner.py              _execute_batch_async(209) → 拆成「执行调度 / 事件发布 / 进度更新」三段
+├── serializer.py                序列化方法系列 → **改用 marshmallow Schema**（已装，core 层未使用）
+├── notify_bridge.py             build_notification_statistics(87) / notify_execution_result
 └── cli.py                       命令行输出部分
 ```
 
@@ -509,7 +509,7 @@ src/core/case_manager/
 
 ### 7.3 `report_analyzer.py`（1568 行）—— 抽象消重，不是单纯拆文件
 
-**诊断**：`get_overview_summary`(107) / `get_module_distribution`(94) / `get_failed_top`(108) / `get_quality_metrics`(146) 是**同一套 SQL 组装模式的四个变体**。单纯按文件切开，重复一点没减少。
+**诊断**：`get_overview_summary`(105) / `get_module_distribution`(92) / `get_failed_top`(106) / `get_quality_metrics`(146) 是**同一套 SQL 组装模式的四个变体**。单纯按文件切开，重复一点没减少。
 
 ```
 src/core/report_analyzer/
@@ -544,7 +544,7 @@ src/core/report_analyzer/
 
 | 子项 | 天数 | 说明 |
 | --- | --- | --- |
-| **前置：source_ref 字段改造** | **2 天**（Day53-54 在 Phase-1 已完成） | ORM 模型新增字段 + 迁移脚本 + 存量回填 + YAML/Excel 新增列。**已完成，此处不重复排期** |
+| **前置：source_ref 字段改造** | **2 天**（Day53-54 在 Phase-1 已完成） | ORM 模型新增字段 + 迁移脚本 + 存量回填 + YAML/Excel 新增列。**Phase-1 Day53-54 交付，此处不重复排期** |
 | AST 解析器（变更文件→变更的类/函数/接口） | 2 天 | Day127-128 |
 | 影响面反向查找（行级覆盖映射 + import 拓扑图） | 2.5 天 | Day129-130 |
 | 与执行器集成（按子集触发执行）+ CLI | 1.5 天 | Day131-132 |
@@ -557,7 +557,7 @@ src/core/report_analyzer/
 1. **构造已知答案集**：人工构造 N 个变更提交，**先验标注**每个提交实际影响的用例列表
 2. 跑精准选型的推荐子集，与先验答案比对
 3. 产出两个数字：
-   - **节省率** =（全量耗时 − 精准耗时）/ 全量耗时（基线：全量 396 秒）
+   - **节省率** =（全量耗时 − 精准耗时）/ 全量耗时（基线：Day79 按协议实测确立）
    - **漏检率** =（先验受影响但未被选中）/ 先验受影响总数
 4. **两个数字必须同时给出**。只报"节省 70%"不报漏检率，会被立刻识破
 
@@ -595,7 +595,7 @@ src/core/report_analyzer/
 | **M6 前端收尾** | **Day51（10/11）** | Dashboard 图表 + 用例管理 + 执行记录三页面 | 三页面数据正常渲染；无控制台报错 |
 | **M7 真实执行闭环（门禁）** | **Day61（10/21）** | subprocess 执行器 + source_ref + Web 触发 | **`TM_EXECUTOR=pytest` 真跑一条 assert True → 入库 → Web 可见** |
 | M8 前后端联调完成 | Day69（10/29） | 全链路真实演示能力 | Web 触发→真实执行→入库→看板刷新完整跑通 |
-| **M9 执行器深水区完成** | **Day79（11/08）** | 钩子 + 可打包插件 + xdist + 量化报告 | **396 秒→并发优化对比报告**（含写库竞态处理） |
+| **M9 执行器深水区完成** | **Day79（11/08）** | 钩子 + 可打包插件 + xdist + 量化报告 | **全量基线→并发优化对比报告**（含写库竞态处理） |
 | M10 DevOps 完成 | Day93（11/22） | Docker + Jenkins + Actions + k6 | compose 三服务一条命令启动；流水线绿灯；k6 基线归档 |
 | M11 版本升级 + 回归通过 | Day102（12/01） | pytest 8.x / Flask 3.x + 覆盖率报告 | CI 矩阵全绿；覆盖率≥80% |
 | M12 质量打磨完成 | Day114（12/13） | 性能/代码质量/安全（含注入防护） | 质量报告归档；无高危漏洞；assertion.py 覆盖率显著提升 |
@@ -615,7 +615,7 @@ src/core/report_analyzer/
 | # | 判据 | 量化口径 / 交付物 | 当前状态 |
 | --- | --- | --- | --- |
 | 1 | **工程治理** | CI 徽章 + 覆盖率 ≥80% + ruff/mypy 零错误 + 46+ commits 零断档 | 覆盖率**已实测 82%**，CI 待 Day38 |
-| 2 | **核心能力** | 真实 pytest 执行引擎（subprocess + 钩子 + 可打包插件 + xdist）；396 秒 → 并发优化量化对比 | 待 Day52-79；**测量协议：同机/同数据集/重复 3 次取中位/脚本固化进 `scripts/`** |
+| 2 | **核心能力** | 真实 pytest 执行引擎（subprocess + 钩子 + 可打包插件 + xdist）；全量基线 → 并发优化量化对比 | 待 Day52-79；**测量协议：同机/同数据集/重复 3 次取中位/脚本固化进 `scripts/`** |
 | 3 | **差异化王牌** | AST 精准回归选型：**全量→精准节省百分比 + 漏检率** | 待 Day127-135；开源竞品全没做 |
 | 4 | **AI 闭环** | 失败归因 + 用例生成 + 报告摘要；每项**有对照组与成本数据**（规则 vs 模型准确率差 + 每条归因 token/耗时） | 待 Day153-164 |
 | 5 | **Flaky 治理** | 重复执行 → 方差 → 自动标注 → 隔离 → 趋势看板 | 待 Day148-152；现有 `reruns=2` 只是掩盖 |
@@ -635,10 +635,10 @@ src/core/report_analyzer/
 | --- | --- |
 | 已完成天数 | 37 / 180（21%） |
 | 已完成里程碑 | M1（核心基座）、M2（report_analyzer）、M3（通知模块）、M4（Web后端+Redis） |
-| 当前测试基线 | **422 passed / 0 failed**（实跑 396.04s，1 rerun） |
+| 当前测试基线 | **422 passed / 0 failed**（Day37 本机实跑；基线耗时待 Day79 按协议统一确立） |
 | 当前覆盖率 | **82%**（3442 语句 / 629 未覆盖）；薄弱点：serial_client 0%、telnet_client 0%、assertion 51% |
 | 当前源码量 | 14,443 行（达终态目标 52%~66%）；tests 15,182 行（已超额） |
-| 累计提交 | 47 次（已全部推送 origin/main） |
+| 累计提交 | 50 次（已全部推送 origin/main） |
 | **下一任务** | **Day38（09/28）：GitHub Actions CI + pyproject.toml（ruff 全量强制 / mypy 仅新增文件强制）** |
 
 ---
