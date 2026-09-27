@@ -141,7 +141,7 @@ python -m src.web.app
 - [x] report_analyzer：解析准确、统计与人工核对一致、入库正常、趋势可查
 - [x] 通知模块三渠道 + 重试退避 + 死信记录（真实送达待凭据）
 - [x] Web 后端：三页面 API + SSE 实时日志；Redis 缓存层与任务队列（Day17-34）
-- [x] 全量用例 422 条通过，覆盖率 82%（3442 stmts / 629 miss）
+- [x] 全量用例 422 条通过，覆盖率 82%（3450 stmts / 637 miss）
 
 **Day38-51（当前）**：
 - [ ] CI：GitHub Actions 绿灯、pyproject + ruff/mypy 落地、覆盖率徽章上 README
