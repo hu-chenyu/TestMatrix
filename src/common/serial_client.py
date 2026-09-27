@@ -134,26 +134,45 @@ class SerialClient:
             logger.debug(f"串口 {self.port} 已处于打开状态，跳过重复打开")
             return
 
-        # 前置校验: 设备标识是否在系统可用串口列表中，给出更友好的错误提示
-        available_ports = [info.device for info in serial.tools.list_ports.comports()]
-        if self.port not in available_ports:
-            logger.error(
-                f"串口设备不存在 | 请求: {self.port} | 系统可用: {available_ports or '无'}"
-            )
-            raise SerialClientError(
-                f"串口设备 {self.port} 不存在，当前系统可用串口: {available_ports or '无'}",
-                port=self.port,
-            )
+        # 协议URL（如 pyserial 的 loop:// 回环伪串口，Day39 测试用；
+        # socket:// 等远端串口同理）含"://"，不在系统物理端口枚举中，
+        # 需跳过 comports 前置校验并改走 serial_for_url
+        port_value = str(self.port)
+        is_protocol_url = "://" in port_value
+
+        if not is_protocol_url:
+            # 前置校验: 设备标识是否在系统可用串口列表中，给出更友好的错误提示
+            available_ports = [info.device for info in serial.tools.list_ports.comports()]
+            if self.port not in available_ports:
+                logger.error(
+                    f"串口设备不存在 | 请求: {self.port} | 系统可用: {available_ports or '无'}"
+                )
+                raise SerialClientError(
+                    f"串口设备 {self.port} 不存在，当前系统可用串口: {available_ports or '无'}",
+                    port=self.port,
+                )
 
         try:
-            self._serial = serial.Serial(
-                port=self.port,
-                baudrate=self.baudrate,
-                bytesize=self._bytesize,
-                parity=self._parity,
-                stopbits=self._stopbits,
-                timeout=self.timeout,
-            )
+            if is_protocol_url:
+                # 协议URL走serial_for_url：loop://可在无真机时回环自测
+                self._serial = serial.serial_for_url(
+                    port_value,
+                    baudrate=self.baudrate,
+                    bytesize=self._bytesize,
+                    parity=self._parity,
+                    stopbits=self._stopbits,
+                    timeout=self.timeout,
+                )
+            else:
+                # 普通 COM/设备路径走物理串口
+                self._serial = serial.Serial(
+                    port=self.port,
+                    baudrate=self.baudrate,
+                    bytesize=self._bytesize,
+                    parity=self._parity,
+                    stopbits=self._stopbits,
+                    timeout=self.timeout,
+                )
             logger.info(f"串口打开成功 | {self.port} @ {self.baudrate}bps")
         except serial.SerialException as exc:
             self._serial = None

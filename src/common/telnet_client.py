@@ -9,9 +9,11 @@ Telnet网口通信封装模块（芯片板卡远程控制适配层）
     - 预留扩展位: 批量命令脚本执行、多板卡并行控制（第二阶段按需实现）
 
 兼容性说明:
-    telnetlib为Python标准库，自3.11起标记Deprecated（3.13移除）。
-    本项目锁定Python 3.11，可正常使用；此处的DeprecationWarning已被定向屏蔽，
-    后续如升级Python版本，可平滑切换至telnetlib3或自研socket实现。
+    telnetlib为Python标准库，自3.11起标记Deprecated（3.13移除，
+    见PEP 594）。本项目锁定Python 3.11，可正常使用；3.11下的
+    DeprecationWarning已被定向屏蔽。try/except保证未来升级到
+    3.13+时是明确的RuntimeError指引（切telnetlib3或自研socket），
+    而非模块导入期裸崩ImportError。
 
 使用示例:
     from src.common.telnet_client import TelnetClient
@@ -29,10 +31,14 @@ from src.common.logger import LogManager
 
 logger = LogManager.get_logger()
 
-# 定向屏蔽telnetlib的弃用告警（项目已锁定Python 3.11，功能可用）
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=DeprecationWarning)
-    import telnetlib
+# telnetlib在Python 3.13+已移除：导入失败时置None，
+# 由connect()中的运行时检查给出明确升级指引
+try:
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        import telnetlib
+except ImportError:  # pragma: no cover 仅Python 3.13+触发，当前锁定3.11
+    telnetlib = None
 
 
 class TelnetClientError(Exception):
@@ -95,7 +101,7 @@ class TelnetClient:
         self.host = str(host).strip()
         self.port = port
         self.timeout = timeout
-        self._conn: Optional[telnetlib.Telnet] = None
+        self._conn: Optional["telnetlib.Telnet"] = None
 
         logger.debug(
             f"TelnetClient配置就绪 | 目标: {self.host}:{port} | "
@@ -116,8 +122,16 @@ class TelnetClient:
             无
 
         异常:
+            RuntimeError: 当前Python已移除telnetlib（3.13+）时抛出，
+                            提示切换telnetlib3或升级本模块
             TelnetClientError: 连接超时、拒绝或主机不可达时抛出
         """
+        # 运行时兜底: Python 3.13+无telnetlib时给出明确指引而非裸崩
+        if telnetlib is None:
+            raise RuntimeError(
+                "telnetlib 已在当前 Python 版本移除（PEP 594，3.13+），"
+                "请切换 telnetlib3 或升级本模块为 socket 实现"
+            )
         if self.is_connected:
             logger.debug(f"Telnet {self.host}:{self.port} 已连接，跳过重复连接")
             return

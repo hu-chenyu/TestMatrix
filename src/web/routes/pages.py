@@ -65,7 +65,7 @@ def executions() -> str:
     渲染执行记录页面
 
     参数:
-        无（批次列表数据由 Day46+ 前端 JS 异步请求 /api/executions）
+        无（批次列表数据由 Day48+ 前端 JS 异步请求 /api/executions）
 
     返回:
         str: 渲染后的 HTML 文档（pages/executions.html 继承 base.html）

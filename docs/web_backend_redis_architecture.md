@@ -421,8 +421,10 @@ failed。备选是只信 Redis（快但重启丢状态）或只查 DB（准但
 - 无阻断性缺陷。通读范围内的异常路径（非法分页、非法 limit、
   不存在批次、Redis 故障、坏消息、通道竞态）均有对应兜底，
   并已由本阶段测试与 Day34 补测覆盖。
-- 既有技术债（设计上已知、文档已声明）：event_bus 为单进程
-  内存过渡方案，跨进程部署需换 Redis Pub/Sub；单 worker 串行
+- 既有技术债（设计上已知、文档已声明）：event_bus 为进程内
+  事件通道，与 task_queue 职责正交并存（非"待替换的过渡方案"，
+  决策依据见 [ADR-0002](adr/0002-redis-queue-design.md)），跨进程
+  部署时再评估 Redis Pub/Sub 或 Stream；单 worker 串行
   是 SQLite 阶段有意选择；批次级异常粒度为"一条失败整批
   failed"，单用例隔离留待真实 pytest 执行器接入时细化。
 
