@@ -39,10 +39,16 @@ ENV/
 .coverage.*
 htmlcov/
 coverage.xml
-output/allure_results/
-output/reports/
-output/logs/
+# 运行产物整目录忽略（allure结果/报告/日志/vendored Redis/数据库文件等均不入库）
+output/
 *.log
+
+# ------------------------------ Day38 起静态检查工具缓存 ------------------------------
+.ruff_cache/
+.mypy_cache/
+
+# ------------------------------ 其他项目（非本仓库内容，禁止误入） ------------------------------
+pypi-aquamind/
 
 # ------------------------------ 本地敏感配置（不入库） ------------------------------
 .env
