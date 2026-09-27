@@ -18,7 +18,7 @@
       算术平均
     - 覆盖率类指标分母只算status=active的用例
     - code_coverage为预留契约字段，当前恒为null（代码覆盖率
-      已在Day39 CI接入pytest-cov，此处待补充模块级覆盖率数据，
+      计划在Day39 CI接入pytest-cov，此处待补充模块级覆盖率数据，
       禁止编造数值）
     - 纯GET查询接口，无请求体，不引入marshmallow校验
 """
@@ -237,7 +237,7 @@ def report_quality_metrics():
           active用例数
         - execution_efficiency: 平均耗时/P95耗时（小样本取最大值）/
           平均每批次用例数
-        - code_coverage: 预留契约字段恒为null（覆盖率已在Day39
+        - code_coverage: 预留契约字段恒为null（覆盖率计划在Day39
           CI接入，此处待补充模块级覆盖率数据）
 
     参数:
