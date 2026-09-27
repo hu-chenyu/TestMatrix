@@ -1438,7 +1438,7 @@ class ReportRepository:
               avg_cases_per_batch（明细总数/批次数）
 
         code_coverage为预留契约字段，当前恒为None（代码覆盖率
-        已在Day39 CI接入pytest-cov，此处待补充模块级覆盖率数据，
+        计划在Day39 CI接入pytest-cov，此处待补充模块级覆盖率数据，
         禁止编造数值）。
 
         参数:
@@ -1564,7 +1564,7 @@ class ReportRepository:
                 "p95_duration_sec": p95_duration_sec,
                 "avg_cases_per_batch": avg_cases_per_batch,
             },
-            # 预留契约字段: 代码覆盖率已接入（Day39 CI），
+            # 预留契约字段: 代码覆盖率计划接入（Day39 CI），
             # 此处待补充模块级覆盖率数据，禁止编造数值
             "code_coverage": None,
         }

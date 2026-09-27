@@ -10,7 +10,7 @@
 | 编号 | 标题 | 决策日 | 状态 |
 | --- | --- | --- | --- |
 | [0001](0001-flask-vs-fastapi.md) | Web 框架选型：Flask 2.3 而非 FastAPI | 2026-09-07（Day17，追溯补录于 Day37） | 已接受；Day101 升级 Flask 3.x |
-| [0002](0002-redis-queue-design.md) | 任务调度用 LPUSH/BRPOP list 队列而非 pub/sub；event_bus 与 task_queue 并存 | 2026-09-08~09-08（Day25/Day32，追溯补录于 Day37） | 已接受 |
+| [0002](0002-redis-queue-design.md) | 任务调度用 LPUSH/BRPOP list 队列而非 pub/sub；event_bus 与 task_queue 并存 | 2026-09-15/09-22（Day25/Day32，追溯补录于 Day37） | 已接受 |
 
 ## 模板
 

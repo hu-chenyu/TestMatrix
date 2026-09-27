@@ -41,7 +41,7 @@
 | core 层（4模块） | 3233 | 7800-9000 | 真实 pytest 执行器+钩子+插件+xdist 约 +2200；依赖编排引擎 +700；**AST 精准回归选型 +900**（由原静态检查 600 上修）；深度重构（含三文件拆分与 marshmallow 序列化改造）+1800 |
 | web 后端（Flask+Redis） | 19 | 5200-6000 | 16 开发日（API/SSE/质量度量）+Redis 缓存层/任务队列 API 约 +800 |
 | web 前端（HTML+CSS+JS） | 0 | 5100-5800 | 12 开发日 × 约 330 行（Dashboard 图表/用例管理/执行记录三页面；润色后置到阶段七） |
-| tests 测试 | 3800 | 不设上限 | tests 行数随用例增长自然扩张，当前已 15,182 行（Day37 实测）；回归/真实执行/Redis/AST/Flaky 补测为主要增量 |
+| tests 测试 | 3800 | 不设上限 | tests 行数随用例增长自然扩张，当前已 15,182 行（统计口径：git ls-files tests/ 取 42 个入库 .py 文件逐文件行数求和，Day37 实测可复现）；回归/真实执行/Redis/AST/Flaky 补测为主要增量 |
 | 配置与工程化 | 423 | 1200-1400 | Dockerfile/compose（含 Redis）/Jenkinsfile/GitHub Actions/k6/启动脚本 |
 | 文档 | 529 | 5000-6500 | 使用指南/7 篇技术博客/ADR/KNOWN_LIMITATIONS/CONTRIBUTING/CHANGELOG |
 
@@ -49,10 +49,10 @@
 
 | 指标 | 实测值 | 口径 |
 | --- | --- | --- |
-| 源码行数（common+db+core+web 后端+前端自研） | **14,443 行** | 已达成终态目标 22k-28k 的 **52%~66%** |
+| 源码行数（common+db+core+web 后端+前端自研） | **14,555 行**（44 个入库 .py/.html/.css/.js 文件，逐文件行数求和） | 已达成终态目标 22k-28k 的 **52%~66%** |
 | tests 行数 | 15,182 行 | 终态不设上限，随用例只增不减 |
 | 用例条数 | 422 条（实跑 422 passed；基线耗时待 Day79 按协议实测确立） | 已超 450 条下限的 94%；终态口径为 ≥450 条只增不减 |
-| 语句覆盖率 | **82%**（3442 语句 / 629 未覆盖） | 已达成"≥80%"判据；薄弱点为 serial_client 0%、telnet_client 0%、assertion 51% |
+| 语句覆盖率 | **82%**（3450 语句 / 637 未覆盖，pytest --cov=src 实测） | 已达成"≥80%"判据；薄弱点为 serial_client 0%、telnet_client 0%、assertion 51% |
 
 > 结论：产量健康、工期宽裕，剩余重点是**把心脏前移、把能力做深**，而非继续堆量。
 
@@ -640,8 +640,8 @@ src/core/report_analyzer/
 | 已完成天数 | 37 / 180（21%） |
 | 已完成里程碑 | M1（核心基座）、M2（report_analyzer）、M3（通知模块）、M4（Web后端+Redis） |
 | 当前测试基线 | **422 passed / 0 failed**（Day37 本机实跑；基线耗时待 Day79 按协议统一确立） |
-| 当前覆盖率 | **82%**（3442 语句 / 629 未覆盖）；薄弱点：serial_client 0%、telnet_client 0%、assertion 51% |
-| 当前源码量 | 14,443 行（达终态目标 52%~66%）；tests 15,182 行（终态不设上限，只增不减） |
+| 当前覆盖率 | **82%**（3450 语句 / 637 未覆盖，Day37 f1c96d4 实测）；薄弱点：serial_client 0%、telnet_client 0%、assertion 51% |
+| 当前源码量 | 14,555 行（44 个入库自研文件，口径同 §二实测校准表；达终态目标 52%~66%）；tests 15,182 行（42 个入库 .py 文件，口径同上，终态不设上限只增不减） |
 | 累计提交 | 50+ 次（以 `git rev-list --count HEAD` 实测为准，已全部推送 origin/main） |
 | **下一任务** | **Day38（09/28）：GitHub Actions CI + pyproject.toml（ruff 全量强制 / mypy 仅新增文件强制）** |
 
