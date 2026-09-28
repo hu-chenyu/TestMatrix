@@ -27,7 +27,7 @@
 | 起止日期 | 2026-08-22 ~ 2026-12-18（总跨度 119 天，B 方案·119版） |
 | 总天数 | 119 天（Day1 ~ Day119；Day119 为项目最终交付日） |
 | 当前进度 | Day37 / Day119 已完成（31%）；422 条 pytest 用例全部通过；57 次提交已推送 GitHub；实际开工日 2026-09-29（计划日+1，由 Day109-114 缓冲吸收 1 天偏移） |
-| 技术栈 | Python 3.11 / pytest 7.4→当日最新稳定（预期 9.x，Day74 按插件兼容矩阵确认） / SQLAlchemy 2.0（SQLite/MySQL 双模式）/ Redis / Flask 2.3→3.x / Jinja2 / Bootstrap 5 / ECharts 5 / Loguru / Allure 2 / Docker / Jenkins / GitHub Actions / k6 / AST（脚本级精准回归） |
+| 技术栈 | Python 3.11→当日最新稳定（预期 3.13/3.14，Day74 升级，含 telnetlib 替代；CI 多版本矩阵） / pytest 7.4→当日最新稳定（预期 9.x，Day74 按插件兼容矩阵确认） / SQLAlchemy 2.0（SQLite/MySQL 双模式）/ Redis / Flask 2.3→3.x / Jinja2 / Bootstrap 5 / ECharts 5 / Loguru / Allure 2 / Docker / Jenkins / GitHub Actions / k6 / AST（脚本级精准回归） |
 | 面向对象 | ① 测试工程师（fork 二开/参考架构）② 开源社区贡献者 ③ 项目维护者（长期技术积累与迭代） |
 | 可运行性目标 | git clone 后按 README 三步内启动 Web 平台 → 看到 Dashboard → 触发执行 → 看到报告 |
 | 预估代码量 | 源码约 1.8-2.2 万行；含测试/配置/文档总量约 3.2-3.8 万行；测试用例终态 ≥450 条（只增不减，当前 422 条） |
@@ -94,7 +94,7 @@
 | 阶段二 Web 前端收尾 | Day41-44 | 4 | 10-01 ~ 10-04 | Dashboard 图表 + 用例管理页 + 执行记录页（三页面，轻量快速） |
 | 阶段三 真实执行器 Phase-1（含联调） | Day45-54 | 10 | 10-05 ~ 10-14 | subprocess 真实执行 + source_ref + 结果桥接 + Web 触发 + 任务队列 ACK/requeue + **Day52 验收门禁** + 全链路联调 |
 | 阶段四 真实执行器 Phase-2 深水区 | Day55-64 | 10 | 10-15 ~ 10-24 | pytest 钩子 + 自研可打包插件 + xdist 并发 + 写库竞态处理 + 全量基线→并发优化量化对比 |
-| 阶段五 DevOps | Day65-78 | 14 | 10-25 ~ 11-07 | Docker 多阶段+compose 三服务+Jenkins 流水线+k6 压测+pytest 当日最新稳定（预期 9.x）/Flask 3.x 升级 |
+| 阶段五 DevOps | Day65-78 | 14 | 10-25 ~ 11-07 | Docker 多阶段+compose 三服务+Jenkins 流水线+k6 压测+Python 升级（3.11→当日最新稳定，含 telnetlib 替代）/pytest 当日最新稳定（预期 9.x）/Flask 3.x 升级 |
 | 阶段六 质量打磨 | Day79-84 | 6 | 11-08 ~ 11-13 | 性能优化+代码质量+安全加固（含 subprocess 注入防护）+边界异常补测+真实场景验证 |
 | 阶段七 深度重构 | Day85-89 | 5 | 11-14 ~ 11-18 | 三文件差异化重构：notification 物理拆分 + report_analyzer 抽象消重 + case_manager 逻辑重构（marshmallow 序列化改造） |
 | 阶段八 MySQL 深优 | Day90-93 | 4 | 11-19 ~ 11-22 | EXPLAIN 慢查询+索引优化+SQLAlchemy 调优+量化对比+Redis 缓存深化 |
@@ -239,11 +239,13 @@
 | Day71 | 10/31（六） | W11 | Jenkins 配置文档（节点/凭据/使用指南）+ CI 阶段总结 + 流水线架构图 + ADR（Jenkins vs GitHub Actions 的分工） | Jenkins | 文档+总结+ADR | [ ] |
 | Day72 | 11/01（日） | W11 | k6 核心接口压测脚本 + p95 阈值断言 | k6 | k6 脚本 | [ ] |
 | Day73 | 11/02（一） | W12 | k6 性能基线数据（量化）+ 压测报告 | k6 | 基线数据+报告 | [ ] |
-| Day74 | 11/03（二） | W12 | **pytest 升级到当日最新稳定（预期 9.x；按 allure-pytest/xdist/cov/rerunfailures 兼容矩阵确认，个别插件滞后则先 8.4 并记 backlog）**（含 pytest-cov 升到当日最新稳定、pytest-rerunfailures 升到当日最新稳定）+ CI 矩阵分支验证，**绿了才合** | 版本升级 | 升级通过+回归绿 | [ ] |
+| Day74 | 11/03（二） | W12 | **Python 升级：3.11 → 当日最新稳定（预期 3.13/3.14，按实际发布情况确认）**——同步处理 telnetlib（3.13 已移除标准库 telnetlib：telnet_client 改用 telnetlib3 或 socket 自实现；现有代码已内置 3.13+ 降级指引）；**CI 矩阵扩至 ≥3 版本（主版本 + 两个探测版本）**。另：**pytest 升级到当日最新稳定（预期 9.x；按 allure-pytest/xdist/cov/rerunfailures 兼容矩阵确认，个别插件滞后则先 8.4 并记 backlog）**（含 pytest-cov 升到当日最新稳定、pytest-rerunfailures 升到当日最新稳定）+ CI 矩阵分支验证，**绿了才合** | 版本升级 | Python/pytest 升级通过+回归绿 | [ ] |
 | Day75 | 11/04（三） | W12 | **Flask 3.x 升级** + 同链升 Werkzeug≥3.1、Jinja2、itsdangerous、blinker + CI 矩阵验证，**绿了才合** | 版本升级 | 升级通过+回归绿 | [ ] |
-| Day76 | 11/05（四） | W12 | 版本升级回归测试 + 升级对比记录（性能/兼容性） | 版本升级 | 回归绿+对比记录 | [ ] |
+| Day76 | 11/05（四） | W12 | **三项升级（Python/pytest/Flask）联合回归测试** + 升级对比记录（性能/兼容性） | 版本升级 | 回归绿+对比记录 | [ ] |
 | Day77 | 11/06（五） | W12 | DevOps 阶段问题修复 + 双流水线（功能回归+性能基线）确认 | DevOps | 修复+双流水线确认 | [ ] |
 | Day78 | 11/07（六） | W12 | 复盘日：DevOps 阶段回顾 + 量化数据整理 + 讲述材料第 8 次 | 复盘 | 讲述材料+量化数据+独立自讲 | [ ] |
+
+> **升级窗口说明（Day74-76）**：三项升级同窗完成——Day74 Python（含 telnetlib 替代，CI 矩阵扩至 ≥3 版本）+ pytest；Day75 Flask；Day76 联合回归+对比记录。**排不下时优先级：Python（含 telnetlib；3.11 于 2027-10 EOL，不可砍）＞ pytest ＞ Flask（可顺延至缓冲日 Day109-114 并记 backlog）**。升级后同步 README/PROJECT_SPEC 技术栈行为支持范围格式（如「支持 Python 3.11–3.1x」）+ CI 徽章。
 
 ### 阶段六：质量打磨（Day79-84，6天）
 
@@ -520,7 +522,7 @@ src/core/report_analyzer/
 | 报告分析 | 中级偏上（已交付） | 中级偏上 | 流式解析/增量解析/质量度量体系+MetricsQueryBuilder 抽象消重 |
 | **代码分析** | 无（Day45 POC） | **中级偏上（脚本级）** | **AST 精准回归脚本**（覆盖映射 + import 拓扑 + 影响面反查），产出节省率与漏检率双指标；不做平台功能（pytest-testmon/Develocity 已产品化） |
 | 通知推送 | 中级偏上（已交付） | 中级偏上 | 多渠道+分级路由+指数退避重试+死信记录+**可扩展到"改 1 个文件新增渠道"** |
-| DevOps | 中级 | 中级偏上 | 多阶段构建/compose 三服务（含 Redis）/Jenkinsfile 全流水线/GitHub Actions CI/k6 量化基线/pytest 当日最新稳定（预期 9.x）+Flask 3.x 升级 |
+| DevOps | 中级 | 中级偏上 | 多阶段构建/compose 三服务（含 Redis）/Jenkinsfile 全流水线/GitHub Actions CI/k6 量化基线/Python 升级（3.11→当日最新稳定，含 telnetlib 替代）+pytest 当日最新稳定（预期 9.x）+Flask 3.x 升级 |
 | **不稳定性治理** | 无（reruns=2 掩盖） | **高级** | Flaky 重复执行/方差计算/自动标注/隔离队列/趋势看板/**误标率指标**（结论成立的条件） |
 | 深度重构 | 无 | 高级 | 三文件差异化重构（物理搬迁/逻辑重写/抽象消重三种策略），marshmallow 序列化改造，每拆一层一个 commit |
 
@@ -541,7 +543,7 @@ src/core/report_analyzer/
 | **M7 真实执行闭环（门禁）** | **Day52（10/12）** | subprocess 执行器 + source_ref + Web 触发 + ACK/requeue | **`TM_EXECUTOR=pytest` 真跑 assert True → 入库 → Web 可见；kill -9 崩溃 pending 回 pending 可重投；唯一键幂等 (batch_id, case_id) 同用例跨批次可再执行；并发单任务不被两 worker 同时消费；真 assert False 全链路 traceback pytest→解析→DB→Web** |
 | M8 执行器 Phase-1 联调完成 | Day54（10/14） | 全链路真实演示能力 | Web 触发→真实执行→入库→看板刷新完整跑通 |
 | **M9 执行器深水区完成** | **Day64（10/24）** | 钩子 + 可打包插件 + xdist + 量化报告 | **全量基线→并发优化对比报告**（含写库竞态处理）；覆盖率≥82% |
-| M10 DevOps 完成 | Day78（11/07） | Docker + Jenkins + Actions + k6 + pytest 当日最新稳定（预期 9.x）/Flask 3.x | compose 三服务一条命令启动；流水线绿灯；k6 基线归档；版本升级回归绿 |
+| M10 DevOps 完成 | Day78（11/07） | Docker + Jenkins + Actions + k6 + Python 升级（3.11→当日最新稳定，含 telnetlib 替代）/pytest 当日最新稳定（预期 9.x）/Flask 3.x | compose 三服务一条命令启动；流水线绿灯；k6 基线归档；版本升级回归绿 |
 | **M11 质量打磨完成** | **Day84（11/13）** | 性能/代码质量/安全（含注入防护）+边界补测+真实场景 | 质量报告归档；无高危漏洞；assertion.py 覆盖率≥80%；覆盖率≥85% |
 | **M12 重构完成** | **Day89（11/18）** | 三文件差异化重构 + marshmallow 序列化改造 | N+1 消除；重构后回归绿；重构前后对比数据 |
 | **M13 MySQL 深优完成** | **Day93（11/22）** | EXPLAIN+索引+SQLAlchemy 调优+Redis 深化 | MySQL 有 EXPLAIN 对比数据；Redis 命中率数据；覆盖率≥85% |

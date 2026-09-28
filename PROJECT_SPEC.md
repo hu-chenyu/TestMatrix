@@ -31,7 +31,7 @@
 
 ## 3. 快速开始（3 步跑起来）
 
-**环境要求**：Python 3.11.x；可选 Allure 命令行（HTML 报告）、Docker（容器方式）。
+**环境要求**：Python 3.11.x（CI 多版本矩阵；升级路线见开发计划）；可选 Allure 命令行（HTML 报告）、Docker（容器方式）。
 
 ```bash
 # 第1步：安装依赖（国内镜像加速）
@@ -105,7 +105,7 @@ python -m src.web.app
 
 | 分类 | 技术 |
 | --- | --- |
-| 核心语言 | Python 3.11 |
+| 核心语言 | Python 3.11（CI 多版本矩阵；升级路线见开发计划） |
 | 测试框架 | pytest 7.4.x → 当日最新稳定（预期 9.x，Day74 按插件兼容矩阵确认）、allure-pytest、pytest-rerunfailures、pytest-cov、pytest-xdist（Day45-64 真实执行阶段） |
 | 协议层 | Requests（HTTP）、pyserial（串口）、telnetlib（Telnet） |
 | 日志报告 | Loguru、Allure 2.x |
@@ -126,7 +126,7 @@ python -m src.web.app
 | 阶段 A-D | Day1-37 | 基座与核心：目录骨架、common 封装层、数据持久层、pytest 体系、数据驱动、用例调度、报告解析、通知推送、Flask 后端 + Redis、Web 骨架与 Dashboard | 已完成 |
 | 阶段一~二 | Day38-44 | CI 与工具链（3天）+ Web 前端收尾（4天） | 下一任务（Day38） |
 | 阶段三~四 | Day45-64 | 真实 pytest 执行器 Phase-1（10天，含 Day52 门禁）→ Phase-2 深水区（10天，钩子+自研插件+xdist 并发） | 规划中 |
-| 阶段五 | Day65-78 | DevOps（Docker 三服务/Jenkins/k6/pytest 当日最新稳定（预期 9.x）与 Flask 3.x 升级） | 规划中 |
+| 阶段五 | Day65-78 | DevOps（Docker 三服务/Jenkins/k6/Python 升级（3.11→当日最新稳定，含 telnetlib 替代）/pytest 当日最新稳定（预期 9.x）与 Flask 3.x 升级） | 规划中 |
 | 阶段六~八 | Day79-93 | 质量打磨（6天）+ 重构（5天）+ MySQL 深优（4天） | 规划中 |
 | 阶段九~十 | Day94-100 | AST 精准回归脚本（2天）+ 机动缓冲（5天，AquaMind M4 S1-S8 期间） | 规划中 |
 | 阶段十一~十四 | Day101-114 | 演示打磨（2天，不录视频）+ 技术博客 3 篇（4天）+ 交付准备（2天）+ 缓冲（6天） | 规划中 |
