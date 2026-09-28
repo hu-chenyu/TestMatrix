@@ -106,7 +106,7 @@ python -m src.web.app
 | 分类 | 技术 |
 | --- | --- |
 | 核心语言 | Python 3.11 |
-| 测试框架 | pytest 7.4.x → 8.x（Day74 升级）、allure-pytest、pytest-rerunfailures、pytest-cov、pytest-xdist（Day45-64 真实执行阶段） |
+| 测试框架 | pytest 7.4.x → 当日最新稳定（预期 9.x，Day74 按插件兼容矩阵确认）、allure-pytest、pytest-rerunfailures、pytest-cov、pytest-xdist（Day45-64 真实执行阶段） |
 | 协议层 | Requests（HTTP）、pyserial（串口）、telnetlib（Telnet） |
 | 日志报告 | Loguru、Allure 2.x |
 | 数据驱动 | PyYAML、openpyxl |
@@ -126,7 +126,7 @@ python -m src.web.app
 | 阶段 A-D | Day1-37 | 基座与核心：目录骨架、common 封装层、数据持久层、pytest 体系、数据驱动、用例调度、报告解析、通知推送、Flask 后端 + Redis、Web 骨架与 Dashboard | 已完成 |
 | 阶段一~二 | Day38-44 | CI 与工具链（3天）+ Web 前端收尾（4天） | 下一任务（Day38） |
 | 阶段三~四 | Day45-64 | 真实 pytest 执行器 Phase-1（10天，含 Day52 门禁）→ Phase-2 深水区（10天，钩子+自研插件+xdist 并发） | 规划中 |
-| 阶段五 | Day65-78 | DevOps（Docker 三服务/Jenkins/k6/pytest 8.x 与 Flask 3.x 升级） | 规划中 |
+| 阶段五 | Day65-78 | DevOps（Docker 三服务/Jenkins/k6/pytest 当日最新稳定（预期 9.x）与 Flask 3.x 升级） | 规划中 |
 | 阶段六~八 | Day79-93 | 质量打磨（6天）+ 重构（5天）+ MySQL 深优（4天） | 规划中 |
 | 阶段九~十 | Day94-100 | AST 精准回归脚本（2天）+ 机动缓冲（5天，AquaMind M4 S1-S8 期间） | 规划中 |
 | 阶段十一~十四 | Day101-114 | 演示打磨（2天，不录视频）+ 技术博客 3 篇（4天）+ 交付准备（2天）+ 缓冲（6天） | 规划中 |
@@ -158,7 +158,7 @@ python -m src.web.app
 - [ ] Jenkins 流水线绿灯
 - [ ] MySQL 优化 EXPLAIN 前后对比数据
 - [ ] **AST 精准回归脚本可运行，产出节省率与漏检率**（脚本级，不做平台功能）
-- [ ] **Flaky 治理**：用例可被自动识别隔离，产出误标率数据+标注数据集（与 flakehunter/flakefighters/flakiness 三家对比）
+- [ ] **Flaky 治理**：用例可被自动识别隔离，产出误标率数据+标注数据集（与 flakehunter/flakefighters/flakiness/flakemark 四家对比）
 - [ ] 24 小时稳定性、陌生人三步启动
 - [ ] 5 篇博客发布（执行器/MySQL/架构/AST/Flaky）、Demo 操作手册+截图组（不录视频）
 
