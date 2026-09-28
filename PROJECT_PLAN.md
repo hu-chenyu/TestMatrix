@@ -26,7 +26,7 @@
 | 深度目标 | 每个技术栈达中级偏上~高级深度，每个优化阶段有量化对比数据，每个能力边界有明确声明 |
 | 起止日期 | 2026-08-22 ~ 2026-12-18（总跨度 119 天，B 方案·119版） |
 | 总天数 | 119 天（Day1 ~ Day119；Day119 为项目最终交付日） |
-| 当前进度 | Day37 / Day119 已完成（31%）；422 条 pytest 用例全部通过；61 次提交已推送 GitHub；实际开工日 2026-09-29（计划日+1，由 Day109-114 缓冲吸收 1 天偏移） |
+| 当前进度 | Day37 / Day119 已完成（31%）；422 条 pytest 用例全部通过；62 次提交已推送 GitHub；实际开工日 2026-09-29（计划日+1，由 Day109-114 缓冲吸收 1 天偏移） |
 | 技术栈 | Python 3.11→当日最新稳定（预期 3.13/3.14，Day74 升级，含 telnetlib 替代；CI 多版本矩阵） / pytest 7.4→当日最新稳定（预期 9.x，Day74 按插件兼容矩阵确认） / SQLAlchemy 2.0（SQLite/MySQL 双模式）/ Redis / Flask 2.3→3.x / Jinja2 / Bootstrap 5 / ECharts 5 / Loguru / Allure 2 / Docker / Jenkins / GitHub Actions / k6 / AST（脚本级精准回归） |
 | 面向对象 | ① 测试工程师（fork 二开/参考架构）② 开源社区贡献者 ③ 项目维护者（长期技术积累与迭代） |
 | 可运行性目标 | git clone 后按 README 三步内启动 Web 平台 → 看到 Dashboard → 触发执行 → 看到报告 |
@@ -559,7 +559,7 @@ src/core/report_analyzer/
 
 | # | 判据 | 量化口径 / 交付物 | 当前状态 |
 | --- | --- | --- | --- |
-| 1 | **工程治理** | CI 徽章 + 覆盖率 ≥85% + ruff/mypy 零错误 + 61 commits 零断档 | 覆盖率**已实测 82%**，CI 待 Day38 |
+| 1 | **工程治理** | CI 徽章 + 覆盖率 ≥85% + ruff/mypy 零错误 + 62 commits 零断档 | 覆盖率**已实测 82%**，CI 待 Day38 |
 | 2 | **核心能力（心脏）** | 真实 pytest 执行引擎（subprocess + 钩子 + 可打包插件 + xdist）；全量基线 → 并发优化量化对比 | 待 Day45-64；**测量协议：同机/同数据集/重复 3 次取中位/脚本固化进 `scripts/`** |
 | 3 | **Flaky 治理（差异化）** | 重复执行 → 方差 → 自动标注 → 隔离 → 趋势看板 + **误标率指标** | 待 Day115-119；现有 `reruns=2` 只是掩盖；与 flakehunter/flakefighters/flakiness/flakemark/xflaky 五家对比（xflaky 仅做标记自动化、无持续隔离工作流）；本项目差异点 = 误标率自证（种子注入法）+ 平台内策略化隔离闭环 + 标注数据集 |
 | 4 | **AST 精准回归（脚本级）** | 覆盖映射+import 拓扑+影响面反查脚本；**节省率+漏检率双指标**；用例依赖清单导出 | 待 Day94-95；Day45 POC 已完成；不做平台功能（pytest-testmon/Develocity 已产品化） |
@@ -583,7 +583,7 @@ src/core/report_analyzer/
 | 当前测试基线 | **422 passed / 0 failed**（Day37 本机实跑） |
 | 当前覆盖率 | **82%**（3450 语句 / 637 未覆盖，Day37 实测）；薄弱点：serial_client 0%、telnet_client 0%、assertion 51% |
 | 当前源码量 | 14,555 行（44 个入库自研文件）；tests 15,182 行（42 个入库 .py 文件） |
-| 累计提交 | 61 次（已全部推送 origin/main） |
+| 累计提交 | 62 次（已全部推送 origin/main） |
 | **下一任务** | **Day38（计划 09/28，实际开工 09/29，+1 天由缓冲吸收）：GitHub Actions CI + pyproject.toml（ruff 全量强制 / mypy 仅新增文件强制）+ 依赖安全** |
 
 ---
