@@ -30,7 +30,7 @@
 | 分层 | 技术选型 |
 | --- | --- |
 | 核心语言 | Python 3.11 |
-| 测试框架 | pytest 7.4 →8.x（Day74 升级）+ allure-pytest + pytest-rerunfailures + pytest-cov + pytest-xdist（依赖已随 requirements 集成，Day58 接入 -n 并发） |
+| 测试框架 | pytest 7.4 →当日最新稳定（预期 9.x，Day74 按插件兼容矩阵确认）+ allure-pytest + pytest-rerunfailures + pytest-cov + pytest-xdist（依赖已随 requirements 集成，Day58 接入 -n 并发） |
 | 协议层 | Requests / pyserial / telnetlib |
 | 日志报告 | Loguru / Allure 2.x |
 | 数据驱动 | PyYAML / openpyxl |
