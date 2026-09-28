@@ -46,7 +46,7 @@
 
 ### 环境要求
 
-- Python 3.11.x
+- Python 3.11+（Day74升级至当日最新稳定）
 - （可选）Allure命令行工具（生成HTML报告用）：[安装指引](https://allurereport.org/docs/install-for-windows/)
 
 ### 3 步运行

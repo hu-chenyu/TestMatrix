@@ -27,7 +27,7 @@
 | 起止日期 | 2026-08-22 ~ 2026-12-18（总跨度 119 天，B 方案·119版） |
 | 总天数 | 119 天（Day1 ~ Day119；Day119 为项目最终交付日） |
 | 当前进度 | Day37 / Day119 已完成（31%）；422 条 pytest 用例全部通过；62 次提交已推送 GitHub；实际开工日 2026-09-29（计划日+1，由 Day109-114 缓冲吸收 1 天偏移） |
-| 技术栈 | Python 3.11→当日最新稳定（预期 3.13/3.14，Day74 升级，含 telnetlib 替代；CI 多版本矩阵） / pytest 7.4→当日最新稳定（预期 9.x，Day74 按插件兼容矩阵确认） / SQLAlchemy 2.0（SQLite/MySQL 双模式）/ Redis / Flask 2.3→3.x / Jinja2 / Bootstrap 5 / ECharts 5 / Loguru / Allure 2 / Docker / Jenkins / GitHub Actions / k6 / AST（脚本级精准回归） |
+| 技术栈 | Python 3.11→当日最新稳定（预期 3.14/3.15，下限不低于3.14，Day74 升级，含 telnetlib 替代；CI 多版本矩阵） / pytest 7.4→当日最新稳定（预期 9.x，Day74 按插件兼容矩阵确认） / SQLAlchemy 2.0（SQLite/MySQL 双模式）/ Redis / Flask 2.3→3.x / Jinja2 / Bootstrap 5 / ECharts 5 / Loguru / Allure 2 / Docker / Jenkins / GitHub Actions / k6 / AST（脚本级精准回归） |
 | 面向对象 | ① 测试工程师（fork 二开/参考架构）② 开源社区贡献者 ③ 项目维护者（长期技术积累与迭代） |
 | 可运行性目标 | git clone 后按 README 三步内启动 Web 平台 → 看到 Dashboard → 触发执行 → 看到报告 |
 | 预估代码量 | 源码约 1.8-2.2 万行；含测试/配置/文档总量约 3.2-3.8 万行；测试用例终态 ≥450 条（只增不减，当前 422 条） |
@@ -239,7 +239,7 @@
 | Day71 | 10/31（六） | W11 | Jenkins 配置文档（节点/凭据/使用指南）+ CI 阶段总结 + 流水线架构图 + ADR（Jenkins vs GitHub Actions 的分工） | Jenkins | 文档+总结+ADR | [ ] |
 | Day72 | 11/01（日） | W11 | k6 核心接口压测脚本 + p95 阈值断言 | k6 | k6 脚本 | [ ] |
 | Day73 | 11/02（一） | W12 | k6 性能基线数据（量化）+ 压测报告 | k6 | 基线数据+报告 | [ ] |
-| Day74 | 11/03（二） | W12 | **Python 升级：3.11 → 当日最新稳定（预期 3.13/3.14，按实际发布情况确认）**——同步处理 telnetlib（3.13 已移除标准库 telnetlib：telnet_client 改用 telnetlib3 或 socket 自实现；现有代码已内置 3.13+ 降级指引）；**CI 矩阵扩至 ≥3 版本（主版本 + 两个探测版本）**。另：**pytest 升级到当日最新稳定（预期 9.x；按 allure-pytest/xdist/cov/rerunfailures 兼容矩阵确认，个别插件滞后则先 8.4 并记 backlog）**（含 pytest-cov 升到当日最新稳定、pytest-rerunfailures 升到当日最新稳定）+ CI 矩阵分支验证，**绿了才合** | 版本升级 | Python/pytest 升级通过+回归绿 | [ ] |
+| Day74 | 11/03（二） | W12 | **Python 升级：3.11 → 当日最新稳定（预期 3.14/3.15，按当日实际发布与关键依赖（SQLAlchemy/Redis/PyMySQL）wheel可用性确认；下限不低于3.14）**——同步处理 telnetlib（3.13 已移除标准库 telnetlib：telnet_client 改用 telnetlib3 或 socket 自实现；现有代码已内置 3.13+ 降级指引）；**CI 矩阵扩至 ≥3 版本（主版本 + 两个探测版本）**。另：**pytest 升级到当日最新稳定（预期 9.x；按 allure-pytest/xdist/cov/rerunfailures 兼容矩阵确认，个别插件滞后则先 8.4 并记 backlog）**（含 pytest-cov 升到当日最新稳定、pytest-rerunfailures 升到当日最新稳定）+ CI 矩阵分支验证，**绿了才合** | 版本升级 | Python/pytest 升级通过+回归绿 | [ ] |
 | Day75 | 11/04（三） | W12 | **Flask 3.x 升级** + 同链升 Werkzeug≥3.1、Jinja2、itsdangerous、blinker + CI 矩阵验证，**绿了才合** | 版本升级 | 升级通过+回归绿 | [ ] |
 | Day76 | 11/05（四） | W12 | **三项升级（Python/pytest/Flask）联合回归测试** + 升级对比记录（性能/兼容性） | 版本升级 | 回归绿+对比记录 | [ ] |
 | Day77 | 11/06（五） | W12 | DevOps 阶段问题修复 + 双流水线（功能回归+性能基线）确认 | DevOps | 修复+双流水线确认 | [ ] |
