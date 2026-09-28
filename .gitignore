@@ -83,3 +83,6 @@ $RECYCLE.BIN/
 allure-commandline/
 allure-report/
 .tmp/
+
+# ------------------------------ 本地评估与私有文档（不入库） ------------------------------
+.workbuddy/
