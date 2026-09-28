@@ -1,8 +1,8 @@
 # TestMatrix core层架构设计文档
 
 > 本文档详细说明 core 层（平台核心逻辑层）的架构设计、模块职责、关键设计决策与扩展点，
-> 适合作为架构讲解与技术评审材料。2026-09-03 更新：补充通知模块设计与进阶能力规划
-> （Redis/真实pytest执行/依赖编排/AST/AI扩展）。
+> 适合作为架构讲解与技术评审材料。2026-09-28 更新（B 方案·119版）：进阶能力规划同步为
+> 真实pytest执行/Flaky治理/AST脚本/MySQL深优，删除依赖编排与AI扩展。
 
 ## 1. 架构总览
 
@@ -41,7 +41,7 @@ graph LR
 | --- | --- | --- |
 | common 层 | LogManager 日志、env_manager 配置、HttpClient/Serial/Telnet 协议客户端、Assertion 断言库 | 全模块统一 `LogManager.get_logger()`；配置经 env_manager 注入 |
 | db 层 | 3 张核心表 ORM 模型 + DatabaseSession 会话管理（SQLite/MySQL 双模式） | case_manager 顶部直接导入；report_analyzer/notification 函数内延迟导入（规避循环依赖） |
-| web 层（开发中） | Flask API / SSE / 页面 | 通过调用 core 层公开方法触发调度与查询；Redis 作为缓存与任务队列（规划） |
+| web 层（骨架已完成） | Flask API / SSE / 页面 | 通过调用 core 层公开方法触发调度与查询；Redis 作为缓存与任务队列（Day31-33 已接入） |
 
 ## 2. 模块详细设计
 
@@ -53,11 +53,11 @@ graph LR
 
 1. **为什么支持 YAML 和 Excel 双格式？** 团队角色分工不同——测开习惯 YAML（版本友好、可 code review），业务测试习惯 Excel（零门槛填写）。统一入口按后缀自动分发，调用方零感知。
 2. **为什么三维筛选用内存实现而不是 SQL 查询？** 数据加载层与持久层解耦：筛选发生在数据入库之前（参数化直用场景），内存筛选不依赖数据库连接，同时保证同一套筛选语义在文件与数据库两种数据源上行为一致。
-3. **大数据量如何处理内存？** 当前 50 条量级实测单条加载+校验+规范化仅 0.55ms（吞吐约 1800 条/秒）；已预留分片加载扩展位（Day125 阶段九排期），万级用例再引入生成器逐批消费，避免过度设计。
+3. **大数据量如何处理内存？** 当前 50 条量级实测单条加载+校验+规范化仅 0.55ms（吞吐约 1800 条/秒）；已预留分片加载扩展位，万级用例再引入生成器逐批消费，避免过度设计。
 
 **异常处理**：文件不存在/后缀不支持抛 `DataDriverError`；YAML 语法错误、字段校验失败的报错均携带**行号或用例序号 + 字段名**中文定位；Excel 空行自动跳过、空表头直接报错。
 
-**进阶规划（Day136-137）**：接口依赖与编排——用例间依赖参数传递（登录 token 提取到变量池→后续用例引用）、场景化用例编排（登录→下单→查询多接口组合），失败自动跳过依赖用例。
+**进阶规划（已取消，B 方案不做依赖编排）**：用例间依赖由 pytest fixture 依赖图天然承载，平台侧仅保留"用例→fixture/数据依赖"清单导出（并入 Day94-95 AST 脚本），不做变量池/场景编排平台功能。
 
 ### 2.2 case_manager 用例调度引擎
 
@@ -72,7 +72,7 @@ graph LR
 
 **异常处理**：批次号/用例编号/result 取值强校验（携带 context 定位上下文）；failed/error 结果强制要求 error_message；单用例失败不中断整批；SQLAlchemyError 统一包装向上抛出。
 
-**进阶规划（Day52-61 Phase-1 + Day70-79 Phase-2，拆两段）**：`_simulate_execute` 单点替换为 `PytestRunner`——subprocess 封装真实 pytest（超时杀死/僵尸进程清理/退出码解析）、pytest 钩子（collection_modifyitems）与自定义插件、pytest-xdist 并发执行与乱序结果合并、多批次并发（资源竞争/锁/队列）。
+**进阶规划（Day45-54 Phase-1 + Day55-64 Phase-2，拆两段）**：`_simulate_execute` 单点替换为 `PytestRunner`——subprocess 封装真实 pytest（超时杀死/僵尸进程清理/退出码解析）、pytest 钩子（collection_modifyitems）与自定义插件、pytest-xdist 并发执行与乱序结果合并、多批次并发（资源竞争/锁/队列）。
 
 ### 2.3 report_analyzer 报告分析引擎
 
@@ -87,7 +87,7 @@ graph LR
 5. **failed 与 broken 为什么分开映射到表内 failed/error 字段？** failed 是断言失败（功能缺陷疑似），broken 是环境/代码异常（非功能问题）；聚合层合计（执行健康度口径），入库拆回（缺陷归因口径），一次聚合两种口径都有。
 6. **为什么用函数内延迟导入 db 层模型？** core 与 db 若互相顶部导入会形成循环依赖；导入时机推迟到调用瞬间，模块加载图保持无环。
 
-**进阶规划**：大结果集流式解析与增量解析（已纳入阶段九 MySQL 深优 Day124，Day121-126）；质量度量体系（覆盖率趋势/缺陷密度/执行效率，Day23 API + Day40 Dashboard）。
+**进阶规划**：大结果集流式解析与增量解析（已纳入 MySQL 深优 Day90-93）；质量度量体系（覆盖率趋势/缺陷密度/执行效率，Day23 API + Day35-37 Dashboard）。
 
 ### 2.4 notification 通知推送引擎
 
@@ -123,16 +123,16 @@ graph LR
 | 能力 | 交付日 | 架构设计 |
 | --- | --- | --- |
 | Redis 缓存与队列 | Day31-33 | 缓存层（统计结果/用例列表，TTL+穿透防护）+ 任务队列（异步执行替代裸线程）；故障降级回退直查 DB |
-| 真实 pytest 执行 | Day52-79（拆两段） | PytestRunner（subprocess 封装）+ 钩子/自定义插件 + xdist 并发；与模拟执行器同构可切换 |
-| 接口依赖编排 | Day136-137 | 变量池（token 提取/引用）+ 场景编排（多接口组合）；失败跳过依赖用例 |
-| AST 精准回归选型 | Day127-135 | 覆盖映射为主+AST diff为辅，产出节省率+漏检率量化对比 |
-| AI 扩展（失败归因+用例生成+报告摘要） | Day153-164 | 公共底座2天+三项能力闭环，带对照组与成本数据量化 |
+| 真实 pytest 执行 | Day45-64（拆两段：Phase-1 Day45-54 + Phase-2 Day55-64） | PytestRunner（subprocess 封装）+ 钩子/自定义插件 + xdist 并发；与模拟执行器同构可切换 |
+| 用例依赖清单导出 | Day94-95（并入 AST 脚本） | 用例→fixture/数据依赖清单导出（不做 AST 图结构，pytest fixture 依赖图天然承载） |
+| AST 精准回归脚本 | Day94-95（脚本级，不做平台功能） | 覆盖映射为主+import 拓扑为辅，产出节省率+漏检率量化对比 |
+| Flaky 用例治理 | Day115-119（核心深度） | 重复执行→方差计算→自动标注→隔离队列→Dashboard；误标率指标（结论成立的条件） |
 
 ## 5. 扩展点
 
 | 模块 | 扩展方向 | 预留设计 |
 | --- | --- | --- |
-| data_driver | 新格式（JSON/CSV/数据库源） | 后缀分发的解析器注册模式；CSV 已排期 Day125 |
+| data_driver | 新格式（JSON/CSV/数据库源） | 后缀分发的解析器注册模式；CSV 为预留扩展位（B 方案不排期） |
 | case_manager | 并发执行/分布式执行 | 执行器单点替换位（_simulate_execute→PytestRunner）；批次号无 DB 依赖 |
 | report_analyzer | 新报告格式（JUnit XML/HTML） | 解析层与计算层以 `List[AllureResult]` 为边界解耦 |
 | notification | 新渠道（钉钉/飞书/Slack） | 继承 BaseNotifier 实现 send 即可，统一路由与重试 |
