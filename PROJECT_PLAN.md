@@ -354,7 +354,7 @@
 
 ### 阶段十五：Flaky 用例治理（Day115-119，5天）—— 核心深度模块
 
-> **AquaMind M4 完全结束后开工**（12/14 起）。Flaky 治理是 pytest 生态公认痛点；BuildPulse（$99-499/月）/Develocity 面向海外商业 CI 栈，Python 开源侧有 pytest-flakehunter（重复执行+报告+历史+AI归因）、pytest-flakefighters（DeFlaker 差分覆盖分类+可选抑制）、pytest-flakiness（Flakiness.io 托管 reporter）、pytest-flakemark（AST 插桩行级根因定位）、pytest-xflaky（简称 xflaky；标记自动化 + 隔离提交流程：自动加 xfail(strict=False) 标记并自动提交隔离 PR）。**"隔离"本身已是业界标准模式（marker+CI 分道即可）；xflaky 为标记自动化 + 隔离提交流程（一次性配置），无持续隔离工作流（队列/趋势/回归决策）；本项目可辩护差异点收窄为：误标率自证 + 平台内策略化隔离闭环（跳过/重试/单独报告+队列/看板）+ 标注数据集**。"误标率"是结论成立的条件——商业产品靠海量跨构建数据免此问题，个人项目必须显式测量误标率才能自证判定可信。
+> **AquaMind M4 完全结束后开工**（12/14 起）。Flaky 治理是 pytest 生态公认痛点；BuildPulse（$99-499/月）/Develocity 面向海外商业 CI 栈，Python 开源侧有 pytest-flakehunter（重复执行+报告+历史+AI归因）、pytest-flakefighters（DeFlaker 差分覆盖分类+可选抑制）、pytest-flakiness（Flakiness.io 托管 reporter）、pytest-flakemark（AST 插桩行级根因定位）、pytest-xflaky（简称 xflaky；标记自动化 + 隔离提交流程：自动加 xfail(strict=False) 标记并自动提交隔离 PR）。**"隔离"本身已是业界标准模式（marker+CI 分道即可）；xflaky 为标记自动化 + 隔离提交流程，无持续隔离工作流（队列/趋势/回归决策）；本项目可辩护差异点收窄为：误标率自证 + 平台内策略化隔离闭环（跳过/重试/单独报告+队列/看板）+ 标注数据集**。"误标率"是结论成立的条件——商业产品靠海量跨构建数据免此问题，个人项目必须显式测量误标率才能自证判定可信。
 >
 > **Flaky 最小可交付定义**：重复执行框架 + 自动标注 + 误标率测量协议必须有；Dashboard 看板可砍（砍件序最后一位）。误标率基准集采用种子注入法（故意注入已知 flaky + 已知稳定用例），规模 ≥100 用例 × ≥20 次重复，按根因分类报误标率。种子按 flake rate p∈{5%,10%,20%,30%} 分层注入，按层分别报 FPR/FNR；N=20 时 p=5% 检出率仅 64.2%（1−(1−0.05)^20），该检出下限写入 KNOWN_LIMITATIONS；总误标率为各层加权汇总。
 
