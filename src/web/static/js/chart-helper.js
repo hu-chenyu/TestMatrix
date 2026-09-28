@@ -1,5 +1,5 @@
 /* ==========================================================================
-   TestMatrix ECharts 统一封装（Day36 框架，Day40/41 图表开发直接复用）
+   TestMatrix ECharts 统一封装（Day36 框架，Day41 图表开发直接复用）
    职责：
      1. initChart：按 DOM id 初始化实例并登记，重复调用幂等不报警告；
      2. resizeAllCharts：窗口尺寸变化时统一 resize（带防抖）；

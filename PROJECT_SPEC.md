@@ -160,7 +160,7 @@ python -m src.web.app
 - [ ] **AST 精准回归脚本可运行，产出节省率与漏检率**（脚本级，不做平台功能）
 - [ ] **Flaky 治理**：用例可被自动识别隔离，产出误标率数据+标注数据集（与 flakehunter/flakefighters/flakiness/flakemark/xflaky 五家对比）
 - [ ] 24 小时稳定性、陌生人三步启动
-- [ ] 5 篇博客发布（执行器/MySQL/架构/AST/Flaky）、Demo 操作手册+截图组（不录视频）
+- [ ] 5 篇博客发布（执行器/xdist 写锁/架构/AST/Flaky）、Demo 操作手册+截图组（不录视频）
 
 ## 12. 开发规范要求
 

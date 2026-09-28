@@ -5,7 +5,7 @@
        与 renderStatCards（渲染 4 个卡片真实数值 + 语义着色）；
      - 用例总数接口失败不阻塞其他卡片（该卡片降级 “--” + toast 轻提示）。
    边界（不提前实现后续天数功能）：
-     - 三个图表仅初始化并显示“暂无数据”空态（折线 Day40、饼/柱 Day41）；
+     - 三个图表仅初始化并显示“暂无数据”空态（三图 Day41）；
      - 失败 Top 表保持 HTML 空态行（Day41 填充）。
    三态约定：loading（按钮 spinner + aria-busy）/ error（alert + toast）/
             empty（chart-helper 空态 + 表格“暂无数据”行）。
@@ -265,7 +265,7 @@ function initDashboard() {
     // 1. 先刷新导航栏健康状态（独立链路，失败不影响统计）
     loadHealthStatus();
 
-    // 2. 初始化三个图表并显示空态（Day40/41 在此基础上 setOption 真实数据）
+    // 2. 初始化三个图表并显示空态（Day41 在此基础上 setOption 真实数据）
     initDashboardCharts();
 
     // 3. 刷新按钮绑定重新加载汇总

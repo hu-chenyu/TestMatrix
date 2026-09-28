@@ -120,7 +120,7 @@ class TestDashboardFramework:
     def test_dashboard_failed_top_layout(self, client: FlaskClient) -> None:
         """
         测试失败 Top 榜布局: 页面应含 failedTopTable 表格
-        （Day39 才填充真实数据行）
+        （Day41 才填充真实数据行）
         """
         # 请求看板页
         response = client.get("/dashboard")
