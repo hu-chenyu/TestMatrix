@@ -9,7 +9,7 @@ pytest==7.4.4                    # 测试框架本体
 allure-pytest==2.13.5            # Allure报告pytest插件
 pytest-rerunfailures==13.0       # 失败用例自动重跑
 pytest-cov==4.1.0                # 测试覆盖率统计
-pytest-xdist==3.5.0               # 用例并发执行（Day73-76 Phase-2 接入，-n 多 worker）
+pytest-xdist==3.5.0               # 用例并发执行（Day58 接入 -n 多 worker，Phase-2）
 
 # ------------------------------ 协议通信层 ------------------------------
 requests==2.31.0                 # HTTP接口测试

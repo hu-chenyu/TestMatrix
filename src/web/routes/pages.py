@@ -46,7 +46,7 @@ def cases() -> str:
     渲染用例管理页面
 
     参数:
-        无（列表筛选条件由 Day41+ 前端 JS 通过查询参数异步请求 /api/cases）
+        无（列表筛选条件由 Day42+ 前端 JS 通过查询参数异步请求 /api/cases）
 
     返回:
         str: 渲染后的 HTML 文档（pages/cases.html 继承 base.html）
@@ -65,7 +65,7 @@ def executions() -> str:
     渲染执行记录页面
 
     参数:
-        无（批次列表数据由 Day48+ 前端 JS 异步请求 /api/executions）
+        无（批次列表数据由 Day43+ 前端 JS 异步请求 /api/executions）
 
     返回:
         str: 渲染后的 HTML 文档（pages/executions.html 继承 base.html）

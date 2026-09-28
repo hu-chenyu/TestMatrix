@@ -1,6 +1,6 @@
 {# 质量看板页面（Day36 框架 + Day37 统计卡片渲染）
    Day37：4 个统计卡片渲染真实数值（用例总数取 cases 列表 total，
-   其余三项取 summary）；趋势折线（Day40）、饼图/柱状/失败Top（Day41）
+   其余三项取 summary）；趋势折线/饼图/柱状/失败Top（Day41）
    仍保持“暂无数据”空态，本日不提前实现。 #}
 {% extends "base.html" %}
 
@@ -94,7 +94,7 @@
 </div>
 
 <!-- ========== 3. 图表区：ECharts 容器本日初始化并显示“暂无数据”空态 ========== -->
-<!-- 3.1 通过率趋势折线（Day40 上线） -->
+<!-- 3.1 通过率趋势折线（Day41 上线） -->
 <div class="row g-3 mb-3">
     <div class="col-12">
         <div class="card">
@@ -168,7 +168,7 @@
 {% block extra_js %}
 <!-- ECharts5 仅看板页加载（本地静态资源，离线可用；版本5.5.0，国内镜像无5.5.1故取兼容patch版） -->
 <script src="{{ url_for('static', filename='js/echarts.min.js') }}"></script>
-<!-- ECharts 统一封装（初始化/防抖resize/空态/调色板），Day40/41 复用 -->
+<!-- ECharts 统一封装（初始化/防抖resize/空态/调色板），Day41 复用 -->
 <script src="{{ url_for('static', filename='js/chart-helper.js') }}"></script>
 <!-- 看板业务脚本：summary 链路 + /health 健康状态 + 页面初始化 -->
 <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
