@@ -12,7 +12,7 @@ pytest-cov==4.1.0                # 测试覆盖率统计
 pytest-xdist==3.5.0               # 用例并发执行（Day58 接入 -n 多 worker，Phase-2）
 
 # ------------------------------ 协议通信层 ------------------------------
-requests==2.31.0                 # HTTP接口测试
+requests==2.32.3                 # HTTP接口测试；Day38 安全升级，CVE 修复（2.31.0→2.32.3）
 pyserial==3.5                    # 串口通信（芯片板卡测试适配）
 # 说明: telnetlib为Python标准库自带，3.11版本可用，无需额外安装
 
@@ -26,11 +26,14 @@ openpyxl==3.1.2                  # Excel测试数据解析
 # ------------------------------ 数据持久层 ------------------------------
 SQLAlchemy==2.0.25               # ORM框架（默认SQLite，可切MySQL）
 PyMySQL==1.1.0                   # MySQL数据库驱动（切换MySQL时使用）
-cryptography==41.0.7             # MySQL 8.0 caching_sha2_password认证依赖
+cryptography==42.0.8             # MySQL 8.0 caching_sha2_password认证依赖；Day38 安全升级，CVE 修复（41.0.7→42.0.8）
 
 # ------------------------------ Web平台 ------------------------------
 Flask==2.3.3                     # Web后端框架
-Jinja2==3.1.2                    # Flask模板引擎（随Flask安装，显式锁定版本）
+Werkzeug==3.1.8                  # Flask 传递依赖（WSGI工具库，Flask 2.3.3 要求>=2.3.7）；Day38 显式 pin 防传递漂移，版本取本地实测
+itsdangerous==2.2.0              # Flask 传递依赖（安全签名）；Day38 显式 pin，版本取本地实测
+blinker==1.9.0                   # Flask 传递依赖（信号库）；Day38 显式 pin，版本取本地实测
+Jinja2==3.1.6                    # Flask模板引擎（随Flask安装，显式锁定版本）；Day38 安全升级，CVE 修复（3.1.2→3.1.6）
 
 # ------------------------------ 缓存层 ------------------------------
 redis==5.0.8                     # Redis客户端（读多写少查询加速，TM_REDIS_ENABLED默认关闭）

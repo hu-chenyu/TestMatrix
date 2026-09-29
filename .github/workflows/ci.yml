@@ -1,0 +1,159 @@
+# ==============================================================================
+# TestMatrix 主 CI 工作流（Day38 新增）
+# 设计要点：
+# 1. Python 3.11 为主版本必须全绿；3.12 为探测版本，失败仅告警不阻断（experimental 矩阵位）
+# 2. 步骤顺序：依赖安装 → ruff 全量强制（src+tests，不 ignore 规则）
+#    → mypy 仅检查本次提交新增/修改的 src 文件（git diff 过滤，存量文件渐进收紧）
+#    → pytest 全量基线 422 → pip-audit 完整报告 + 分级门禁
+# 3. pip-audit 门禁：HIGH/CRITICAL（含严重级未知，fail-closed）且不在
+#    .pip-audit-allowlist.txt（含过期日校验）内才阻断；MODERATE/LOW 仅告警
+# 4. 不含覆盖率步骤（Day39 接入）、不含 Docker/部署步骤、不含失败通知（均为后期阶段）
+# ==============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}${{ matrix.experimental && '（探测版本，不阻断）' || '' }}
+    runs-on: ubuntu-latest
+    # 防止 CI 卡死（如网络挂起/测试死循环），15 分钟整体超时
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 主版本：任何一步失败都阻断
+          - python-version: "3.11"
+            experimental: false
+          # 探测版本：仅验证新版本兼容性，全部步骤 continue-on-error 不阻断
+          - python-version: "3.12"
+            experimental: true
+
+    steps:
+      - name: 检出代码（fetch-depth=0 拉完整历史，供 mypy 步骤 git diff）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+        continue-on-error: ${{ matrix.experimental }}
+
+      - name: 安装 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+        continue-on-error: ${{ matrix.experimental }}
+
+      - name: 安装项目依赖与 CI 工具链（ruff/mypy/pip-audit 仅 CI 安装，不进 requirements.txt）
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff mypy pip-audit
+        continue-on-error: ${{ matrix.experimental }}
+
+      - name: ruff 全量静态检查（src + tests，规则不 ignore，存量问题清单化后按模块日修复）
+        run: ruff check src tests
+        continue-on-error: ${{ matrix.experimental }}
+
+      - name: mypy（仅本次提交新增/修改的 src 文件；存量文件不强制）
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # pull_request 事件 github.event.before 可能为空，用 origin/main 做兜底基线
+            git fetch origin main:refs/remotes/origin/main || true
+            CHANGED_SRC=$(git diff --name-only origin/main...HEAD -- '*.py' | grep '^src/' || true)
+          else
+            CHANGED_SRC=$(git diff --name-only "${{ github.event.before }}"...HEAD -- '*.py' | grep '^src/' || true)
+          fi
+          echo "本次变更的 src 文件：${CHANGED_SRC:-（无）}"
+          if [ -z "$CHANGED_SRC" ]; then
+            echo "无新增/修改 src 文件，跳过 mypy"
+          else
+            mypy $CHANGED_SRC
+          fi
+        continue-on-error: ${{ matrix.experimental }}
+
+      - name: pytest 全量回归（基线 422 passed）
+        run: python -m pytest -v
+        continue-on-error: ${{ matrix.experimental }}
+
+      - name: pip-audit 完整报告（仅展示用，是否阻断由下一步分级门禁裁定）
+        run: pip-audit --desc --format columns
+        # 完整报告对任何发现都不直接判失败，避免中低危/已豁免项阻断流水线
+        continue-on-error: true
+
+      - name: pip-audit 分级门禁（未豁免 HIGH/CRITICAL 阻断，中低危仅告警）
+        shell: bash
+        run: |
+          # 漏洞清单导出为 JSON（有漏洞时 pip-audit 退出码非 0，不影响本步继续）
+          pip-audit --format json --output /tmp/pip-audit.json || true
+          python - <<'PY'
+          """pip-audit 分级门禁：读取 JSON 结果与 .pip-audit-allowlist.txt 做豁免判定。"""
+          import datetime
+          import json
+          import pathlib
+          import re
+          import sys
+
+          # 解析豁免清单：键为 (包名小写, 版本)，值为过期日字符串（可能为 None）
+          exempt = {}
+          allowlist = pathlib.Path(".pip-audit-allowlist.txt")
+          if allowlist.exists():
+              for raw_line in allowlist.read_text(encoding="utf-8").splitlines():
+                  line = raw_line.strip()
+                  if not line or line.startswith("#") or "==" not in line:
+                      continue
+                  spec, _, comment = line.partition("#")
+                  pkg_name, pkg_version = spec.strip().lower().split("==", 1)
+                  match = re.search(r"过期日[：:]\s*(\d{4}-\d{2}-\d{2})", comment)
+                  exempt[(pkg_name, pkg_version)] = match.group(1) if match else None
+
+          report = json.loads(pathlib.Path("/tmp/pip-audit.json").read_text(encoding="utf-8"))
+          blocking = []
+          warned = []
+          today = datetime.date.today()
+
+          for dep in report:
+              key = (dep["name"].lower(), str(dep["version"]))
+              vulnerabilities = dep.get("vulnerabilities") or []
+              if not vulnerabilities:
+                  continue
+              if key in exempt:
+                  expiry = exempt[key]
+                  if expiry and datetime.date.fromisoformat(expiry) < today:
+                      blocking.append(
+                          f"{key[0]}=={key[1]} 豁免已于 {expiry} 过期，仍有 "
+                          f"{len(vulnerabilities)} 项漏洞未处理"
+                      )
+                  else:
+                      print(
+                          f"::warning::{key[0]}=={key[1]} 命中豁免清单"
+                          f"（过期日 {expiry or '未设置'}），跳过 {len(vulnerabilities)} 项已知漏洞"
+                      )
+                  continue
+              for vuln in vulnerabilities:
+                  severity = str(vuln.get("severity") or "UNKNOWN").upper()
+                  label = f"{key[0]}=={key[1]} {vuln.get('id')} severity={severity}"
+                  # 严重级缺失按 fail-closed 处理（未知=可能是高危），倒逼人工定级
+                  if severity in ("HIGH", "CRITICAL", "UNKNOWN"):
+                      blocking.append(label)
+                  else:
+                      warned.append(label)
+
+          for item in warned:
+              print(f"::warning::中低危漏洞仅告警不阻断：{item}")
+
+          if blocking:
+              print("::error::pip-audit 发现未豁免的高危（或严重级未知）漏洞：", file=sys.stderr)
+              for item in blocking:
+                  print(f"::error::  - {item}", file=sys.stderr)
+              sys.exit(1)
+
+          print("pip-audit 分级门禁通过：无未豁免高危项")
+          PY
+        continue-on-error: ${{ matrix.experimental }}
