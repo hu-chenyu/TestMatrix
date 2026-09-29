@@ -10,9 +10,10 @@ report_analyzer解析器演示与验证用例（第二阶段Day6）
     6. AllureResult: 直接构造对象字段与duration_ms属性
 
 数据说明:
-    优先使用真实output/allure_results/数据（pytest每轮运行自动生成）；
-    目录缺失时自动降级为tmp_path构造的最小Allure结构，
-    保证测试在任何环境可离线运行。
+    全部用例只使用 tmp_path_factory 构造的隔离临时目录与固定样本文件，
+    绝不引用 output/allure_results/（该目录是当轮 pytest --alluredir 的
+    实时写入目录，边跑边长会导致 glob 计数竞态），保证任何环境离线可跑、
+    全量连跑结果确定。
 """
 
 import json
@@ -22,12 +23,6 @@ import allure
 import pytest
 
 from src.core.report_analyzer import AllureResult, ReportAnalyzer
-
-# 项目根目录（本文件位于 tests/ 下，向上一级为项目根）
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-# 真实Allure结果目录
-REAL_RESULTS_DIR = PROJECT_ROOT / "output" / "allure_results"
 
 # 最小可用Allure结果JSON模板（覆盖全部核心字段）
 SAMPLE_RESULT = {
@@ -78,21 +73,19 @@ BROKEN_RESULT = {
 @pytest.fixture(scope="module")
 def results_dir(tmp_path_factory) -> Path:
     """
-    提供Allure结果目录（模块级共用）
+    提供Allure结果目录（模块级共用，隔离临时目录）
 
-    优先使用真实output/allure_results/（存在且非空时）；
-    否则降级为tmp_path构造的最小目录（3个result+1个container+1个损坏文件），
-    保证测试离线可跑。
+    永远使用 tmp_path_factory 构造的独立临时目录，写入固定样本
+    （3个result+1个container）；不得引用 output/allure_results/——
+    那是本轮 pytest --alluredir 的实时写入目录，全量跑时文件持续增加，
+    两次 glob 之间落入新文件会导致计数断言间歇性失败。
 
     参数:
         tmp_path_factory (pytest.TempPathFactory): 模块级临时目录工厂
 
     返回:
-        Path: 可用的Allure结果目录路径
+        Path: 内容固定的Allure结果临时目录路径
     """
-    if REAL_RESULTS_DIR.is_dir() and any(REAL_RESULTS_DIR.glob("*-result.json")):
-        return REAL_RESULTS_DIR
-
     tmp_dir = tmp_path_factory.mktemp("allure_results")
     for sample in (SAMPLE_RESULT, FAILED_RESULT, BROKEN_RESULT):
         file_name = f"{sample['uuid']}-result.json"
