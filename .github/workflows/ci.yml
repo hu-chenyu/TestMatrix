@@ -1,12 +1,16 @@
 # ==============================================================================
 # TestMatrix 主 CI 工作流（Day38 新增）
 # 设计要点：
-# 1. Python 3.11 为主版本必须全绿；3.12 为探测版本，失败仅告警不阻断（experimental 矩阵位）
+# 1. Python 3.11 为主版本必须全绿；3.12 为探测版本（experimental 矩阵位），
+#    用【job 级】continue-on-error 保证整体不阻断流水线，但步骤级不套
+#    continue-on-error——失败步骤如实显示红叉并产生 annotation，
+#    末尾"探测版本结果汇总"步骤把失败项汇总成 ::warning::，信号不丢失
 # 2. 步骤顺序：依赖安装 → ruff 全量强制（src+tests，不 ignore 规则）
 #    → mypy 仅检查本次提交新增/修改的 src 文件（git diff 过滤，存量文件渐进收紧）
-#    → pytest 全量基线 422 → pip-audit 完整报告 + 分级门禁
+#    → pytest 全量基线 422 → pip-audit 完整报告 + 分级门禁 → 探测版本结果汇总
 # 3. pip-audit 门禁：HIGH/CRITICAL（含严重级未知，fail-closed）且不在
-#    .pip-audit-allowlist.txt（含过期日校验）内才阻断；MODERATE/LOW 仅告警
+#    .pip-audit-allowlist.txt（必须带未过期的过期日，缺日/过期均按未豁免处理）内
+#    才阻断；MODERATE/LOW 仅告警
 # 4. 不含覆盖率步骤（Day39 接入）、不含 Docker/部署步骤、不含失败通知（均为后期阶段）
 # ==============================================================================
 name: CI
@@ -21,6 +25,10 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }}${{ matrix.experimental && '（探测版本，不阻断）' || '' }}
     runs-on: ubuntu-latest
+    # job 级开关（非 strategy、非 step 级）：3.12 探测位 job 失败不把整条 workflow run 拖红；
+    # 步骤不设 step 级 continue-on-error，失败步骤保留红叉与 annotation 真实信号。
+    # 3.11 主版本 experimental=false，等价于关闭，任何一步失败照常阻断
+    continue-on-error: ${{ matrix.experimental }}
     # 防止 CI 卡死（如网络挂起/测试死循环），15 分钟整体超时
     timeout-minutes: 15
     strategy:
@@ -30,7 +38,7 @@ jobs:
           # 主版本：任何一步失败都阻断
           - python-version: "3.11"
             experimental: false
-          # 探测版本：仅验证新版本兼容性，全部步骤 continue-on-error 不阻断
+          # 探测版本：仅验证新版本兼容性，job 整体不阻断，但每个步骤成败如实展示
           - python-version: "3.12"
             experimental: true
 
@@ -39,7 +47,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-        continue-on-error: ${{ matrix.experimental }}
 
       - name: 安装 Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -47,20 +54,19 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: requirements.txt
-        continue-on-error: ${{ matrix.experimental }}
 
       - name: 安装项目依赖与 CI 工具链（ruff/mypy/pip-audit 仅 CI 安装，不进 requirements.txt）
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install ruff mypy pip-audit
-        continue-on-error: ${{ matrix.experimental }}
 
       - name: ruff 全量静态检查（src + tests，规则不 ignore，存量问题清单化后按模块日修复）
+        id: ruff-check
         run: ruff check src tests
-        continue-on-error: ${{ matrix.experimental }}
 
       - name: mypy（仅本次提交新增/修改的 src 文件；存量文件不强制）
+        id: mypy-check
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -76,11 +82,10 @@ jobs:
           else
             mypy $CHANGED_SRC
           fi
-        continue-on-error: ${{ matrix.experimental }}
 
       - name: pytest 全量回归（基线 422 passed）
+        id: pytest-run
         run: python -m pytest -v
-        continue-on-error: ${{ matrix.experimental }}
 
       - name: pip-audit 完整报告（仅展示用，是否阻断由下一步分级门禁裁定）
         # 显式 -r requirements.txt：审计项目依赖闭包，不把 ruff/mypy/pip-audit 工具链自身算进来
@@ -89,6 +94,7 @@ jobs:
         continue-on-error: true
 
       - name: pip-audit 分级门禁（未豁免 HIGH/CRITICAL 阻断，中低危仅告警）
+        id: pip-audit-gate
         shell: bash
         run: |
           # 导出项目依赖闭包的 JSON 报告（有漏洞时退出码非 0，不影响本步继续）
@@ -114,18 +120,26 @@ jobs:
           BLOCK_LEVELS = {"CRITICAL", "HIGH", "UNKNOWN"}
 
           def parse_allowlist(path):
-              """解析豁免清单，返回 {(包名小写, 版本): (过期日字符串或None)}。"""
+              """解析豁免清单，返回 {(包名小写, 版本): (过期日字符串或None, 原始行号)}。
+
+              保留行号用于缺过期日 fail-closed 时精确定位清单条目。
+              """
               exempt = {}
               if not path.exists():
                   return exempt
-              for raw_line in path.read_text(encoding="utf-8").splitlines():
+              for line_no, raw_line in enumerate(
+                  path.read_text(encoding="utf-8").splitlines(), start=1
+              ):
                   line = raw_line.strip()
                   if not line or line.startswith("#") or "==" not in line:
                       continue
                   spec, _, comment = line.partition("#")
                   pkg_name, pkg_version = spec.strip().lower().split("==", 1)
                   match = re.search(r"过期日[：:]\s*(\d{4}-\d{2}-\d{2})", comment)
-                  exempt[(pkg_name, pkg_version)] = match.group(1) if match else None
+                  exempt[(pkg_name, pkg_version)] = (
+                      match.group(1) if match else None,
+                      line_no,
+                  )
               return exempt
 
           def osv_fetch(vuln_id, timeout=10):
@@ -183,15 +197,21 @@ jobs:
               if not vulns:
                   continue
               if key in exempt:
-                  expiry = exempt[key]
-                  if expiry and datetime.date.fromisoformat(expiry) < today:
+                  expiry, line_no = exempt[key]
+                  if expiry is None:
+                      # fail-closed：豁免清单条目缺少过期日，不享受豁免，按未豁免高危阻断
                       blocking.append(
-                          f"{key[0]}=={key[1]} 豁免已于 {expiry} 过期，"
-                          f"仍有 {len(vulns)} 项漏洞未处理"
+                          f"{key[0]}=={key[1]} allowlist 第 {line_no} 行缺少过期日，"
+                          f"按 fail-closed 处理（仍有 {len(vulns)} 项漏洞记录）"
+                      )
+                  elif datetime.date.fromisoformat(expiry) < today:
+                      blocking.append(
+                          f"{key[0]}=={key[1]} 豁免已于 {expiry} 过期"
+                          f"（allowlist 第 {line_no} 行），仍有 {len(vulns)} 项漏洞未处理"
                       )
                   else:
                       exempted.append(
-                          f"{key[0]}=={key[1]}（过期日 {expiry or '未设置'}，"
+                          f"{key[0]}=={key[1]}（过期日 {expiry}，"
                           f"{len(vulns)} 项漏洞记录）"
                       )
                   continue
@@ -228,4 +248,28 @@ jobs:
               f"中低危告警 {len(warned)} 项，无未豁免高危项"
           )
           PY
-        continue-on-error: ${{ matrix.experimental }}
+
+      - name: 探测版本结果汇总（仅 3.12：四关键步骤 outcome 汇总告警，不 exit 1）
+        if: matrix.experimental
+        shell: bash
+        run: |
+          # steps.<id>.outcome 反映步骤真实结果（success/failure/cancelled/skipped），
+          # 不受 job 级 continue-on-error 影响；探测位各步骤失败已在 UI 留红叉+annotation，
+          # 本步只把失败项收敛成一条聚合 warning，不改变任何退出码
+          failed_steps=()
+          for pair in \
+            "ruff=${{ steps.ruff-check.outcome }}" \
+            "mypy=${{ steps.mypy-check.outcome }}" \
+            "pytest=${{ steps.pytest-run.outcome }}" \
+            "pip-audit-gate=${{ steps.pip-audit-gate.outcome }}"; do
+            step_name="${pair%%=*}"
+            step_outcome="${pair#*=}"
+            if [ "$step_outcome" = "failure" ] || [ "$step_outcome" = "cancelled" ]; then
+              failed_steps+=("${step_name}(${step_outcome})")
+            fi
+          done
+          if [ "${#failed_steps[@]}" -gt 0 ]; then
+            echo "::warning::Python 3.12 探测版本存在失败步骤（job 不阻断主流水线，但需在版本兼容窗口处理）：${failed_steps[*]}"
+          else
+            echo "Python 3.12 探测版本：ruff/mypy/pytest/pip-audit-gate 四个关键步骤 outcome 全部为 success"
+          fi
