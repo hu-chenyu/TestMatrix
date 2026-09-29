@@ -250,13 +250,18 @@ jobs:
           PY
 
       - name: 探测版本结果汇总（仅 3.12：四关键步骤 outcome 汇总告警，不 exit 1）
-        if: matrix.experimental
+        # always() 必不可少：GitHub 在任一步骤失败后默认跳过后续步骤，
+        # job 级 continue-on-error 不改变该行为；不加 always() 本步永远 skipped。
+        # 3.11 主版本 matrix.experimental=false 短路为 false，本步不执行
+        if: ${{ matrix.experimental && always() }}
         shell: bash
         run: |
           # steps.<id>.outcome 反映步骤真实结果（success/failure/cancelled/skipped），
-          # 不受 job 级 continue-on-error 影响；探测位各步骤失败已在 UI 留红叉+annotation，
-          # 本步只把失败项收敛成一条聚合 warning，不改变任何退出码
+          # 不受 job 级 continue-on-error 影响；探测位失败步骤已在 UI 留红叉+annotation，
+          # 本步只把结果收敛成一条聚合 warning，不改变任何退出码（steps context 无 exit code 字段）
           failed_steps=()
+          skipped_steps=()
+          success_steps=()
           for pair in \
             "ruff=${{ steps.ruff-check.outcome }}" \
             "mypy=${{ steps.mypy-check.outcome }}" \
@@ -264,12 +269,15 @@ jobs:
             "pip-audit-gate=${{ steps.pip-audit-gate.outcome }}"; do
             step_name="${pair%%=*}"
             step_outcome="${pair#*=}"
-            if [ "$step_outcome" = "failure" ] || [ "$step_outcome" = "cancelled" ]; then
-              failed_steps+=("${step_name}(${step_outcome})")
-            fi
+            case "$step_outcome" in
+              failure|cancelled) failed_steps+=("${step_name}(${step_outcome})") ;;
+              skipped) skipped_steps+=("${step_name}") ;;
+              *) success_steps+=("${step_name}") ;;
+            esac
           done
+          echo "Python 3.12 探测版本四关键步骤 outcome 全量：ruff=${{ steps.ruff-check.outcome }} mypy=${{ steps.mypy-check.outcome }} pytest=${{ steps.pytest-run.outcome }} pip-audit-gate=${{ steps.pip-audit-gate.outcome }}"
           if [ "${#failed_steps[@]}" -gt 0 ]; then
-            echo "::warning::Python 3.12 探测版本存在失败步骤（job 不阻断主流水线，但需在版本兼容窗口处理）：${failed_steps[*]}"
+            echo "::warning::Python 3.12 探测版本存在失败步骤（job 级 continue-on-error 不阻断主流水线，但需在版本兼容窗口处理）：${failed_steps[*]}；另 ${skipped_steps[*]:-无} 因前步失败被跳过（非通过）"
           else
-            echo "Python 3.12 探测版本：ruff/mypy/pytest/pip-audit-gate 四个关键步骤 outcome 全部为 success"
+            echo "Python 3.12 探测版本：四关键步骤无 failure/cancelled（success: ${success_steps[*]}，skipped: ${skipped_steps[*]:-无}）"
           fi
