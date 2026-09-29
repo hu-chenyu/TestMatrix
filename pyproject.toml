@@ -1,0 +1,91 @@
+# ==============================================================================
+# TestMatrix 工程化配置（Day38 新增）
+# 集中声明项目元数据与 ruff / mypy / pytest 工具配置：
+#   - pytest：当前以 pytest.ini 为权威配置（pytest.ini 优先级高于本文件），
+#     此处保留同口径备份，仅 addopts 刻意留空，避免双份命令行参数叠加冲突
+#   - ruff：全量强制（不 ignore 任何规则），CI 直接执行 ruff check src tests
+#   - mypy：strict 配置写在本文件；CI 仅对本次提交新增/修改的 src 文件执行，
+#     存量文件类型注解不完整，靠 git diff 过滤渐进收紧（本文件不 exclude 任何目录）
+# 本文件不声明运行期依赖：依赖以 requirements.txt 为唯一事实来源，零新增第三方包
+# ==============================================================================
+
+[project]
+name = "TestMatrix"
+version = "0.1.0"
+description = "通用自动化测试效能平台"
+requires-python = ">=3.11"
+
+# ------------------------------ pytest 配置（与 pytest.ini 同口径备份） ------------------------------
+[tool.pytest.ini_options]
+# 仅识别 tests/ 目录下的用例文件，避免误收集 src/ 业务代码
+testpaths = ["tests"]
+# 将 src 目录加入 sys.path；实际运行以 pytest.ini 的 pythonpath=. 为准（用例统一 from src.xxx 导入）
+pythonpath = ["src"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+# 刻意留空：-v / --strict-markers / --alluredir 等执行参数一律以 pytest.ini 为准，防止双份配置冲突
+addopts = ""
+# 自定义标记注册（与 pytest.ini 完全一致，--strict-markers 下未注册标记直接报错）
+markers = [
+    "smoke: 冒烟测试用例，核心链路验证",
+    "regression: 回归测试用例，全量功能回归",
+    "api: HTTP接口自动化测试",
+    "chip: 芯片嵌入式板卡测试",
+    "slow: 耗时较长的用例",
+]
+norecursedirs = "output docs examples docker .git .idea .vscode venv"
+# 失败用例自动重跑 2 次、间隔 1 秒（偶发抖动自动恢复）
+reruns = 2
+reruns_delay = 1
+# 日志格式与 Loguru 风格保持统一
+log_cli = false
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s"
+log_format = "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s"
+
+# ------------------------------ ruff 静态检查（全量强制） ------------------------------
+[tool.ruff]
+# 行宽 100，与现有代码风格一致
+line-length = 100
+# 语法目标锁定 Python 3.11
+target-version = "py311"
+# 首方导入识别路径（src 布局 + 测试目录）
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E4=导入相关问题 / E7=语句相关问题 / E9=语法级错误 / F=Pyflakes（未用变量/未定义名等）
+# UP=pyupgrade 现代语法 / B=flake8-bugbear 常见 bug 预防 / I=isort 导入排序
+select = ["E4", "E7", "E9", "F", "UP", "B", "I"]
+# 不忽略任何规则：存量问题清单化后在后续模块日修复，不通过 ignore 掩盖
+ignore = []
+
+# ------------------------------ mypy 静态类型（strict，CI 仅对新增/修改文件执行） ------------------------------
+[tool.mypy]
+python_version = "3.11"
+# strict 总开关：含不允许隐式 Any、不允许未注解函数、严格空值检查等
+strict = true
+# 标注了 # type: ignore 但实际无对应报错时报警，防止滥用忽略
+warn_unused_ignores = true
+# 所有函数必须有完整参数/返回值类型注解
+disallow_untyped_defs = true
+# 第三方库未提供类型存根时不报错（CI 对新增业务代码的注解要求不降低）
+ignore_missing_imports = true
+
+# 双保险：测试相关第三方库显式忽略缺失类型存根（即使全局开关被调整也不影响 CI）
+[[tool.mypy.overrides]]
+module = [
+    "pytest",
+    "pytest.*",
+    "allure",
+    "allure.*",
+    "allure_commons",
+    "allure_commons.*",
+    "pytest_rerunfailures",
+    "pytest_rerunfailures.*",
+    "xdist",
+    "xdist.*",
+    "fakeredis",
+    "fakeredis.*",
+]
+ignore_missing_imports = true
