@@ -12,7 +12,7 @@ pytest-cov==4.1.0                # 测试覆盖率统计
 pytest-xdist==3.5.0               # 用例并发执行（Day58 接入 -n 多 worker，Phase-2）
 
 # ------------------------------ 协议通信层 ------------------------------
-requests==2.32.3                 # HTTP接口测试；Day38 安全升级，CVE 修复（2.31.0→2.32.3）
+requests==2.32.4                 # HTTP接口测试；Day38 安全升级，CVE 修复（2.31.0→2.32.4，含 .netrc 凭据泄漏 GHSA-9hjg 修复；2.33.0 修复项不影响本项目，见 .pip-audit-allowlist.txt）
 pyserial==3.5                    # 串口通信（芯片板卡测试适配）
 # 说明: telnetlib为Python标准库自带，3.11版本可用，无需额外安装
 

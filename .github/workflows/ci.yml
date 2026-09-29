@@ -83,28 +83,42 @@ jobs:
         continue-on-error: ${{ matrix.experimental }}
 
       - name: pip-audit 完整报告（仅展示用，是否阻断由下一步分级门禁裁定）
-        run: pip-audit --desc --format columns
-        # 完整报告对任何发现都不直接判失败，避免中低危/已豁免项阻断流水线
+        # 显式 -r requirements.txt：审计项目依赖闭包，不把 ruff/mypy/pip-audit 工具链自身算进来
+        run: pip-audit -r requirements.txt --desc --format columns
+        # pip-audit 发现漏洞时退出码恒为 1（属于审计结果而非步骤故障），固定不阻断
         continue-on-error: true
 
       - name: pip-audit 分级门禁（未豁免 HIGH/CRITICAL 阻断，中低危仅告警）
         shell: bash
         run: |
-          # 漏洞清单导出为 JSON（有漏洞时 pip-audit 退出码非 0，不影响本步继续）
-          pip-audit --format json --output /tmp/pip-audit.json || true
+          # 导出项目依赖闭包的 JSON 报告（有漏洞时退出码非 0，不影响本步继续）
+          # 注意 pip-audit JSON 结构为 {"dependencies":[{"name","version","vulns":[...]}]}
+          # 且 vulns 不含 severity 字段，严重级需下一步向 OSV 查询
+          pip-audit -r requirements.txt --format json --aliases on --output /tmp/pip-audit.json || true
           python - <<'PY'
-          """pip-audit 分级门禁：读取 JSON 结果与 .pip-audit-allowlist.txt 做豁免判定。"""
+          """pip-audit 分级门禁：解析真实 JSON schema，包级豁免 + OSV 严重级查询 + fail-closed。"""
           import datetime
           import json
+          import os
           import pathlib
           import re
           import sys
+          import urllib.error
+          import urllib.request
 
-          # 解析豁免清单：键为 (包名小写, 版本)，值为过期日字符串（可能为 None）
-          exempt = {}
-          allowlist = pathlib.Path(".pip-audit-allowlist.txt")
-          if allowlist.exists():
-              for raw_line in allowlist.read_text(encoding="utf-8").splitlines():
+          AUDIT_JSON = pathlib.Path("/tmp/pip-audit.json")
+          ALLOW_LIST = pathlib.Path(".pip-audit-allowlist.txt")
+          # TM_OSV_BASE 仅供离线测试覆盖，生产固定走官方 OSV API
+          OSV_BASE = os.environ.get("TM_OSV_BASE", "https://api.osv.dev").rstrip("/")
+          # 无法定级（UNKNOWN）按 fail-closed 与高危同处理，倒逼人工升级或写豁免
+          BLOCK_LEVELS = {"CRITICAL", "HIGH", "UNKNOWN"}
+
+          def parse_allowlist(path):
+              """解析豁免清单，返回 {(包名小写, 版本): (过期日字符串或None)}。"""
+              exempt = {}
+              if not path.exists():
+                  return exempt
+              for raw_line in path.read_text(encoding="utf-8").splitlines():
                   line = raw_line.strip()
                   if not line or line.startswith("#") or "==" not in line:
                       continue
@@ -112,48 +126,106 @@ jobs:
                   pkg_name, pkg_version = spec.strip().lower().split("==", 1)
                   match = re.search(r"过期日[：:]\s*(\d{4}-\d{2}-\d{2})", comment)
                   exempt[(pkg_name, pkg_version)] = match.group(1) if match else None
+              return exempt
 
-          report = json.loads(pathlib.Path("/tmp/pip-audit.json").read_text(encoding="utf-8"))
+          def osv_fetch(vuln_id, timeout=10):
+              """按漏洞 ID 查 OSV 详情；4xx 为确定性结果直接返回 None，网络/5xx 重试 1 次。"""
+              url = f"{OSV_BASE}/v1/vulns/{vuln_id}"
+              for _ in (1, 2):
+                  try:
+                      with urllib.request.urlopen(url, timeout=timeout) as response:
+                          return json.loads(response.read().decode("utf-8"))
+                  except urllib.error.HTTPError as exc:
+                      # HTTPError 是 URLError 子类，须先捕获；404 等 4xx 重试无意义
+                      if 400 <= exc.code < 500:
+                          return None
+                      continue
+                  except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+                      continue
+              return None
+
+          def classify(vuln_id, aliases):
+              """返回 (严重级, 定级来源ID)；优先查本ID，其次别名中的 GHSA，均失败归 UNKNOWN。"""
+              candidates = [vuln_id]
+              candidates.extend(
+                  alias for alias in aliases
+                  if alias.startswith("GHSA-") and alias != vuln_id
+              )
+              for candidate in candidates:
+                  detail = osv_fetch(candidate)
+                  if not detail:
+                      continue
+                  severity = str(
+                      (detail.get("database_specific") or {}).get("severity") or ""
+                  ).upper()
+                  if severity:
+                      return severity, candidate
+              return "UNKNOWN", vuln_id
+
+          if not AUDIT_JSON.exists():
+              print("::error::pip-audit JSON 报告不存在，无法执行分级门禁", file=sys.stderr)
+              sys.exit(2)
+
+          report = json.loads(AUDIT_JSON.read_text(encoding="utf-8"))
+          exempt = parse_allowlist(ALLOW_LIST)
+          today = datetime.date.today()
           blocking = []
           warned = []
-          today = datetime.date.today()
+          exempted = []
+          severity_cache = {}
 
-          for dep in report:
-              key = (dep["name"].lower(), str(dep["version"]))
-              vulnerabilities = dep.get("vulnerabilities") or []
-              if not vulnerabilities:
+          for dep in report.get("dependencies", []):
+              # 解析失败的依赖只有 name/skip_reason，无版本无漏洞，直接跳过
+              if dep.get("skip_reason"):
+                  continue
+              key = (str(dep.get("name", "")).lower(), str(dep.get("version", "")))
+              vulns = dep.get("vulns") or []
+              if not vulns:
                   continue
               if key in exempt:
                   expiry = exempt[key]
                   if expiry and datetime.date.fromisoformat(expiry) < today:
                       blocking.append(
-                          f"{key[0]}=={key[1]} 豁免已于 {expiry} 过期，仍有 "
-                          f"{len(vulnerabilities)} 项漏洞未处理"
+                          f"{key[0]}=={key[1]} 豁免已于 {expiry} 过期，"
+                          f"仍有 {len(vulns)} 项漏洞未处理"
                       )
                   else:
-                      print(
-                          f"::warning::{key[0]}=={key[1]} 命中豁免清单"
-                          f"（过期日 {expiry or '未设置'}），跳过 {len(vulnerabilities)} 项已知漏洞"
+                      exempted.append(
+                          f"{key[0]}=={key[1]}（过期日 {expiry or '未设置'}，"
+                          f"{len(vulns)} 项漏洞记录）"
                       )
                   continue
-              for vuln in vulnerabilities:
-                  severity = str(vuln.get("severity") or "UNKNOWN").upper()
-                  label = f"{key[0]}=={key[1]} {vuln.get('id')} severity={severity}"
-                  # 严重级缺失按 fail-closed 处理（未知=可能是高危），倒逼人工定级
-                  if severity in ("HIGH", "CRITICAL", "UNKNOWN"):
+              for vuln in vulns:
+                  vuln_id = str(vuln.get("id", "UNKNOWN-ID"))
+                  aliases = set(vuln.get("aliases") or [])
+                  # PYSEC/GHSA 互为镜像时漏洞集合相同，按 {id}∪aliases 去重避免重复定级
+                  dedup_key = frozenset({vuln_id} | aliases)
+                  if dedup_key in severity_cache:
+                      severity, source_id = severity_cache[dedup_key]
+                  else:
+                      severity, source_id = classify(vuln_id, aliases)
+                      severity_cache[dedup_key] = (severity, source_id)
+                  source_note = "" if source_id == vuln_id else f"（按别名 {source_id} 定级）"
+                  label = f"{key[0]}=={key[1]} {vuln_id} severity={severity}{source_note}"
+                  if severity in BLOCK_LEVELS:
                       blocking.append(label)
                   else:
                       warned.append(label)
 
+          for item in exempted:
+              print(f"::warning::命中豁免清单，跳过：{item}")
           for item in warned:
               print(f"::warning::中低危漏洞仅告警不阻断：{item}")
 
           if blocking:
-              print("::error::pip-audit 发现未豁免的高危（或严重级未知）漏洞：", file=sys.stderr)
+              print("::error::pip-audit 发现未豁免高危（或无法定级）漏洞：", file=sys.stderr)
               for item in blocking:
                   print(f"::error::  - {item}", file=sys.stderr)
               sys.exit(1)
 
-          print("pip-audit 分级门禁通过：无未豁免高危项")
+          print(
+              f"pip-audit 分级门禁通过：豁免 {len(exempted)} 个包，"
+              f"中低危告警 {len(warned)} 项，无未豁免高危项"
+          )
           PY
         continue-on-error: ${{ matrix.experimental }}
