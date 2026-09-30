@@ -23,7 +23,6 @@ from pathlib import Path
 
 import allure
 import pytest
-
 from src.core.case_manager import CaseManager, CaseManagerError
 from src.db import models
 from src.db.db_session import DatabaseSession
