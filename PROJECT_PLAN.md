@@ -26,7 +26,7 @@
 | 深度目标 | 每个技术栈达中级偏上~高级深度，每个优化阶段有量化对比数据，每个能力边界有明确声明 |
 | 起止日期 | 2026-08-22 ~ 2026-12-18（总跨度 119 天，B 方案·119版） |
 | 总天数 | 119 天（Day1 ~ Day119；Day119 为项目最终交付日） |
-| 当前进度 | Day37 / Day119 已完成（31%）；422 条 pytest 用例全部通过；每日提交零断档，全部推送 GitHub；实际开工日 2026-09-29（计划日+1，由 Day109-114 缓冲吸收 1 天偏移） |
+| 当前进度 | Day38 / Day119 已完成（32%）；422 条 pytest 用例全部通过；每日提交零断档，全部推送 GitHub；实际开工日 2026-09-29（计划日+1，由 Day109-114 缓冲吸收 1 天偏移） |
 | 技术栈 | Python 3.11→当日最新稳定（预期 3.14/3.15，下限不低于3.14，Day74 升级，含 telnetlib 替代；CI 多版本矩阵） / pytest 7.4→当日最新稳定（预期 9.x，Day74 按插件兼容矩阵确认） / SQLAlchemy 2.0（SQLite/MySQL 双模式）/ Redis / Flask 2.3→3.x / Jinja2 / Bootstrap 5 / ECharts 5 / Loguru / Allure 2 / Docker / Jenkins / GitHub Actions / k6 / AST（脚本级精准回归） |
 | 面向对象 | ① 测试工程师（fork 二开/参考架构）② 开源社区贡献者 ③ 项目维护者（长期技术积累与迭代） |
 | 可运行性目标 | git clone 后按 README 三步内启动 Web 平台 → 看到 Dashboard → 触发执行 → 看到报告 |
@@ -175,7 +175,7 @@
 
 | 天数 | 日期 | 周次 | 当天任务 | 所属模块 | 预计产出 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Day38 | 09/28（一） | W7 | GitHub Actions 工作流（单 Python 版本 + 全量 422 + 构建徽章上 README）+ `pyproject.toml`（**ruff 全量强制 / mypy 仅新增文件强制**）；CI 矩阵含 Python 3.11（主）+ 3.12（探测，仅告警不阻断）；**依赖安全**：(a) 显式 pin 传递依赖 Werkzeug/itsdangerous/blinker；(b) 升级含已知 CVE 的直接依赖 Jinja2≥3.1.6、requests≥2.32.x、cryptography≥42，升级后跑 422 回归；(c) CI 加 **pip-audit** 步骤（高危项修复或写带过期日的 allowlist） | 工程化 | CI 配置 + pyproject.toml + 徽章；pip-audit 无未豁免高危项；422 测试零回归 | [ ] |
+| Day38 | 09/28（一） | W7 | GitHub Actions 工作流（单 Python 版本 + 全量 422 + 构建徽章上 README）+ `pyproject.toml`（**ruff 全量强制 / mypy 仅新增文件强制**）；CI 矩阵含 Python 3.11（主）+ 3.12（探测，仅告警不阻断）；**依赖安全**：(a) 显式 pin 传递依赖 Werkzeug/itsdangerous/blinker；(b) 升级含已知 CVE 的直接依赖 Jinja2≥3.1.6、requests≥2.32.x、cryptography≥42，升级后跑 422 回归；(c) CI 加 **pip-audit** 步骤（高危项修复或写带过期日的 allowlist） | 工程化 | CI 配置 + pyproject.toml + 徽章；pip-audit 无未豁免高危项；422 测试零回归【热修3项：①3.12 探测位 step 级 continue-on-error 改 job 级保信号+结果汇总告警步 ②results_dir fixture 竞态消除 ③allowlist 缺过期日 fail-closed】 | [✓] |
 | Day39 | 09/29（二） | W7 | 覆盖率接入（`--cov=src --cov-report=term-missing`）数字上 README + **serial/telnet 0% 覆盖修复**（pyserial `loop://` 伪串口 + 本地 socket 模拟） | 工程化 | 覆盖率徽章 + 串口/telnet 测试补测 | [ ] |
 | Day40 | 09/30（三） | W7 | CI 矩阵全绿验证 + 覆盖率门禁确认（≥80%）+ 复盘日：CI 阶段回顾+讲述材料第 4 次 | 工程化/复盘 | CI 绿灯；覆盖率≥80%；讲述材料 | [ ] |
 
@@ -578,13 +578,13 @@ src/core/report_analyzer/
 
 | 指标 | 数值 |
 | --- | --- |
-| 已完成天数 | 37 / 119（31%） |
+| 已完成天数 | 38 / 119（32%） |
 | 已完成里程碑 | M1（核心基座）、M2（report_analyzer）、M3（通知模块）、M4（Web后端+Redis） |
-| 当前测试基线 | **422 passed / 0 failed**（Day37 本机实跑） |
+| 当前测试基线 | **422 passed / 0 failed**（Day38 工程化日后保持，src/tests 零改动） |
 | 当前覆盖率 | **82%**（3450 语句 / 637 未覆盖，Day37 实测）；薄弱点：serial_client 0%、telnet_client 0%、assertion 51% |
 | 当前源码量 | 14,555 行（44 个入库自研文件）；tests 15,182 行（42 个入库 .py 文件） |
 | 累计提交 | 每日提交零断档（已全部推送 origin/main） |
-| **下一任务** | **Day38（计划 09/28，实际开工 09/29，+1 天由缓冲吸收）：GitHub Actions CI + pyproject.toml（ruff 全量强制 / mypy 仅新增文件强制）+ 依赖安全** |
+| **下一任务** | **Day39（09/29）：覆盖率接入（--cov=src --cov-report=term-missing）数字上 README + serial/telnet 0% 覆盖修复（pyserial loop:// 伪串口 + 本地 socket 模拟）；排期内须消化 ruff 存量 345 错误以保 Day40 CI 矩阵全绿** |
 
 ---
 
