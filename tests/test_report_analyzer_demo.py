@@ -21,7 +21,6 @@ from pathlib import Path
 
 import allure
 import pytest
-
 from src.core.report_analyzer import AllureResult, ReportAnalyzer
 
 # 最小可用Allure结果JSON模板（覆盖全部核心字段）

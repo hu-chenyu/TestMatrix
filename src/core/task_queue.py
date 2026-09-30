@@ -42,7 +42,7 @@ payload约定（与_execute_batch_async真实签名严格对齐）:
 import json
 import threading
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import redis
 
@@ -113,7 +113,7 @@ class TaskQueueClient:
         异常:
             无
         """
-        self._backend: Optional[Any] = None
+        self._backend: Any | None = None
 
     # ------------------------------------------------------------------
     # 配置属性（实时读env_manager，monkeypatch可热替换）
@@ -197,7 +197,7 @@ class TaskQueueClient:
     # ------------------------------------------------------------------
     # 后端构建（与CacheClient同模式）
     # ------------------------------------------------------------------
-    def _get_backend(self) -> Optional[Any]:
+    def _get_backend(self) -> Any | None:
         """
         获取后端实例（懒加载并缓存复用）
 
@@ -306,7 +306,7 @@ class TaskQueueClient:
             )
             return False
 
-    def dequeue(self, timeout: Optional[float] = None) -> Optional[dict]:
+    def dequeue(self, timeout: float | None = None) -> dict | None:
         """
         阻塞式取出任务（消费者调用，BRPOP队列list尾部，FIFO）
 
@@ -384,7 +384,7 @@ class TaskQueueClient:
                 f"任务状态写入异常，已跳过 | execution_id={execution_id} | {exc}"
             )
 
-    def get_status(self, execution_id: str) -> Optional[dict]:
+    def get_status(self, execution_id: str) -> dict | None:
         """
         读取任务状态hash（HGETALL）
 
@@ -496,7 +496,7 @@ class TaskWorker:
             )
             logger.info(f"worker开始执行任务 | execution_id={execution_id}")
 
-            task_error: Optional[str] = None
+            task_error: str | None = None
             try:
                 # 复用既有批次编排（执行体零改动: 明细落库/event_bus
                 # 埋点/通知旁路/缓存失效全部在_execute_batch_async内）
@@ -516,7 +516,7 @@ class TaskWorker:
             # 终态以SQLite批次表权威状态为准（执行体保证落终态），
             # Redis hash只是调度层镜像；查询失败按failed兜底记录
             terminal_status = STATUS_FINISHED
-            terminal_error: Optional[str] = task_error
+            terminal_error: str | None = task_error
             try:
                 batch_status = CaseManager.get_execution_status(execution_id)
                 if batch_status is not None:
@@ -554,12 +554,12 @@ class TaskWorker:
 task_queue_client = TaskQueueClient()
 
 # worker线程/停止事件/启停锁（模块级持有，保证只起一个worker）
-_worker_thread: Optional[threading.Thread] = None
-_stop_event: Optional[threading.Event] = None
+_worker_thread: threading.Thread | None = None
+_stop_event: threading.Event | None = None
 _state_lock = threading.Lock()
 
 
-def start_worker() -> Optional[threading.Thread]:
+def start_worker() -> threading.Thread | None:
     """
     启动应用内worker线程（幂等）
 

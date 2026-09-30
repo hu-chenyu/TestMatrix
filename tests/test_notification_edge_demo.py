@@ -10,18 +10,17 @@
 测试基建: 临时SQLite + env双方法mock（对齐既有通知测试模式）。
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import allure
 import pytest
-
 from src.common.env_manager import env_manager
+from src.core.case_manager import CaseManager
 from src.core.notification import (
     Notification,
     NotificationDeadLetterRepository,
     NotificationRouter,
 )
-from src.core.case_manager import CaseManager
 from src.db import models
 from src.db.db_session import DatabaseSession
 

@@ -16,12 +16,10 @@ HTML邮件报告模板验证用例（第二阶段Day11）
 
 import allure
 import pytest
-
 from src.core.notification import EmailNotifier, EmailReportTemplate
 from src.core.report_analyzer import (
     FailedCaseDetail,
     ModuleStat,
-    PriorityStat,
     StatisticsResult,
 )
 

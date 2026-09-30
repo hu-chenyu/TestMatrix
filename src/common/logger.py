@@ -19,7 +19,6 @@ Loguru日志统一封装模块
 
 import sys
 from pathlib import Path
-from typing import Union
 
 from loguru import logger
 
@@ -48,7 +47,7 @@ class LogManager:
     def setup(
         cls,
         log_level: str = "INFO",
-        log_dir: Union[str, Path] = "output/logs",
+        log_dir: str | Path = "output/logs",
         retention_days: int = 30,
         console_output: bool = True,
     ) -> None:

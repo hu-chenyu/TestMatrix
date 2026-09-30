@@ -18,13 +18,12 @@ TestMatrix Day19: 用例列表API测试（GET /api/cases/）
     Windows文件锁）+ Flask test client端到端验证，零真实外部依赖。
 """
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Union
 
 import allure
 import pytest
 from flask.testing import FlaskClient
-
 from src.db import models
 from src.db.db_session import DatabaseSession
 from src.web import create_app

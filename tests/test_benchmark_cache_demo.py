@@ -35,23 +35,22 @@ TestMatrix Day33: Redis缓存层量化基准组件测试
 """
 
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
+from unittest.mock import patch
 
 import fakeredis
 import pytest
 import redis
 from flask.testing import FlaskClient
-from unittest.mock import patch
-
 from scripts.benchmark_cache import (
     BenchmarkDataSeeder,
     CacheBenchmarkRunner,
     LatencyStats,
     RedisHealthChecker,
 )
-from src.core.cache import cache_client, cases_list_key, reports_summary_key
 from src.core import event_bus
+from src.core.cache import cache_client, cases_list_key, reports_summary_key
 from src.db.db_session import DatabaseSession
 from src.web import create_app
 

@@ -27,9 +27,9 @@
 """
 
 import threading
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator, Optional
 from urllib.parse import quote_plus
 
 from sqlalchemy import create_engine, text
@@ -59,8 +59,8 @@ class DatabaseSession:
         _lock (threading.Lock): 初始化锁，保证多线程首次建连安全
     """
 
-    _engine: Optional[Engine] = None
-    _session_factory: Optional[sessionmaker] = None
+    _engine: Engine | None = None
+    _session_factory: sessionmaker | None = None
     _lock = threading.Lock()
 
     # ------------------------------------------------------------------

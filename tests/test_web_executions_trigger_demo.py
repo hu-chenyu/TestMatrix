@@ -44,14 +44,13 @@ TestMatrix Day24: 用例执行触发API测试
 
 import re
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Optional
 from unittest.mock import MagicMock, patch
 
 import allure
 import pytest
 from flask.testing import FlaskClient
-
 from src.core.case_manager import CaseManager
 from src.core.executors import (
     BaseExecutor,
@@ -108,7 +107,7 @@ def seed_cases() -> None:
             )
 
 
-def _wait_batch_terminal(execution_id: str) -> Optional[dict]:
+def _wait_batch_terminal(execution_id: str) -> dict | None:
     """
     轮询批次状态至终态finished/failed（内部方法）
 
@@ -123,7 +122,7 @@ def _wait_batch_terminal(execution_id: str) -> Optional[dict]:
         dict | None: 终态状态字典；超时仍未终态时返回最后一次
                      查询结果（由调用方决定是否断言）
     """
-    status_data: Optional[dict] = None
+    status_data: dict | None = None
     for _ in range(POLL_MAX_ATTEMPTS):
         status_data = CaseManager.get_execution_status(execution_id)
         if (
@@ -295,7 +294,7 @@ class TestExecutionsTriggerApi:
         execution_id = data["data"]["execution_id"]
 
         # 轮询至终态（模拟执行0.01s/条必然完成，预算充裕防flaky）
-        final: Optional[dict] = None
+        final: dict | None = None
         for _ in range(10):
             time.sleep(POLL_INTERVAL_SECONDS)
             status_response = trigger_client.get(

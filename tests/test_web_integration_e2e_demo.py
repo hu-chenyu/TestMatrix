@@ -57,15 +57,14 @@ TestMatrix Day28: 跨API端到端集成测试
 """
 
 import time
+from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
-from typing import Iterator, Optional
 
 import allure
 import pytest
 import yaml
 from flask.testing import FlaskClient
-
 from src.core import event_bus
 from src.db import models
 from src.db.db_session import DatabaseSession
@@ -175,7 +174,7 @@ def _wait_batch_terminal(
     异常:
         AssertionError: 轮询预算内未达终态时断言失败
     """
-    status_data: Optional[dict] = None
+    status_data: dict | None = None
     for _ in range(POLL_MAX_ATTEMPTS):
         response = client.get(f"/api/executions/{execution_id}/status")
         assert response.status_code == 200, "轮询期间状态查询应始终200"

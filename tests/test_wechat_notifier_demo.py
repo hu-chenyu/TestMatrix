@@ -19,7 +19,6 @@ from unittest.mock import MagicMock, patch
 import allure
 import pytest
 import requests
-
 from src.common.env_manager import env_manager
 from src.core.notification import BaseNotifier, Notification, WeChatNotifier
 

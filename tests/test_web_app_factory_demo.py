@@ -10,14 +10,11 @@ TestMatrix Day17: Flask应用工厂与蓝图架构测试
     6. 安全响应头: X-Content-Type-Options/X-Frame-Options
 """
 
-import os
 
 import pytest
 from flask import Flask
-
 from src.db.db_session import DatabaseSession
 from src.web import create_app
-from src.web.config import DevelopmentConfig, TestingConfig, ProductionConfig
 
 
 class TestWebAppFactory:

@@ -15,7 +15,6 @@ Flask Web应用配置模块
 
 import os
 import secrets
-from typing import Type
 
 
 class Config:
@@ -84,14 +83,14 @@ class ProductionConfig(Config):
 
 
 # 配置名到配置类的映射表
-config_map: dict[str, Type[Config]] = {
+config_map: dict[str, type[Config]] = {
     "dev": DevelopmentConfig,
     "test": TestingConfig,
     "prod": ProductionConfig,
 }
 
 
-def get_config(env_name: str | None = None) -> Type[Config]:
+def get_config(env_name: str | None = None) -> type[Config]:
     """
     根据环境名获取对应的配置类
 

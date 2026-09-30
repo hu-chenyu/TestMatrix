@@ -30,7 +30,7 @@ YAML/Excel数据驱动引擎模块
 """
 
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any
 
 import yaml
 from openpyxl import load_workbook
@@ -60,7 +60,7 @@ class DataDriverError(Exception):
     携带数据文件路径上下文，便于数据问题快速定位。
     """
 
-    def __init__(self, message: str, file_path: Optional[Union[str, Path]] = None):
+    def __init__(self, message: str, file_path: str | Path | None = None):
         """
         初始化异常
 
@@ -91,8 +91,8 @@ class DataDriver:
     @classmethod
     def load_cases(
         cls,
-        file_path: Union[str, Path],
-        sheet_name: Optional[str] = None,
+        file_path: str | Path,
+        sheet_name: str | None = None,
     ) -> list:
         """
         统一数据加载入口（按文件后缀自动分发到对应解析器）
@@ -143,9 +143,9 @@ class DataDriver:
     def filter_cases(
         cls,
         cases: list,
-        module: Optional[Union[str, list]] = None,
-        priority: Optional[Union[str, list]] = None,
-        tags: Optional[Union[str, list]] = None,
+        module: str | list | None = None,
+        priority: str | list | None = None,
+        tags: str | list | None = None,
     ) -> list:
         """
         按多维度筛选用例（未指定的维度不参与过滤，维度间为AND关系）
@@ -263,7 +263,7 @@ class DataDriver:
     # Excel解析
     # ------------------------------------------------------------------
     @classmethod
-    def _load_excel(cls, path: Path, sheet_name: Optional[str]) -> list:
+    def _load_excel(cls, path: Path, sheet_name: str | None) -> list:
         """
         解析Excel数据文件（内部方法）
 
@@ -418,7 +418,7 @@ class DataDriver:
     # 内部工具方法
     # ------------------------------------------------------------------
     @staticmethod
-    def _resolve_path(file_path: Union[str, Path]) -> Path:
+    def _resolve_path(file_path: str | Path) -> Path:
         """
         解析数据文件路径（内部方法）
 
@@ -453,7 +453,7 @@ class DataDriver:
         )
 
     @staticmethod
-    def _normalize_filter_value(value: Union[str, list, None], dim_name: str) -> list:
+    def _normalize_filter_value(value: str | list | None, dim_name: str) -> list:
         """
         筛选维度值归一化为列表（内部方法）
 

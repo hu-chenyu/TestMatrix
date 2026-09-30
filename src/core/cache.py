@@ -44,7 +44,7 @@ TTL策略:
 
 import hashlib
 import json
-from typing import Any, Optional
+from typing import Any
 
 import redis
 
@@ -203,7 +203,7 @@ class CacheClient:
         异常:
             无
         """
-        self._backend: Optional[Any] = None
+        self._backend: Any | None = None
 
     # ------------------------------------------------------------------
     # 配置属性（实时读env_manager，环境变量可被monkeypatch热替换）
@@ -252,7 +252,7 @@ class CacheClient:
     # ------------------------------------------------------------------
     # 后端构建（懒连接 + fake协议测试支持）
     # ------------------------------------------------------------------
-    def _get_backend(self) -> Optional[Any]:
+    def _get_backend(self) -> Any | None:
         """
         获取缓存后端实例（懒加载并缓存复用）
 
@@ -332,7 +332,7 @@ class CacheClient:
     # ------------------------------------------------------------------
     # JSON读写
     # ------------------------------------------------------------------
-    def get_json(self, key: str) -> Optional[Any]:
+    def get_json(self, key: str) -> Any | None:
         """
         读取缓存并JSON反序列化
 
@@ -369,7 +369,7 @@ class CacheClient:
         logger.debug(f"缓存命中 | key={key}")
         return value
 
-    def set_json(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+    def set_json(self, key: str, value: Any, ttl: int | None = None) -> None:
         """
         JSON序列化写入缓存并设置TTL（SETEX原子操作）
 

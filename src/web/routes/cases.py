@@ -28,7 +28,6 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import marshmallow
 from flask import Blueprint, request
@@ -163,7 +162,7 @@ def _parse_int_param(name: str, default: int) -> int:
         raise ValidationError("page和page_size必须为正整数")
 
 
-def _parse_optional_str(name: str) -> Optional[str]:
+def _parse_optional_str(name: str) -> str | None:
     """
     解析可选字符串查询参数（内部方法）
 

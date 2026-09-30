@@ -19,7 +19,6 @@ from pathlib import Path
 
 import allure
 import pytest
-
 from src.core.case_manager import CaseManager, main, run_batch
 from src.db import models
 from src.db.db_session import DatabaseSession

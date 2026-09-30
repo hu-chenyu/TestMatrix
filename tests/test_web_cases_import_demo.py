@@ -19,15 +19,14 @@ TestMatrix Day21: 用例批量导入API测试（POST /api/cases/import）
     上传文件由测试自建在tmp_path，接口内部临时文件由接口自行清理。
 """
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Optional
 
 import allure
 import pytest
 import yaml
 from flask.testing import FlaskClient
 from openpyxl import Workbook
-
 from src.db.db_session import DatabaseSession
 from src.web import create_app
 
@@ -160,7 +159,7 @@ def _make_excel_file(
 def _post_import(
     client: FlaskClient,
     file_path: Path,
-    query_string: Optional[dict] = None,
+    query_string: dict | None = None,
 ):
     """
     上传文件调用导入接口（内部方法）

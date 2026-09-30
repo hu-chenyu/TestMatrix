@@ -23,14 +23,13 @@ TestMatrix Day22: 执行记录查询API测试（GET /api/executions/）
 """
 
 import time
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterator, Optional
 
 import allure
 import pytest
 from flask.testing import FlaskClient
-
 from src.core.case_manager import CaseManager
 from src.db import models
 from src.db.db_session import DatabaseSession
@@ -79,7 +78,7 @@ def seed_cases() -> None:
 
 
 def _create_finished_batch(
-    records: list[tuple[int, str, Optional[str]]]
+    records: list[tuple[int, str, str | None]]
 ) -> str:
     """
     经核心层造一个已完成执行批次（内部方法）

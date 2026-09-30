@@ -75,13 +75,12 @@ TestMatrix Day26: SSE增强测试——多订阅者广播 + Last-Event-ID
 import json
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
 
 import allure
 import pytest
 from flask.testing import FlaskClient
-
 from src.core import event_bus
 from src.core.case_manager import CaseManager
 from src.core.event_bus import (
@@ -213,7 +212,7 @@ def sse_client(sse_db: None) -> FlaskClient:
     return create_app("test").test_client()
 
 
-def _wait_batch_terminal(execution_id: str) -> Optional[dict]:
+def _wait_batch_terminal(execution_id: str) -> dict | None:
     """
     轮询批次状态至终态finished/failed（内部方法）
 
@@ -228,7 +227,7 @@ def _wait_batch_terminal(execution_id: str) -> Optional[dict]:
         dict | None: 终态状态字典；超时仍未终态时返回最后一次
                      查询结果（由调用方决定是否断言）
     """
-    status_data: Optional[dict] = None
+    status_data: dict | None = None
     for _ in range(POLL_MAX_ATTEMPTS):
         status_data = CaseManager.get_execution_status(execution_id)
         if (
@@ -302,7 +301,7 @@ class _SlowAllPassExecutor(BaseExecutor):
         )
 
 
-def _parse_sse_frame(frame_text: str) -> Tuple[str, dict, Optional[int]]:
+def _parse_sse_frame(frame_text: str) -> tuple[str, dict, int | None]:
     """
     解析单条SSE帧文本（内部方法）
 
@@ -324,7 +323,7 @@ def _parse_sse_frame(frame_text: str) -> Tuple[str, dict, Optional[int]]:
     assert lines[0].startswith("event: "), f"帧首行应为event:前缀 | 实际: {lines[0]!r}"
     event_type = lines[0][len("event: "):]
     # id行可选: 次行以"id: "开头则提取事件id，data行顺延一位
-    event_id: Optional[int] = None
+    event_id: int | None = None
     data_line_index = 1
     if lines[1].startswith("id: "):
         event_id = int(lines[1][len("id: "):])
@@ -730,7 +729,7 @@ class TestExecutionSseApi:
         assert response.status_code == 200
 
         case_payloads: list = []
-        terminal_type: Optional[str] = None
+        terminal_type: str | None = None
         frame_count = 0
         buffer = ""
         try:
@@ -964,10 +963,10 @@ class TestExecutionSseApi:
         # 第二个独立client（同app实例，避免共享cookie jar的线程
         # 安全疑虑），两个线程并发订阅同一批次
         client_b = sse_client.application.test_client()
-        ids_a: List[int] = []
-        ids_b: List[int] = []
+        ids_a: list[int] = []
+        ids_b: list[int] = []
 
-        def _read_stream(client: FlaskClient, ids: List[int]) -> None:
+        def _read_stream(client: FlaskClient, ids: list[int]) -> None:
             """
             单订阅者流式读取（内部方法）: buffer按\n\n拼半帧，
             逐帧解析收集事件id，读到终态帧break防挂死

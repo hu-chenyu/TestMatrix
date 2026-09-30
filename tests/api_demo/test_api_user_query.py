@@ -9,11 +9,11 @@
 
 import allure
 import pytest
-
 from src.common.assertion import (
     assert_json_value,
     assert_status_code,
 )
+
 from tests.conftest import load_yaml_data
 
 # 模块级加载YAML数据（参数化在用例收集阶段生效）

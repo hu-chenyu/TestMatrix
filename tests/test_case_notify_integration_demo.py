@@ -23,13 +23,12 @@ TestExecuteBatchAsyncNotification）——Web触发执行完成后finished/faile
 """
 
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Optional, Tuple
 from unittest.mock import patch
 
 import allure
 import pytest
-
 from src.core import event_bus
 from src.core.case_manager import CaseManager, main, run_batch
 from src.core.executors import BaseExecutor, ExecutionResult
@@ -447,7 +446,7 @@ def seed_active_cases() -> None:
             )
 
 
-def start_seeded_batch() -> Tuple[str, list]:
+def start_seeded_batch() -> tuple[str, list]:
     """
     造种子用例并启动执行批次（内部辅助方法）
 
@@ -684,7 +683,7 @@ class TestExecuteBatchAsyncNotification:
         order_list: list = []
 
         def _fake_close(
-            batch_id: str, reason: Optional[str] = None
+            batch_id: str, reason: str | None = None
         ) -> None:
             """记录型通道关闭替身（记录调用顺序）"""
             order_list.append("close")

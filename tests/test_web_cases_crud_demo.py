@@ -24,13 +24,12 @@ TestMatrix Day20: 用例CRUD API测试（POST/GET详情/PUT/DELETE）
     Windows文件锁）+ Flask test client端到端验证，零mock零真实外部依赖。
 """
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import allure
 import pytest
 from flask.testing import FlaskClient
-
 from src.db import models
 from src.db.db_session import DatabaseSession
 from src.web import create_app

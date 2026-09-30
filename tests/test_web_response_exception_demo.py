@@ -9,14 +9,13 @@ TestMatrix Day18: 统一响应封装与全局异常处理测试
     5. 格式统一: 全部路由响应均含code/message/data三字段
 """
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 from unittest.mock import patch
 
 import pytest
 from flask import Flask
 from sqlalchemy.exc import OperationalError
-
 from src.db.db_session import DatabaseSession
 from src.web import NotFoundError, ValidationError, create_app
 from src.web.response import created, error, success

@@ -33,14 +33,13 @@ TestMatrix Day29: API打磨回归测试
 """
 
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 import allure
 import pytest
 from flask.testing import FlaskClient
-
 from src.common.logger import LogManager
 from src.core import event_bus
 from src.db import models
