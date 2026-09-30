@@ -17,7 +17,7 @@
 
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -40,7 +40,7 @@ class EnvManager:
     # 支持的合法环境列表
     VALID_ENVS = ("dev", "test", "prod")
 
-    def __init__(self, env_file: Optional[str] = None):
+    def __init__(self, env_file: str | None = None):
         """
         初始化配置管理器
 

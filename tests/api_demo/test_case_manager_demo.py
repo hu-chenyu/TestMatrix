@@ -20,7 +20,6 @@ from pathlib import Path
 
 import allure
 import pytest
-
 from src.core.case_manager import (
     CaseManager,
     CaseManagerError,

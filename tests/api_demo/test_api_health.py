@@ -9,7 +9,6 @@
 
 import allure
 import pytest
-
 from src.common.assertion import (
     assert_contains,
     assert_header,

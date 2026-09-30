@@ -26,7 +26,6 @@ import subprocess
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
 
 from src.common.env_manager import env_manager
 from src.common.logger import LogManager
@@ -58,7 +57,7 @@ class ExecutionResult:
     """
 
     result: str
-    error_message: Optional[str] = None
+    error_message: str | None = None
     duration: float = 0.0
 
 
@@ -253,7 +252,7 @@ class PytestRunner(BaseExecutor):
         )
 
 
-def get_executor(kind: Optional[str] = None) -> BaseExecutor:
+def get_executor(kind: str | None = None) -> BaseExecutor:
     """
     执行器工厂函数
 

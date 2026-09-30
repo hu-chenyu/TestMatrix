@@ -11,7 +11,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from flask import Blueprint
 from sqlalchemy import text
@@ -113,7 +113,7 @@ def health():
     """
     connected, error_message = _check_database()
     common = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "env": env_manager.current_env,
     }
     if connected:

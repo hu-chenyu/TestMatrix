@@ -17,7 +17,7 @@
 """
 
 import json
-from typing import Any, Optional, Union
+from typing import Any
 
 import requests
 
@@ -103,7 +103,7 @@ def _parse_json_path(data: Any, path: str) -> Any:
 # ----------------------------------------------------------------------
 def assert_status_code(
     response: requests.Response,
-    expected: Union[int, list, tuple],
+    expected: int | list | tuple,
 ) -> None:
     """
     断言HTTP响应状态码
@@ -161,7 +161,7 @@ def assert_response_time(
 def assert_header(
     response: requests.Response,
     header_name: str,
-    expected: Optional[str] = None,
+    expected: str | None = None,
 ) -> None:
     """
     断言响应头存在且（可选）值匹配
@@ -403,7 +403,7 @@ def assert_is_not_empty(value: Any, message: str = "") -> None:
     logger.debug("断言通过[非空]")
 
 
-def assert_greater(actual: Union[int, float], threshold: Union[int, float], message: str = "") -> None:
+def assert_greater(actual: int | float, threshold: int | float, message: str = "") -> None:
     """
     断言实际值严格大于阈值
 
@@ -425,7 +425,7 @@ def assert_greater(actual: Union[int, float], threshold: Union[int, float], mess
     logger.debug(f"断言通过[大于] | {actual} > {threshold}")
 
 
-def assert_less(actual: Union[int, float], threshold: Union[int, float], message: str = "") -> None:
+def assert_less(actual: int | float, threshold: int | float, message: str = "") -> None:
     """
     断言实际值严格小于阈值
 

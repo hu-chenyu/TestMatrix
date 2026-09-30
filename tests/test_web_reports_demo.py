@@ -29,14 +29,13 @@ TestMatrix Day23: 报告统计与质量度量API测试
 """
 
 import time
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterator, Optional
 
 import allure
 import pytest
 from flask.testing import FlaskClient
-
 from src.core.case_manager import CaseManager
 from src.db import models
 from src.db.db_session import DatabaseSession
@@ -96,7 +95,7 @@ def seed_cases() -> None:
 
 
 def _create_finished_batch(
-    records: list[tuple[str, str, str, Optional[str], float]],
+    records: list[tuple[str, str, str, str | None, float]],
 ) -> str:
     """
     经核心层造一个已完成执行批次（内部方法）

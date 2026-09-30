@@ -18,11 +18,9 @@ from unittest.mock import patch
 
 import allure
 import pytest
-
 from src.common.env_manager import env_manager
 from src.core.notification import (
     BaseNotifier,
-    Notification,
     NotificationDeadLetterRepository,
     NotificationRouter,
 )

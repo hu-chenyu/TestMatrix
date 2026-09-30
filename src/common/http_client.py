@@ -17,7 +17,7 @@ HTTP请求统一封装模块
 """
 
 import time
-from typing import Any, Optional, Union
+from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -43,7 +43,7 @@ class HttpClientError(Exception):
     携带请求上下文信息，便于用例失败时快速定位问题。
     """
 
-    def __init__(self, message: str, request_info: Optional[dict] = None):
+    def __init__(self, message: str, request_info: dict | None = None):
         """
         初始化异常
 
@@ -126,7 +126,7 @@ class HttpClient:
     # ------------------------------------------------------------------
     # 快捷请求方法
     # ------------------------------------------------------------------
-    def get(self, path: str, params: Optional[dict] = None, **kwargs) -> requests.Response:
+    def get(self, path: str, params: dict | None = None, **kwargs) -> requests.Response:
         """
         发送GET请求
 
@@ -146,8 +146,8 @@ class HttpClient:
     def post(
         self,
         path: str,
-        json: Optional[Any] = None,
-        data: Optional[Any] = None,
+        json: Any | None = None,
+        data: Any | None = None,
         **kwargs,
     ) -> requests.Response:
         """
@@ -170,8 +170,8 @@ class HttpClient:
     def put(
         self,
         path: str,
-        json: Optional[Any] = None,
-        data: Optional[Any] = None,
+        json: Any | None = None,
+        data: Any | None = None,
         **kwargs,
     ) -> requests.Response:
         """
@@ -210,8 +210,8 @@ class HttpClient:
     def patch(
         self,
         path: str,
-        json: Optional[Any] = None,
-        data: Optional[Any] = None,
+        json: Any | None = None,
+        data: Any | None = None,
         **kwargs,
     ) -> requests.Response:
         """
@@ -328,7 +328,7 @@ class HttpClient:
         return f"{self.base_url}/{path.lstrip('/')}"
 
     @staticmethod
-    def _mask_headers(headers: Optional[dict]) -> Union[dict, str]:
+    def _mask_headers(headers: dict | None) -> dict | str:
         """
         请求头脱敏（敏感字段的值替换为***）
 

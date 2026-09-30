@@ -102,7 +102,6 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Union
 
 from sqlalchemy import case, func, or_
 from sqlalchemy.exc import SQLAlchemyError
@@ -162,7 +161,7 @@ class CaseManagerError(Exception):
         context (dict): 异常发生时的操作上下文信息
     """
 
-    def __init__(self, message: str, context: Optional[dict] = None):
+    def __init__(self, message: str, context: dict | None = None):
         """
         初始化异常
 
@@ -223,8 +222,8 @@ class CaseManager:
     @classmethod
     def sync_cases_from_file(
         cls,
-        file_path: Union[str, Path],
-        sheet_name: Optional[str] = None,
+        file_path: str | Path,
+        sheet_name: str | None = None,
         creator: str = "admin",
     ) -> dict:
         """
@@ -329,10 +328,10 @@ class CaseManager:
     @classmethod
     def list_cases(
         cls,
-        module: Optional[Union[str, list]] = None,
-        priority: Optional[Union[str, list]] = None,
-        status: Optional[str] = "active",
-        case_type: Optional[str] = None,
+        module: str | list | None = None,
+        priority: str | list | None = None,
+        status: str | None = "active",
+        case_type: str | None = None,
     ) -> list:
         """
         多维度用例查询
@@ -415,11 +414,11 @@ class CaseManager:
     @classmethod
     def list_cases_paged(
         cls,
-        module: Optional[Union[str, list]] = None,
-        priority: Optional[Union[str, list]] = None,
-        case_type: Optional[str] = None,
-        status: Optional[str] = "active",
-        keyword: Optional[str] = None,
+        module: str | list | None = None,
+        priority: str | list | None = None,
+        case_type: str | None = None,
+        status: str | None = "active",
+        keyword: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> dict:
@@ -580,7 +579,7 @@ class CaseManager:
     # 用例CRUD（第三阶段Day20，Web用例管理API专用）
     # ------------------------------------------------------------------
     @classmethod
-    def get_case(cls, case_id: str) -> Optional[dict]:
+    def get_case(cls, case_id: str) -> dict | None:
         """
         按业务编号查询单条用例
 
@@ -839,7 +838,7 @@ class CaseManager:
         trigger: str = "manual",
         executor: str = "local",
         environment: str = "dev",
-        remark: Optional[str] = None,
+        remark: str | None = None,
     ) -> str:
         """
         创建测试执行批次
@@ -876,9 +875,9 @@ class CaseManager:
     @classmethod
     def select_cases_for_execution(
         cls,
-        module: Optional[Union[str, list]] = None,
-        priority: Optional[Union[str, list]] = None,
-        tags: Optional[Union[str, list]] = None,
+        module: str | list | None = None,
+        priority: str | list | None = None,
+        tags: str | list | None = None,
         case_type: str = "api",
     ) -> list:
         """
@@ -936,7 +935,7 @@ class CaseManager:
         start_time: datetime,
         end_time: datetime,
         duration: float,
-        error_message: Optional[str] = None,
+        error_message: str | None = None,
     ) -> None:
         """
         记录单条用例执行结果
@@ -1232,7 +1231,7 @@ class CaseManager:
         return result
 
     @classmethod
-    def get_execution_detail(cls, execution_id: str) -> Optional[dict]:
+    def get_execution_detail(cls, execution_id: str) -> dict | None:
         """
         查询执行批次详情（汇总统计 + 单用例执行明细）
 
@@ -1384,10 +1383,10 @@ class CaseManager:
         trigger: str,
         executor_name: str = "local",
         environment: str = "dev",
-        remark: Optional[str] = None,
-        module: Optional[Union[str, list]] = None,
-        priority: Optional[Union[str, list]] = None,
-        tags: Optional[Union[str, list]] = None,
+        remark: str | None = None,
+        module: str | list | None = None,
+        priority: str | list | None = None,
+        tags: str | list | None = None,
         case_type: str = "api",
     ) -> dict:
         """
@@ -1552,8 +1551,8 @@ class CaseManager:
         cls,
         execution_id: str,
         cases: list,
-        executor_kind: Optional[str] = None,
-        notification_router: Optional[NotificationRouter] = None,
+        executor_kind: str | None = None,
+        notification_router: NotificationRouter | None = None,
     ) -> None:
         """
         批次后台执行编排（daemon线程目标函数，也可同步调用）
@@ -1759,7 +1758,7 @@ class CaseManager:
                 )
 
     @classmethod
-    def get_execution_status(cls, execution_id: str) -> Optional[dict]:
+    def get_execution_status(cls, execution_id: str) -> dict | None:
         """
         查询执行批次状态（Web批次状态查询API专用）
 
@@ -1850,14 +1849,14 @@ class CaseManager:
         cls,
         execution_id: str,
         status: str,
-        started_at: Optional[datetime] = None,
-        finished_at: Optional[datetime] = None,
-        passed: Optional[int] = None,
-        failed: Optional[int] = None,
-        error: Optional[int] = None,
-        skipped: Optional[int] = None,
-        pass_rate: Optional[float] = None,
-        error_message: Optional[str] = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+        passed: int | None = None,
+        failed: int | None = None,
+        error: int | None = None,
+        skipped: int | None = None,
+        pass_rate: float | None = None,
+        error_message: str | None = None,
     ) -> None:
         """
         更新批次状态与冗余统计（内部方法）
@@ -1935,7 +1934,7 @@ class CaseManager:
     @classmethod
     def build_notification_statistics(
         cls, execution_id: str
-    ) -> Optional[StatisticsResult]:
+    ) -> StatisticsResult | None:
         """
         将批次DB执行记录适配为统计模型（Day15适配器）
 
@@ -2025,8 +2024,8 @@ class CaseManager:
     def notify_execution_result(
         cls,
         execution_id: str,
-        router: Optional[NotificationRouter] = None,
-        strategy: Optional[str] = None,
+        router: NotificationRouter | None = None,
+        strategy: str | None = None,
     ) -> dict:
         """
         批次完成自动通知（Day15集成入口，通知为旁路能力）
@@ -2072,7 +2071,7 @@ class CaseManager:
     # 批量执行与命令行（第二阶段Day3）
     # ------------------------------------------------------------------
     @staticmethod
-    def _simulate_execute(case: dict) -> Tuple[str, Optional[str], float]:
+    def _simulate_execute(case: dict) -> tuple[str, str | None, float]:
         """
         模拟执行器（内部工具方法）
 
@@ -2111,7 +2110,7 @@ class CaseManager:
     # 内部工具方法
     # ------------------------------------------------------------------
     @staticmethod
-    def _infer_case_type(file_path: Union[str, Path]) -> str:
+    def _infer_case_type(file_path: str | Path) -> str:
         """
         按文件路径推断用例类型（内部方法）
 
@@ -2154,7 +2153,7 @@ class CaseManager:
         return f"标签: {', '.join(tags)}" if tags else ""
 
     @staticmethod
-    def _parse_tags_from_description(description: Optional[str]) -> list:
+    def _parse_tags_from_description(description: str | None) -> list:
         """
         从description字段解析标签列表（内部方法）
 
@@ -2181,7 +2180,7 @@ class CaseManager:
         return [tag.strip() for tag in tag_text.split(",") if tag.strip()]
 
     @staticmethod
-    def _normalize_values(value: Union[str, list], dim_name: str) -> list:
+    def _normalize_values(value: str | list, dim_name: str) -> list:
         """
         筛选维度值归一化为列表（内部方法）
 
@@ -2237,11 +2236,11 @@ class CaseManager:
 
 
 def run_batch(
-    file_path: Union[str, Path],
-    sheet_name: Optional[str] = None,
-    priority: Optional[Union[str, list]] = None,
-    module: Optional[Union[str, list]] = None,
-    tags: Optional[Union[str, list]] = None,
+    file_path: str | Path,
+    sheet_name: str | None = None,
+    priority: str | list | None = None,
+    module: str | list | None = None,
+    tags: str | list | None = None,
     trigger: str = "cli",
     dry_run: bool = False,
     notify: bool = False,

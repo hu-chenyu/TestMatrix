@@ -25,7 +25,6 @@ Telnet网口通信封装模块（芯片板卡远程控制适配层）
 
 import time
 import warnings
-from typing import Optional
 
 from src.common.logger import LogManager
 
@@ -49,7 +48,7 @@ class TelnetClientError(Exception):
     携带目标设备信息，便于板卡测试问题时快速定位。
     """
 
-    def __init__(self, message: str, host: Optional[str] = None):
+    def __init__(self, message: str, host: str | None = None):
         """
         初始化异常
 
@@ -101,7 +100,7 @@ class TelnetClient:
         self.host = str(host).strip()
         self.port = port
         self.timeout = timeout
-        self._conn: Optional["telnetlib.Telnet"] = None
+        self._conn: telnetlib.Telnet | None = None
 
         logger.debug(
             f"TelnetClient配置就绪 | 目标: {self.host}:{port} | "
@@ -158,7 +157,7 @@ class TelnetClient:
         self,
         username: str,
         password: str,
-        login_timeout: Optional[float] = None,
+        login_timeout: float | None = None,
     ) -> bool:
         """
         登录板卡系统（自动识别Login/Password提示）
@@ -253,9 +252,9 @@ class TelnetClient:
     def execute(
         self,
         command: str,
-        expect: Optional[str] = None,
+        expect: str | None = None,
         wait_time: float = 1.0,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> str:
         """
         在板卡远程Shell中执行命令并获取输出
@@ -295,7 +294,7 @@ class TelnetClient:
                     chunk = self._conn.read_very_eager()
                 except EOFError as exc:
                     raise TelnetClientError(
-                        f"读取输出失败: 连接已被对端关闭", host=self.host
+                        "读取输出失败: 连接已被对端关闭", host=self.host
                     ) from exc
                 if chunk:
                     buffer.extend(chunk)

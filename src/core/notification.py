@@ -26,14 +26,13 @@
 import random
 import re
 import smtplib
-import socket
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import requests
 
@@ -115,11 +114,11 @@ class Notification:
     title: str
     content: str
     level: str = "info"
-    execution_id: Optional[str] = None
-    pass_rate: Optional[float] = None
-    total_cases: Optional[int] = None
-    failed_cases: Optional[int] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
+    execution_id: str | None = None
+    pass_rate: float | None = None
+    total_cases: int | None = None
+    failed_cases: int | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
 
 
@@ -312,7 +311,7 @@ class EmailNotifier(BaseNotifier):
                 f"收件人: {len(self.receivers)}个 | 耗时: {elapsed_ms:.0f}ms"
             )
             return True
-        except (smtplib.SMTPException, socket.error, OSError) as exc:
+        except (smtplib.SMTPException, OSError) as exc:
             # 认证类异常只记录sender不记录密码（敏感信息保护）
             logger.error(
                 f"邮件通知发送失败 | host: {self.smtp_host}:{self.smtp_port} | "
@@ -330,7 +329,7 @@ class EmailNotifier(BaseNotifier):
     # ------------------------------------------------------------------
     # 内部工具方法
     # ------------------------------------------------------------------
-    def _missing_configs(self) -> List[str]:
+    def _missing_configs(self) -> list[str]:
         """
         校验必填配置完整性（内部方法）
 
@@ -418,7 +417,7 @@ class EmailNotifier(BaseNotifier):
             )
         return client
 
-    def _get_receivers(self) -> List[str]:
+    def _get_receivers(self) -> list[str]:
         """
         解析收件人列表（内部方法）
 
@@ -489,7 +488,7 @@ class EmailReportTemplate:
         self,
         stat: "StatisticsResult",
         execution_id: str = "",
-        failed_details: Optional[List["FailedCaseDetail"]] = None,
+        failed_details: list["FailedCaseDetail"] | None = None,
     ) -> str:
         """
         生成完整HTML邮件报告
@@ -632,7 +631,7 @@ class EmailReportTemplate:
             f'<table style="{TABLE_STYLE}">\n<tr>\n{cells}\n</tr>\n</table>'
         )
 
-    def _render_module_table(self, by_module: "Dict[str, Any]") -> str:
+    def _render_module_table(self, by_module: "dict[str, Any]") -> str:
         """
         渲染模块分布表格（内部方法）
 
@@ -670,7 +669,7 @@ class EmailReportTemplate:
             "📦 模块分布", ["模块", "总数", "通过", "失败", "通过率"], rows
         )
 
-    def _render_priority_table(self, by_priority: "Dict[str, Any]") -> str:
+    def _render_priority_table(self, by_priority: "dict[str, Any]") -> str:
         """
         渲染优先级分布表格（内部方法）
 
@@ -702,7 +701,7 @@ class EmailReportTemplate:
             "🎯 优先级分布", ["优先级", "总数", "通过", "失败", "通过率"], rows
         )
 
-    def _render_failed_table(self, failed_details: List["FailedCaseDetail"]) -> str:
+    def _render_failed_table(self, failed_details: list["FailedCaseDetail"]) -> str:
         """
         渲染失败用例明细表格（内部方法）
 
@@ -763,7 +762,7 @@ class EmailReportTemplate:
     # ------------------------------------------------------------------
     @staticmethod
     def _get_pass_rate_color(
-        pass_rate: Optional[float], total: int = -1
+        pass_rate: float | None, total: int = -1
     ) -> str:
         """
         根据通过率返回颜色值（内部方法）
@@ -789,7 +788,7 @@ class EmailReportTemplate:
 
     @staticmethod
     def _format_pass_rate(
-        pass_rate: Optional[float], total: int = -1
+        pass_rate: float | None, total: int = -1
     ) -> str:
         """
         格式化通过率为百分比文本（内部方法）
@@ -869,7 +868,7 @@ class EmailReportTemplate:
             return message
         return message[:max_length] + "..."
 
-    def _section_with_table(self, title: str, headers: List[str], rows: str) -> str:
+    def _section_with_table(self, title: str, headers: list[str], rows: str) -> str:
         """
         组装"标题+表格"区块（内部方法）
 
@@ -1029,7 +1028,7 @@ class WeChatNotifier(BaseNotifier):
         # 3. 构造payload（@负责人: 企微markdown正文写<@xxx>不触发提醒，
         #    必须在payload顶层注入mentioned_list/mentioned_mobile_list）
         markdown_content = self._build_markdown_content(notification)
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "msgtype": "markdown",
             "markdown": {"content": markdown_content},
         }
@@ -1205,7 +1204,7 @@ class WeChatNotifier(BaseNotifier):
         return url[:30] + "..." if len(url) > 30 else url
 
     @staticmethod
-    def _pass_rate_color(pass_rate: Optional[float]) -> str:
+    def _pass_rate_color(pass_rate: float | None) -> str:
         """
         通过率映射企微font颜色（内部方法）
 
@@ -1262,11 +1261,11 @@ class NotificationRouter:
 
     def __init__(
         self,
-        strategy: Optional[str] = None,
-        notifiers: Optional[List[BaseNotifier]] = None,
-        max_retries: Optional[int] = None,
-        base_delay: Optional[float] = None,
-        use_jitter: Optional[bool] = None,
+        strategy: str | None = None,
+        notifiers: list[BaseNotifier] | None = None,
+        max_retries: int | None = None,
+        base_delay: float | None = None,
+        use_jitter: bool | None = None,
         dead_letter_repo=None,
         sleeper=None,
     ):
@@ -1348,7 +1347,7 @@ class NotificationRouter:
             f"jitter={self.use_jitter}"
         )
 
-    def should_notify(self, stat, strategy: Optional[str] = None) -> bool:
+    def should_notify(self, stat, strategy: str | None = None) -> bool:
         """
         判断是否需要发送通知
 
@@ -1368,7 +1367,7 @@ class NotificationRouter:
             return stat.failed > 0
         return True
 
-    def collect_owners(self, stat) -> Tuple[List[str], List[str], List[str]]:
+    def collect_owners(self, stat) -> tuple[list[str], list[str], list[str]]:
         """
         收集失败用例负责人并分流@名单（内部含配置合并）
 
@@ -1399,8 +1398,8 @@ class NotificationRouter:
         )
 
         # 手机号/_userid分流
-        mentioned_list: List[str] = []
-        mentioned_mobile_list: List[str] = []
+        mentioned_list: list[str] = []
+        mentioned_mobile_list: list[str] = []
         for owner in owner_names:
             if self.MOBILE_PATTERN.match(owner):
                 mentioned_mobile_list.append(owner)
@@ -1420,7 +1419,7 @@ class NotificationRouter:
 
         return owner_names, mentioned_list, mentioned_mobile_list
 
-    def notify(self, stat, execution_id: str, strategy: Optional[str] = None) -> Dict[str, bool]:
+    def notify(self, stat, execution_id: str, strategy: str | None = None) -> dict[str, bool]:
         """
         通知分发主入口
 
@@ -1460,7 +1459,7 @@ class NotificationRouter:
             notification.extra["mentioned_mobile_list"] = mentioned_mobile_list
             notification.extra["owner_names"] = owner_names
 
-        results: Dict[str, bool] = {}
+        results: dict[str, bool] = {}
         for notifier in self.notifiers:
             channel = notifier.channel_name
             try:
@@ -1508,7 +1507,7 @@ class NotificationRouter:
     # ------------------------------------------------------------------
     def _send_with_retry(
         self, notifier: BaseNotifier, notification: Notification
-    ) -> Tuple[bool, int, str]:
+    ) -> tuple[bool, int, str]:
         """
         带指数退避重试的渠道发送（内部方法）
 
@@ -1607,8 +1606,8 @@ class NotificationRouter:
             )
 
     def _build_channel_notifications(
-        self, stat, execution_id: str, owner_names: List[str]
-    ) -> Dict[str, Notification]:
+        self, stat, execution_id: str, owner_names: list[str]
+    ) -> dict[str, Notification]:
         """
         构造各渠道通知消息（内部方法）
 
@@ -1666,7 +1665,7 @@ class NotificationRouter:
 
     @staticmethod
     def _build_wechat_summary(
-        stat, execution_id: str, owner_names: List[str]
+        stat, execution_id: str, owner_names: list[str]
     ) -> str:
         """
         构造企微markdown文本摘要（内部方法）
@@ -1775,7 +1774,7 @@ class NotificationDeadLetterRepository:
             return record.id
 
     @staticmethod
-    def list_by_execution_id(execution_id: str) -> List[Dict[str, Any]]:
+    def list_by_execution_id(execution_id: str) -> list[dict[str, Any]]:
         """
         按批次号查询死信列表
 
@@ -1808,7 +1807,7 @@ class NotificationDeadLetterRepository:
             session.close()
 
     @staticmethod
-    def list_all(limit: int = 100) -> List[Dict[str, Any]]:
+    def list_all(limit: int = 100) -> list[dict[str, Any]]:
         """
         查询全部死信（最近N条）
 
@@ -1865,7 +1864,7 @@ class NotificationDeadLetterRepository:
             session.close()
 
     @staticmethod
-    def _to_dict(record) -> Dict[str, Any]:
+    def _to_dict(record) -> dict[str, Any]:
         """
         死信模型行转字典（内部方法）
 

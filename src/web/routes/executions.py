@@ -54,8 +54,8 @@
 import json
 import threading
 import time
+from collections.abc import Iterator
 from datetime import datetime
-from typing import Iterator, Optional
 
 from flask import Blueprint, Response, request, stream_with_context
 
@@ -66,6 +66,7 @@ from src.core.executors import VALID_EXECUTORS
 from src.core.task_queue import STATUS_PENDING, task_queue_client
 from src.web.exceptions import NotFoundError, ValidationError
 from src.web.response import success
+
 # case_type合法枚举复用cases.py常量（单一事实来源，防两处定义漂移）
 from src.web.routes.cases import VALID_CASE_TYPES
 
@@ -191,7 +192,7 @@ def get_execution_detail(execution_id: str):
     return success(data=detail)
 
 
-def _parse_optional_body_str(body: dict, name: str) -> Optional[str]:
+def _parse_optional_body_str(body: dict, name: str) -> str | None:
     """
     解析请求体中可选字符串字段（内部方法）
 
@@ -401,7 +402,7 @@ def get_execution_status(execution_id: str):
 
 
 def _format_sse_frame(
-    event_type: str, data: dict, event_id: Optional[int] = None
+    event_type: str, data: dict, event_id: int | None = None
 ) -> str:
     """
     格式化单条SSE帧（内部方法）
@@ -435,7 +436,7 @@ def _format_sse_frame(
     return f"event: {event_type}\nid: {event_id}\ndata: {payload}\n\n"
 
 
-def _parse_last_event_id_header() -> Optional[int]:
+def _parse_last_event_id_header() -> int | None:
     """
     解析Last-Event-ID请求头（内部方法，断线回放锚点）
 
@@ -462,7 +463,7 @@ def _parse_last_event_id_header() -> Optional[int]:
 
 
 def _terminal_snapshot_frame(
-    status_data: dict, event_id: Optional[int] = None
+    status_data: dict, event_id: int | None = None
 ) -> str:
     """
     构造批次终态快照帧（内部方法，降级补发专用）

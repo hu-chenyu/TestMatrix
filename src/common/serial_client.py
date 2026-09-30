@@ -16,7 +16,6 @@
 """
 
 import time
-from typing import Optional
 
 from src.common.logger import LogManager
 
@@ -40,7 +39,7 @@ class SerialClientError(Exception):
     携带端口上下文信息，便于板卡测试问题时快速定位。
     """
 
-    def __init__(self, message: str, port: Optional[str] = None):
+    def __init__(self, message: str, port: str | None = None):
         """
         初始化异常
 
@@ -106,7 +105,7 @@ class SerialClient:
         self._bytesize = bytesize
         self._parity = parity
         self._stopbits = stopbits
-        self._serial: Optional[serial.Serial] = None
+        self._serial: serial.Serial | None = None
 
         logger.debug(
             f"SerialClient配置就绪 | 端口: {self.port} | 波特率: {baudrate} | "
@@ -219,7 +218,7 @@ class SerialClient:
     def send_command(
         self,
         command: str,
-        expect: Optional[str] = None,
+        expect: str | None = None,
         wait_time: float = 0.5,
         encoding: str = "utf-8",
     ) -> str:
@@ -265,7 +264,7 @@ class SerialClient:
     def read_until(
         self,
         expect: str,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         encoding: str = "utf-8",
     ) -> str:
         """

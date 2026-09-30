@@ -35,13 +35,12 @@ TestMatrix Day34: Web后端+Redis阶段缓冲消化补测
 """
 
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Optional
 
 import allure
 import pytest
 from flask.testing import FlaskClient
-
 from src.core import event_bus
 from src.core.cache import cache_client
 from src.core.task_queue import stop_worker, task_queue_client
@@ -167,7 +166,7 @@ def _wait_batch_terminal(
         AssertionError: 轮询期间状态码非200
         pytest.fail: 轮询预算内未达终态
     """
-    status_data: Optional[dict] = None
+    status_data: dict | None = None
     for _ in range(POLL_MAX_ATTEMPTS):
         response = client.get(f"/api/executions/{execution_id}/status")
         assert response.status_code == 200, "轮询期间状态查询应始终200"

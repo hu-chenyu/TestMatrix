@@ -20,7 +20,6 @@ from pathlib import Path
 
 import allure
 import pytest
-
 from src.core.report_analyzer import (
     AllureResult,
     FailedCaseDetail,

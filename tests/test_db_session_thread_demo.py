@@ -22,7 +22,6 @@ from pathlib import Path
 import allure
 import pytest
 from sqlalchemy import text
-
 from src.db.db_session import DatabaseSession
 
 # 项目根目录（本文件位于 tests/ 下，向上一级为项目根）

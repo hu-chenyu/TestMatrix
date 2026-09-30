@@ -17,7 +17,6 @@ from pathlib import Path
 import allure
 import pytest
 from openpyxl import Workbook
-
 from src.core.case_manager import CaseManager, CaseManagerError, run_batch
 from src.core.data_driver import DataDriver, DataDriverError
 from src.core.report_analyzer import ReportRepository, StatisticsResult

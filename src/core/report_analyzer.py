@@ -51,7 +51,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from src.common.logger import LogManager
 
@@ -105,9 +105,9 @@ class AllureResult:
     start: int = 0
     stop: int = 0
     history_id: str = ""
-    labels: Dict[str, List[str]] = field(default_factory=dict)
-    parameters: List[Dict] = field(default_factory=list)
-    status_details: Optional[Dict] = None
+    labels: dict[str, list[str]] = field(default_factory=dict)
+    parameters: list[dict] = field(default_factory=list)
+    status_details: dict | None = None
 
     @property
     def duration_ms(self) -> int:
@@ -125,7 +125,7 @@ class AllureResult:
         """
         return max(self.stop - self.start, 0)
 
-    def get_label(self, name: str) -> List[str]:
+    def get_label(self, name: str) -> list[str]:
         """
         按标签名获取标签值列表（便捷方法）
 
@@ -152,7 +152,7 @@ class ReportAnalyzer:
     """
 
     @staticmethod
-    def scan_results_dir(results_dir: Union[str, Path]) -> List[str]:
+    def scan_results_dir(results_dir: str | Path) -> list[str]:
         """
         扫描Allure结果目录，返回全部用例级结果文件路径
 
@@ -183,7 +183,7 @@ class ReportAnalyzer:
         return result_files
 
     @staticmethod
-    def parse_result_file(file_path: Union[str, Path]) -> AllureResult:
+    def parse_result_file(file_path: str | Path) -> AllureResult:
         """
         解析单个 *-result.json 文件为AllureResult对象
 
@@ -242,7 +242,7 @@ class ReportAnalyzer:
         return result
 
     @staticmethod
-    def parse_results_dir(results_dir: Union[str, Path]) -> List[AllureResult]:
+    def parse_results_dir(results_dir: str | Path) -> list[AllureResult]:
         """
         批量解析整个Allure结果目录
 
@@ -260,7 +260,7 @@ class ReportAnalyzer:
         """
         result_files = ReportAnalyzer.scan_results_dir(results_dir)
 
-        results: List[AllureResult] = []
+        results: list[AllureResult] = []
         skipped = 0
         for file_path in result_files:
             try:
@@ -286,7 +286,7 @@ class ReportAnalyzer:
         return results
 
     @staticmethod
-    def get_by_status(results: List[AllureResult], status: str) -> List[AllureResult]:
+    def get_by_status(results: list[AllureResult], status: str) -> list[AllureResult]:
         """
         按执行状态筛选结果列表
 
@@ -305,7 +305,7 @@ class ReportAnalyzer:
         return matched
 
     @staticmethod
-    def get_failed_results(results: List[AllureResult]) -> List[AllureResult]:
+    def get_failed_results(results: list[AllureResult]) -> list[AllureResult]:
         """
         获取全部失败结果（failed+broken均视为失败）
 
@@ -334,7 +334,7 @@ class ReportAnalyzer:
     # 内部工具方法
     # ------------------------------------------------------------------
     @staticmethod
-    def _merge_labels(raw_labels: Union[list, None]) -> Dict[str, List[str]]:
+    def _merge_labels(raw_labels: list | None) -> dict[str, list[str]]:
         """
         labels数组转标签字典（内部方法）
 
@@ -351,7 +351,7 @@ class ReportAnalyzer:
         异常:
             无
         """
-        merged: Dict[str, List[str]] = {}
+        merged: dict[str, list[str]] = {}
         if not isinstance(raw_labels, list):
             return merged
         for item in raw_labels:
@@ -504,9 +504,9 @@ class StatisticsResult:
     max_duration_ms: int = 0
     min_duration_ms: int = 0
     p95_duration_ms: float = 0.0
-    by_module: Dict[str, ModuleStat] = field(default_factory=dict)
-    by_priority: Dict[str, PriorityStat] = field(default_factory=dict)
-    failed_details: List[FailedCaseDetail] = field(default_factory=list)
+    by_module: dict[str, ModuleStat] = field(default_factory=dict)
+    by_priority: dict[str, PriorityStat] = field(default_factory=dict)
+    failed_details: list[FailedCaseDetail] = field(default_factory=list)
 
 
 class ReportStatistics:
@@ -524,7 +524,7 @@ class ReportStatistics:
     """
 
     @staticmethod
-    def aggregate(results: List[AllureResult]) -> StatisticsResult:
+    def aggregate(results: list[AllureResult]) -> StatisticsResult:
         """
         统计聚合主入口（计算全部批次级指标）
 
@@ -577,7 +577,7 @@ class ReportStatistics:
         return stat
 
     @staticmethod
-    def to_dict(stat: StatisticsResult) -> Dict[str, Any]:
+    def to_dict(stat: StatisticsResult) -> dict[str, Any]:
         """
         StatisticsResult转字典（便于入库与JSON序列化）
 
@@ -666,7 +666,7 @@ class ReportStatistics:
         return round(passed / total, 4)
 
     @staticmethod
-    def _calc_duration_stats(results: List[AllureResult]) -> Dict[str, Any]:
+    def _calc_duration_stats(results: list[AllureResult]) -> dict[str, Any]:
         """
         计算耗时分布统计（内部方法）
 
@@ -708,7 +708,7 @@ class ReportStatistics:
         }
 
     @staticmethod
-    def _group_by_module(results: List[AllureResult]) -> Dict[str, ModuleStat]:
+    def _group_by_module(results: list[AllureResult]) -> dict[str, ModuleStat]:
         """
         按模块分组统计（内部方法）
 
@@ -722,12 +722,12 @@ class ReportStatistics:
         异常:
             无
         """
-        grouped: Dict[str, List[AllureResult]] = {}
+        grouped: dict[str, list[AllureResult]] = {}
         for result in results:
             module_name = ReportStatistics._extract_module(result)
             grouped.setdefault(module_name, []).append(result)
 
-        stats: Dict[str, ModuleStat] = {}
+        stats: dict[str, ModuleStat] = {}
         for module_name, module_results in grouped.items():
             passed = sum(1 for r in module_results if r.status == "passed")
             failed = sum(1 for r in module_results if r.status in FAILED_STATUSES)
@@ -751,7 +751,7 @@ class ReportStatistics:
         return stats
 
     @staticmethod
-    def _group_by_priority(results: List[AllureResult]) -> Dict[str, PriorityStat]:
+    def _group_by_priority(results: list[AllureResult]) -> dict[str, PriorityStat]:
         """
         按优先级分组统计（内部方法）
 
@@ -765,12 +765,12 @@ class ReportStatistics:
         异常:
             无
         """
-        grouped: Dict[str, List[AllureResult]] = {}
+        grouped: dict[str, list[AllureResult]] = {}
         for result in results:
             priority_name = ReportStatistics._extract_priority(result)
             grouped.setdefault(priority_name, []).append(result)
 
-        stats: Dict[str, PriorityStat] = {}
+        stats: dict[str, PriorityStat] = {}
         for priority_name, priority_results in grouped.items():
             passed = sum(1 for r in priority_results if r.status == "passed")
             failed = sum(1 for r in priority_results if r.status in FAILED_STATUSES)
@@ -792,8 +792,8 @@ class ReportStatistics:
 
     @staticmethod
     def _extract_failed_details(
-        results: List[AllureResult],
-    ) -> List[FailedCaseDetail]:
+        results: list[AllureResult],
+    ) -> list[FailedCaseDetail]:
         """
         提取失败用例明细（内部方法）
 
@@ -807,7 +807,7 @@ class ReportStatistics:
         异常:
             无（status_details字段异常时以空串兜底）
         """
-        details: List[FailedCaseDetail] = []
+        details: list[FailedCaseDetail] = []
         for result in results:
             if result.status not in FAILED_STATUSES:
                 continue
@@ -1017,7 +1017,7 @@ class ReportRepository:
             session.close()
 
     @staticmethod
-    def get_latest_statistics(limit: int = 10) -> List:
+    def get_latest_statistics(limit: int = 10) -> list:
         """
         查询最近N条统计记录
 
@@ -1050,7 +1050,7 @@ class ReportRepository:
             session.close()
 
     @staticmethod
-    def get_trend_data(limit: int = 20) -> List[Dict[str, Any]]:
+    def get_trend_data(limit: int = 20) -> list[dict[str, Any]]:
         """
         生成通过率趋势数据（时间从早到晚）
 
@@ -1088,7 +1088,7 @@ class ReportRepository:
         ]
 
     @staticmethod
-    def get_pass_rate_trend(limit: int = 20) -> List[float]:
+    def get_pass_rate_trend(limit: int = 20) -> list[float]:
         """
         获取通过率浮点数列表（时间升序）
 
@@ -1111,7 +1111,7 @@ class ReportRepository:
     # 统计聚合扩展（Day23，Web报告统计/质量度量API专用）
     # ------------------------------------------------------------------
     @staticmethod
-    def get_overview_summary() -> Dict[str, Any]:
+    def get_overview_summary() -> dict[str, Any]:
         """
         全局执行汇总（Web报告汇总API数据源）
 
@@ -1218,7 +1218,7 @@ class ReportRepository:
         }
 
     @staticmethod
-    def get_module_distribution() -> List[Dict[str, Any]]:
+    def get_module_distribution() -> list[dict[str, Any]]:
         """
         模块执行分布（Web模块分布饼图数据源）
 
@@ -1276,7 +1276,7 @@ class ReportRepository:
 
         # pivot: (module, result, count) -> 每模块一条全结果计数
         valid_results = ("passed", "failed", "error", "skipped")
-        modules: Dict[str, Dict[str, Any]] = {}
+        modules: dict[str, dict[str, Any]] = {}
         for module, result, count in rows:
             # 悬空明细module为None/空串时归unknown（不丢历史数据）
             module_name = module if module else UNKNOWN_LABEL
@@ -1296,7 +1296,7 @@ class ReportRepository:
                 bucket[result] += count
 
         # 补pass_rate后排序: total降序 -> module升序（输出稳定）
-        distribution: List[Dict[str, Any]] = []
+        distribution: list[dict[str, Any]] = []
         for bucket in modules.values():
             total = bucket["total"]
             bucket["pass_rate"] = (
@@ -1312,7 +1312,7 @@ class ReportRepository:
         return distribution
 
     @staticmethod
-    def get_failed_top(limit: int = 10) -> List[Dict[str, Any]]:
+    def get_failed_top(limit: int = 10) -> list[dict[str, Any]]:
         """
         失败用例Top榜（Web失败Top数据源）
 
@@ -1376,7 +1376,7 @@ class ReportRepository:
 
                 # 入围case补查最近一次失败记录（Top榜最多limit条，
                 # 小样本N+1查询可接受；created_at+id双字段保证同秒稳定）
-                top_items: List[Dict[str, Any]] = []
+                top_items: list[dict[str, Any]] = []
                 for case_id, case_name, fail_count in grouped:
                     last_record = (
                         session.query(TestExecution)
@@ -1420,7 +1420,7 @@ class ReportRepository:
         return top_items
 
     @staticmethod
-    def get_quality_metrics() -> Dict[str, Any]:
+    def get_quality_metrics() -> dict[str, Any]:
         """
         质量度量指标（Web质量度量API数据源）
 

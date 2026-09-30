@@ -37,15 +37,14 @@ TestMatrix Day32: Redis任务队列测试
 """
 
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Optional
+from unittest.mock import patch
 
 import allure
 import pytest
 import redis
 from flask.testing import FlaskClient
-from unittest.mock import patch
-
 from src.core import event_bus
 from src.core.cache import cache_client
 from src.core.task_queue import (
@@ -179,7 +178,7 @@ def _wait_batch_terminal(
     异常:
         AssertionError: 轮询预算内未达终态时pytest.fail
     """
-    status_data: Optional[dict] = None
+    status_data: dict | None = None
     for _ in range(POLL_MAX_ATTEMPTS):
         response = client.get(f"/api/executions/{execution_id}/status")
         assert response.status_code == 200, "轮询期间状态查询应始终200"
@@ -346,7 +345,7 @@ class TestTaskQueueClientUnit:
                 """出队命令抛连接异常"""
                 raise redis.ConnectionError("模拟宕机: brpop失败")
 
-            def hset(self, name: str, mapping: Optional[dict] = None,
+            def hset(self, name: str, mapping: dict | None = None,
                      **kwargs) -> None:
                 """hash写入命令抛连接异常"""
                 raise redis.ConnectionError("模拟宕机: hset失败")

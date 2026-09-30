@@ -62,8 +62,8 @@
 import threading
 import time
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Iterator, Optional
 
 from src.common.logger import LogManager
 
@@ -117,7 +117,7 @@ class ExecutionEvent:
     event_type: str
     data: dict
     timestamp: float = field(default_factory=time.time)
-    event_id: Optional[int] = None
+    event_id: int | None = None
 
 
 class EventChannel:
@@ -214,9 +214,9 @@ class EventChannel:
 
     def subscribe(
         self,
-        last_event_id: Optional[int] = None,
+        last_event_id: int | None = None,
         tick: bool = False,
-    ) -> Iterator[Optional[ExecutionEvent]]:
+    ) -> Iterator[ExecutionEvent | None]:
         """
         订阅事件（阻塞迭代器，多订阅者广播，各自独立游标）
 
@@ -254,7 +254,7 @@ class EventChannel:
         # 处理，从最旧存活事件开始全量回放）
         cursor = last_event_id if last_event_id is not None else 0
         while True:
-            event: Optional[ExecutionEvent] = None
+            event: ExecutionEvent | None = None
             wait_timed_out = False
             with self._condition:
                 if self._history:
@@ -363,7 +363,7 @@ _CHANNELS: dict = {}
 _REGISTRY_LOCK = threading.RLock()
 
 
-def get_channel(execution_id: str, create: bool = False) -> Optional[EventChannel]:
+def get_channel(execution_id: str, create: bool = False) -> EventChannel | None:
     """
     查询（可选创建）批次事件通道
 

@@ -19,7 +19,6 @@ from pathlib import Path
 
 import allure
 import pytest
-
 from src.common.assertion import (
     assert_equal,
     assert_json_value,

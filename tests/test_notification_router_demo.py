@@ -19,7 +19,6 @@ from unittest.mock import MagicMock, patch
 
 import allure
 import pytest
-
 from src.common.env_manager import env_manager
 from src.core.notification import (
     BaseNotifier,
@@ -472,7 +471,6 @@ class TestRouterEndToEnd:
 
         # 5. 邮件HTML: 负责人提示行 + 5列表头 + 姓名展示
         # （MIME as_string中文为base64编码，需解析payload后再断言）
-        from email.mime.multipart import MIMEMultipart
         from email.parser import Parser
 
         sent_message = mock_ssl.return_value.sendmail.call_args[0][2]
