@@ -7,7 +7,7 @@
 #    末尾"探测版本结果汇总"步骤把失败项汇总成 ::warning::，信号不丢失
 # 2. 步骤顺序：依赖安装 → ruff 全量强制（src+tests，不 ignore 规则）
 #    → mypy 仅检查本次提交新增/修改的 src 文件（git diff 过滤，存量文件渐进收紧）
-#    → pytest 全量 463（含覆盖率门禁 --cov-fail-under=80）→ pip-audit 完整报告 + 分级门禁 → 探测版本结果汇总
+#    → pytest 全量 484（含覆盖率门禁 --cov-fail-under=80）→ pip-audit 完整报告 + 分级门禁 → 探测版本结果汇总
 # 3. pip-audit 门禁：HIGH/CRITICAL（含严重级未知，fail-closed）且不在
 #    .pip-audit-allowlist.txt（必须带未过期的过期日，缺日/过期均按未豁免处理）内
 #    才阻断；MODERATE/LOW 仅告警
@@ -84,7 +84,7 @@ jobs:
             mypy $CHANGED_SRC
           fi
 
-      - name: pytest 全量回归（463 passed）+ 覆盖率门禁（≥80%）
+      - name: pytest 全量回归（484 passed）+ 覆盖率门禁（≥80%）
         id: pytest-run
         # 覆盖率低于 80% 时 pytest-cov 以退出码 1 判红；退出码 5（无测试被收集）属路径/收集异常，容忍不阻断
         run: |
