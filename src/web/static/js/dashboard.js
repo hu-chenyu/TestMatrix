@@ -320,7 +320,7 @@ async function loadTrendChart() {
                     );
                 },
             },
-            grid: { left: 52, right: 24, top: 36, bottom: 48 },
+            grid: { left: 52, right: 48, top: 36, bottom: 48 },
             xAxis: {
                 type: "category",
                 data: labels,
@@ -573,12 +573,42 @@ async function loadFailedTopTable() {
  *
  * @returns {Promise<void>} 卡片加载完成即 resolve（图表失败不影响其返回）
  */
+// 看板全量加载在途标志：防止刷新按钮连续点击导致并发请求
+let _dashboardLoading = false;
+
+/**
+ * 看板全量数据加载：统计卡片 + 四个图表/表格（刷新按钮与首屏共用）
+ *
+ * 在途保护：加载期间禁用刷新按钮，避免连续点击触发并发请求；
+ * 四个图表加载器各自独立 try/catch，任一失败不阻塞其余。
+ *
+ * @returns {Promise<void>} 无返回值
+ */
 async function loadAllDashboardData() {
-    await loadSummary();
-    loadTrendChart();
-    loadModulePieChart();
-    loadPriorityBarChart();
-    loadFailedTopTable();
+    // 在途保护：已在加载中则直接忽略本次点击
+    if (_dashboardLoading) {
+        return;
+    }
+    _dashboardLoading = true;
+    // 刷新按钮禁用 + spinner（与 loadSummary 内部的 setSummaryLoading 互补，
+    // 确保图表加载期间按钮保持禁用态）
+    const refreshBtn = document.getElementById("refreshBtn");
+    if (refreshBtn) {
+        refreshBtn.disabled = true;
+    }
+    try {
+        await loadSummary();
+        loadTrendChart();
+        loadModulePieChart();
+        loadPriorityBarChart();
+        loadFailedTopTable();
+    } finally {
+        // 无论成功失败都释放在途标志并恢复按钮
+        _dashboardLoading = false;
+        if (refreshBtn) {
+            refreshBtn.disabled = false;
+        }
+    }
 }
 
 /**
