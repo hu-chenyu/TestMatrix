@@ -2,7 +2,7 @@
 
 > **基础地址**：`http://host:5000`（本机调试为 `http://127.0.0.1:5000`）
 > **当前版本**：平台版本 v1.0.0，API 版本 v1
-> **文档更新**：2026-10-01（Day41 遗漏修复），对应 5 个蓝图共 21 个 HTTP 接口
+> **文档更新**：2026-10-01（Day41 Dashboard 四图表），对应 5 个蓝图共 22 个 HTTP 接口
 > **鉴权说明**：当前版本无认证，仅内网/本机使用，禁止暴露公网。
 
 本文覆盖 TestMatrix Web 后端全部 HTTP 接口，按蓝图（blueprint）组织：
@@ -1065,7 +1065,72 @@ curl.exe "http://127.0.0.1:5000/api/reports/module-distribution"
 }
 ```
 
-### 5.4 GET /api/reports/failed-top
+### 5.4 GET /api/reports/priority-distribution
+
+优先级执行分布（Day41 新增，Dashboard 优先级堆叠柱数据源）。
+明细表 outerjoin 用例表按优先级聚合；历史明细对应用例已被物理删除时，
+该明细归入 `unknown` 优先级，不丢历史数据。排序固定：
+`P0 → P1 → P2 → P3 → unknown`（其他非标准优先级按名称排在 P3 之后）。
+
+**请求参数**：无。
+
+**请求示例**：
+
+```bash
+curl.exe "http://127.0.0.1:5000/api/reports/priority-distribution"
+```
+
+**成功响应**（200，data 为数组，空表返回 []）：
+
+```json
+{
+  "code": 200,
+  "message": "ok",
+  "data": [
+    {
+      "priority": "P0",
+      "total": 5,
+      "passed": 5,
+      "failed": 0,
+      "error": 0,
+      "skipped": 0,
+      "pass_rate": 1.0
+    },
+    {
+      "priority": "P1",
+      "total": 8,
+      "passed": 6,
+      "failed": 2,
+      "error": 0,
+      "skipped": 0,
+      "pass_rate": 0.75
+    },
+    {
+      "priority": "unknown",
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "error": 0,
+      "skipped": 0,
+      "pass_rate": 0.0
+    }
+  ]
+}
+```
+
+**字段说明**：
+
+| 字段 | 说明 |
+|---|---|
+| priority | 优先级 `P0`/`P1`/`P2`/`P3`；悬空历史为 `unknown` |
+| total | 该优先级全部明细数 |
+| passed/failed/error/skipped | 各结果计数 |
+| pass_rate | passed/total，保留 4 位小数；total 为 0 时为 0.0 |
+
+缓存：固定 key `tm:reports:priority_distribution`，空列表同样缓存防穿透，
+批次终态后随 `tm:reports:` 前缀统一失效。
+
+### 5.5 GET /api/reports/failed-top
 
 失败用例 Top 榜：统计 result 为 failed/error 的明细，按 case_id 聚合计数，
 返回失败次数最多的 N 条，并携带最近一次失败时间与错误信息。
@@ -1111,7 +1176,7 @@ curl.exe "http://127.0.0.1:5000/api/reports/failed-top?limit=10"
 **错误响应**（400）：limit 非整数返回 `limit必须为正整数`，
 越界返回 `limit必须在1到100之间`。
 
-### 5.5 GET /api/reports/quality-metrics
+### 5.6 GET /api/reports/quality-metrics
 
 质量度量指标，全部来自平台现有三张表数据，空库各指标返回 0.0；
 code_coverage 为预留契约字段，当前恒为 null。

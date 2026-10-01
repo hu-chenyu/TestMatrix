@@ -8,6 +8,8 @@
       复用ReportRepository.get_trend_data）
     - GET /api/reports/module-distribution  模块执行分布（前端饼图，
       悬空历史明细归unknown模块）
+    - GET /api/reports/priority-distribution 优先级执行分布（Day41
+      前端堆叠柱，P0-P3+unknown，悬空历史归unknown）
     - GET /api/reports/failed-top           失败用例Top榜（失败次数聚合
       +最近一次失败堆栈）
     - GET /api/reports/quality-metrics      质量度量（用例执行覆盖率/
@@ -23,9 +25,12 @@
     - 纯GET查询接口，无请求体，不引入marshmallow校验
 """
 
+from typing import Any
+
 from flask import Blueprint, request
 
 from src.core.cache import (
+    REPORTS_PREFIX,
     cache_client,
     reports_failed_top_key,
     reports_module_distribution_key,
@@ -178,6 +183,41 @@ def report_module_distribution():
         return success(data=cached_data)
 
     data = ReportRepository.get_module_distribution()
+    cache_client.set_json(cache_key, data)
+    return success(data=data)
+
+
+@reports_bp.route("/priority-distribution")
+def report_priority_distribution() -> tuple[dict[str, Any], int]:
+    """
+    优先级执行分布接口（Day41 前端优先级堆叠柱数据源）
+
+    明细outerjoin用例表按优先级聚合，悬空历史明细（用例已物理删除）
+    归"unknown"不丢失；排序P0→P1→P2→P3→unknown。
+
+    参数:
+        无
+
+    返回:
+        tuple[dict, int]: (统一响应体, 200)，data为优先级分布列表:
+            [{"priority", "total", "passed", "failed", "error",
+              "skipped", "pass_rate"}]；空表返回[]
+
+    缓存（Day41）:
+        固定key tm:reports:priority_distribution（复用cache模块
+        REPORTS_PREFIX前缀常量在路由内构造；当日cache.py不在改动
+        白名单内，未新增key构造函数），空列表同样缓存防穿透；
+        批次终态后由invalidate_reports前缀SCAN统一失效。
+
+    异常:
+        无业务异常（数据库异常由全局处理器兜底500）
+    """
+    cache_key = f"{REPORTS_PREFIX}priority_distribution"
+    cached_data = cache_client.get_json(cache_key)
+    if cached_data is not None:
+        return success(data=cached_data)
+
+    data = ReportRepository.get_priority_distribution()
     cache_client.set_json(cache_key, data)
     return success(data=data)
 

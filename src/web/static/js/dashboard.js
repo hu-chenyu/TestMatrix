@@ -1,12 +1,16 @@
 /* ==========================================================================
-   TestMatrix 质量看板业务脚本（Day36 框架 + Day37 统计卡片渲染）
+   TestMatrix 质量看板业务脚本（Day36 框架 + Day37 统计卡片 + Day41 四图表）
    Day37 能力：
      - loadSummary 成功后串联 loadCaseTotal（用例总数走 cases 列表 total）
        与 renderStatCards（渲染 4 个卡片真实数值 + 语义着色）；
      - 用例总数接口失败不阻塞其他卡片（该卡片降级 “--” + toast 轻提示）。
-   边界（不提前实现后续天数功能）：
-     - 三个图表仅初始化并显示“暂无数据”空态（三图 Day41）；
-     - 失败 Top 表保持 HTML 空态行（Day41 填充）。
+   Day41 能力：
+     - loadTrendChart/loadModulePieChart/loadPriorityBarChart 对接三个
+       reports 接口渲染真实 ECharts（趋势面积折线/模块环形饼图/优先级
+       堆叠柱），loadFailedTopTable 填充失败 Top 榜；
+     - 四个加载器各自独立 try/catch + toast 降级，单个接口失败不阻塞
+       其余三个；空数据统一走 chart-helper 空态/表格占位行；
+     - loadAllDashboardData 串联卡片+四图表，刷新按钮与首屏共用。
    三态约定：loading（按钮 spinner + aria-busy）/ error（alert + toast）/
             empty（chart-helper 空态 + 表格“暂无数据”行）。
    说明：/health 不在 /api 前缀下，api.js 会自动拼 /api，
@@ -250,14 +254,335 @@ function initDashboardCharts() {
     // 三个容器 id 与 dashboard.html 逐一对应
     const chartIds = ["trendChart", "modulePieChart", "priorityBarChart"];
     chartIds.forEach(function (chartId) {
-        // initChart 幂等；拿到实例后立即绘制空态
+        // initChart 幂等；拿到实例后立即绘制空态（Day41 数据返回后被 setOption 替换）
         const chart = window.chartHelper.initChart(chartId);
         window.chartHelper.renderChartEmpty(chart);
     });
 }
 
+/* ==========================================================================
+   Day41 四个图表/表格加载器
+   约定：每个加载器独立 try/catch——接口失败 toast 轻提示并保持空态，
+   互不阻塞；空列表走 renderChartEmpty/表格占位行，不画空坐标轴。
+   ========================================================================== */
+
 /**
- * 看板页面初始化：健康检查 + 图表空态 + 刷新绑定 + 首次汇总加载
+ * 把批次 created_at（ISO，如 2026-09-20T10:30:46）格式化为 MM-DD HH:mm
+ *
+ * @param {string} isoTime 后端 created_at ISO 字符串
+ * @returns {string} 横轴短标签；异常/空值返回 "--"
+ */
+function formatBatchLabel(isoTime) {
+    if (typeof isoTime !== "string" || isoTime.length < 16) {
+        return "--";
+    }
+    // ISO 固定位切片：[5:10]=MM-DD，[11:16]=HH:mm，零日期库依赖
+    return isoTime.slice(5, 10) + " " + isoTime.slice(11, 16);
+}
+
+/**
+ * 加载通过率趋势折线图（GET /reports/trend?limit=20，时间升序）
+ *
+ * @returns {Promise<void>} 无返回值；失败 toast 并保持空态
+ */
+async function loadTrendChart() {
+    const chart = window.chartHelper.initChart("trendChart");
+    if (!chart) {
+        return;
+    }
+    try {
+        const rows = await window.api.get("/reports/trend?limit=20");
+        if (!Array.isArray(rows) || rows.length === 0) {
+            window.chartHelper.renderChartEmpty(chart, "暂无执行趋势");
+            return;
+        }
+        // 时间升序（后端契约）直接作为横轴；tooltip 闭包持有整行数据
+        const labels = rows.map(function (row) {
+            return formatBatchLabel(row.created_at);
+        });
+        const rates = rows.map(function (row) {
+            return (Number(row.pass_rate) || 0) * 100;
+        });
+        chart.setOption({
+            color: [TM_CHART_COLORS[0]],
+            tooltip: {
+                trigger: "axis",
+                formatter: function (params) {
+                    const idx = params[0].dataIndex;
+                    const row = rows[idx];
+                    const ratePct = (Number(row.pass_rate) * 100).toFixed(1);
+                    return (
+                        "<div style='max-width:260px;word-break:break-all'>" +
+                        "批次：" + row.execution_id + "<br>" +
+                        "通过：" + row.passed + " / 失败：" + row.failed +
+                        " / 异常：" + row.error + "<br>" +
+                        "通过率：<b>" + ratePct + "%</b></div>"
+                    );
+                },
+            },
+            grid: { left: 52, right: 24, top: 36, bottom: 48 },
+            xAxis: {
+                type: "category",
+                data: labels,
+                boundaryGap: false,
+                axisLabel: { fontSize: 11 },
+            },
+            yAxis: {
+                type: "value",
+                min: 0,
+                max: 100,
+                axisLabel: { formatter: "{value}%" },
+            },
+            series: [
+                {
+                    name: "通过率",
+                    type: "line",
+                    smooth: true,
+                    data: rates,
+                    symbolSize: 7,
+                    lineStyle: { width: 2 },
+                    label: {
+                        show: true,
+                        position: "top",
+                        formatter: function (p) {
+                            return p.value.toFixed(1) + "%";
+                        },
+                    },
+                    // 面积渐变：主色蓝自上而下淡化，增强趋势可读性
+                    areaStyle: {
+                        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                            { offset: 0, color: "rgba(13,110,253,0.35)" },
+                            { offset: 1, color: "rgba(13,110,253,0.03)" },
+                        ]),
+                    },
+                },
+            ],
+            // notMerge=true：全量替换空态 option，避免空态 graphic"暂无数据"
+            // 元素经默认合并模式残留叠加在真实图表上
+        }, true);
+    } catch (error) {
+        window.chartHelper.renderChartEmpty(chart, "暂无执行趋势");
+        showToast("通过率趋势加载失败：" + error.message, "warning");
+    }
+}
+
+/**
+ * 加载模块分布环形饼图（GET /reports/module-distribution）
+ *
+ * @returns {Promise<void>} 无返回值；失败 toast 并保持空态
+ */
+async function loadModulePieChart() {
+    const chart = window.chartHelper.initChart("modulePieChart");
+    if (!chart) {
+        return;
+    }
+    try {
+        const rows = await window.api.get("/reports/module-distribution");
+        if (!Array.isArray(rows) || rows.length === 0) {
+            window.chartHelper.renderChartEmpty(chart, "暂无模块数据");
+            return;
+        }
+        chart.setOption({
+            color: TM_CHART_COLORS,
+            tooltip: {
+                trigger: "item",
+                formatter: function (param) {
+                    const row = param.data._row;
+                    const ratePct = (Number(row.pass_rate) * 100).toFixed(1);
+                    return (
+                        row.module + "<br>总数：" + row.total +
+                        " / 通过：" + row.passed +
+                        " / 失败：" + row.failed +
+                        " / 异常：" + row.error +
+                        "<br>通过率：<b>" + ratePct + "%</b>"
+                    );
+                },
+            },
+            legend: { bottom: 0, type: "scroll" },
+            series: [
+                {
+                    name: "模块分布",
+                    type: "pie",
+                    radius: ["38%", "62%"],
+                    center: ["50%", "46%"],
+                    // 原始行挂到 _row（下划线字段不参与渲染），tooltip 取明细
+                    data: rows.map(function (row) {
+                        return { name: row.module, value: row.total, _row: row };
+                    }),
+                    label: {
+                        formatter: "{b}\n{d}%",
+                        fontSize: 11,
+                    },
+                },
+            ],
+            // notMerge=true：移除空态 graphic，避免"暂无数据"叠加
+        }, true);
+    } catch (error) {
+        window.chartHelper.renderChartEmpty(chart, "暂无模块数据");
+        showToast("模块分布加载失败：" + error.message, "warning");
+    }
+}
+
+/**
+ * 加载优先级分布堆叠柱状图（GET /reports/priority-distribution，Day41 新接口）
+ *
+ * @returns {Promise<void>} 无返回值；失败 toast 并保持空态
+ */
+async function loadPriorityBarChart() {
+    const chart = window.chartHelper.initChart("priorityBarChart");
+    if (!chart) {
+        return;
+    }
+    try {
+        const rows = await window.api.get("/reports/priority-distribution");
+        if (!Array.isArray(rows) || rows.length === 0) {
+            window.chartHelper.renderChartEmpty(chart, "暂无优先级数据");
+            return;
+        }
+        // 堆叠分段固定顺序与语义色：通过绿/失败红/异常橙/跳过黄
+        const segments = [
+            { key: "passed", label: "通过", color: TM_CHART_COLORS[1] },
+            { key: "failed", label: "失败", color: TM_CHART_COLORS[3] },
+            { key: "error", label: "异常", color: TM_CHART_COLORS[6] },
+            { key: "skipped", label: "跳过", color: TM_CHART_COLORS[2] },
+        ];
+        chart.setOption({
+            tooltip: {
+                trigger: "axis",
+                axisPointer: { type: "shadow" },
+            },
+            legend: { top: 0, data: segments.map(function (s) { return s.label; }) },
+            grid: { left: 48, right: 16, top: 36, bottom: 36 },
+            xAxis: {
+                type: "category",
+                data: rows.map(function (row) { return row.priority; }),
+            },
+            yAxis: { type: "value", minInterval: 1 },
+            series: segments.map(function (seg) {
+                return {
+                    name: seg.label,
+                    type: "bar",
+                    stack: "total",
+                    itemStyle: { color: seg.color },
+                    barMaxWidth: 48,
+                    data: rows.map(function (row) { return row[seg.key]; }),
+                };
+            }),
+            // notMerge=true：移除空态 graphic，避免"暂无数据"叠加
+        }, true);
+    } catch (error) {
+        window.chartHelper.renderChartEmpty(chart, "暂无优先级数据");
+        showToast("优先级分布加载失败：" + error.message, "warning");
+    }
+}
+
+/**
+ * 渲染失败用例 Top 榜表格行（DOM API 构造，textContent 天然防注入）
+ *
+ * @param {Array<object>} items /reports/failed-top 返回列表
+ * @returns {void}
+ */
+function renderFailedTopRows(items) {
+    const tbody = document.getElementById("failedTopTableBody");
+    if (!tbody) {
+        return;
+    }
+    // 每次渲染前清空（刷新场景移除上一批真实行/占位行）
+    tbody.innerHTML = "";
+
+    if (!Array.isArray(items) || items.length === 0) {
+        // 空态：恢复 4 列占位行（列数与表头一致，module 列已按方案A移除）
+        const emptyTr = document.createElement("tr");
+        emptyTr.id = "failedTopEmpty";
+        const emptyTd = document.createElement("td");
+        emptyTd.colSpan = 4;
+        emptyTd.className = "text-center text-muted py-4";
+        emptyTd.textContent = "暂无数据";
+        const emptyIcon = document.createElement("i");
+        emptyIcon.className = "bi bi-inbox me-1";
+        emptyTd.insertBefore(emptyIcon, emptyTd.firstChild);
+        emptyTr.appendChild(emptyTd);
+        tbody.appendChild(emptyTr);
+        return;
+    }
+
+    items.forEach(function (item) {
+        const tr = document.createElement("tr");
+        // 失败堆栈作为整行悬浮提示，不占列宽
+        if (item.last_error_message) {
+            tr.title = item.last_error_message;
+        }
+
+        // 用例编号
+        const tdId = document.createElement("td");
+        tdId.className = "fw-semibold text-nowrap";
+        tdId.textContent = item.case_id;
+        tr.appendChild(tdId);
+
+        // 用例名称
+        const tdName = document.createElement("td");
+        tdName.textContent = item.case_name || "";
+        tr.appendChild(tdName);
+
+        // 失败次数（右对齐 + 红色 badge，>0 恒为警示色）
+        const tdCount = document.createElement("td");
+        tdCount.className = "text-end";
+        const badge = document.createElement("span");
+        badge.className = "badge text-bg-danger";
+        badge.textContent = String(item.fail_count);
+        tdCount.appendChild(badge);
+        tr.appendChild(tdCount);
+
+        // 最近失败时间（formatDate 由 main.js 提供；异常值原样展示）
+        const tdTime = document.createElement("td");
+        tdTime.className = "text-nowrap";
+        try {
+            tdTime.textContent = item.last_failed_at
+                ? formatDate(item.last_failed_at)
+                : "--";
+        } catch (formatError) {
+            tdTime.textContent = item.last_failed_at || "--";
+        }
+        tr.appendChild(tdTime);
+
+        tbody.appendChild(tr);
+    });
+}
+
+/**
+ * 加载失败用例 Top 榜（GET /reports/failed-top?limit=10）
+ *
+ * @returns {Promise<void>} 无返回值；失败 toast 并保持空态
+ */
+async function loadFailedTopTable() {
+    try {
+        const rows = await window.api.get("/reports/failed-top?limit=10");
+        renderFailedTopRows(Array.isArray(rows) ? rows : []);
+    } catch (error) {
+        // 失败保持“暂无数据”占位行（renderFailedTopRows 已在首屏初始化）
+        renderFailedTopRows([]);
+        showToast("失败 Top 榜加载失败：" + error.message, "warning");
+    }
+}
+
+/**
+ * 加载看板全部数据（统计卡片 + 四图表/表格）
+ *
+ * 卡片 await 保证 loading/error 三态完整；四个图表加载器互不依赖，
+ * 不 await 并行发出，各自内部独立降级。
+ *
+ * @returns {Promise<void>} 卡片加载完成即 resolve（图表失败不影响其返回）
+ */
+async function loadAllDashboardData() {
+    await loadSummary();
+    loadTrendChart();
+    loadModulePieChart();
+    loadPriorityBarChart();
+    loadFailedTopTable();
+}
+
+/**
+ * 看板页面初始化：健康检查 + 图表空态 + 刷新绑定 + 首屏全量加载
  *
  * @returns {void}
  */
@@ -265,17 +590,19 @@ function initDashboard() {
     // 1. 先刷新导航栏健康状态（独立链路，失败不影响统计）
     loadHealthStatus();
 
-    // 2. 初始化三个图表并显示空态（Day41 在此基础上 setOption 真实数据）
+    // 2. 初始化三个图表并显示空态（数据返回后 setOption 替换空态）
     initDashboardCharts();
 
-    // 3. 刷新按钮绑定重新加载汇总
+    // 3. 失败 Top 表首屏占位行已在 HTML 中（id=failedTopEmpty），加载后替换
+
+    // 4. 刷新按钮绑定：统计卡片 + 四个图表/表格统一刷新
     const refreshBtn = document.getElementById("refreshBtn");
     if (refreshBtn) {
-        refreshBtn.addEventListener("click", loadSummary);
+        refreshBtn.addEventListener("click", loadAllDashboardData);
     }
 
-    // 4. 首次加载汇总（loading/error/empty 三态由 loadSummary 内部处理）
-    loadSummary();
+    // 5. 首屏全量加载（loading/error/empty 三态由各加载器内部处理）
+    loadAllDashboardData();
 }
 
 // DOM 就绪后执行初始化（脚本位于 body 底部 extra_js，双保险无时序问题）
@@ -284,6 +611,12 @@ document.addEventListener("DOMContentLoaded", initDashboard);
 // 显式导出，便于测试控制台联调与后续天数脚本复用
 window.dashboardPage = {
     loadSummary: loadSummary,
+    loadAllDashboardData: loadAllDashboardData,
+    loadTrendChart: loadTrendChart,
+    loadModulePieChart: loadModulePieChart,
+    loadPriorityBarChart: loadPriorityBarChart,
+    loadFailedTopTable: loadFailedTopTable,
+    renderFailedTopRows: renderFailedTopRows,
     loadCaseTotal: loadCaseTotal,
     renderStatCards: renderStatCards,
     loadHealthStatus: loadHealthStatus,

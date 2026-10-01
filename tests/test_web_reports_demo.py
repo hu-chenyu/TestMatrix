@@ -12,13 +12,17 @@ TestMatrix Day23: 报告统计与质量度量API测试
     模块分布:
         6. test_module_distribution         分组计数/通过率/total降序排序
         7. test_module_distribution_orphan  悬空明细归unknown不被丢弃
+    优先级分布（Day41）:
+        8. test_priority_distribution_empty    无批次返回空列表
+        9. test_priority_distribution_grouping P0/P1分组计数与固定排序
+        10. test_priority_distribution_orphan  悬空明细归unknown且排末位
     失败Top:
-        8. test_failed_top_success          榜首计数与最近失败堆栈原样透传
-        9. test_failed_top_limit            limit只返回Top N条
-        10. test_failed_top_empty           无失败返回空列表
+        11. test_failed_top_success          榜首计数与最近失败堆栈原样透传
+        12. test_failed_top_limit            limit只返回Top N条
+        13. test_failed_top_empty            无失败返回空列表
     质量度量:
-        11. test_quality_metrics_success    三组口径与手算一致
-        12. test_quality_metrics_empty      空库全零且子结构齐全
+        14. test_quality_metrics_success    三组口径与手算一致
+        15. test_quality_metrics_empty      空库全零且子结构齐全
 
 测试基建:
     临时SQLite文件库（tmp_path + 前后DatabaseSession.reset()防
@@ -376,6 +380,84 @@ class TestReportsApi:
         )
         assert unknown["total"] == 1, "悬空明细应完整计数"
         assert unknown["passed"] == 1
+
+    # ------------------------------------------------------------------
+    # 优先级执行分布（Day41）
+    # ------------------------------------------------------------------
+    def test_priority_distribution_empty(
+        self, reports_client: FlaskClient
+    ) -> None:
+        """无执行批次时优先级分布返回200空列表（空库安全降级）。"""
+        response = reports_client.get("/api/reports/priority-distribution")
+        data = response.get_json()
+
+        assert response.status_code == 200
+        assert data["data"] == []
+
+    def test_priority_distribution_grouping(
+        self, reports_client: FlaskClient
+    ) -> None:
+        """
+        优先级分组: 补造1条P0用例，批次内P0通过1条、种子P1失败1条，
+        返回顺序P0→P1，分组计数与通过率正确
+        """
+        # fixture 种子全为P1，补造一条P0用例验证跨优先级聚合
+        with DatabaseSession.session_scope() as session:
+            session.add(
+                models.TestCase(
+                    case_id="TM-HP-0001",
+                    name="高优先级冒烟校验",
+                    module="用户中心",
+                    priority="P0",
+                    case_type="api",
+                    status="active",
+                    description="优先级分布API测试P0种子",
+                )
+            )
+
+        _create_finished_batch([
+            ("TM-HP-0001", "高优先级冒烟校验", "passed", None, 0.5),
+            ("TM-UC-0001", "用户登录成功校验", "failed", FAILED_STACK, 0.5),
+        ])
+
+        response = reports_client.get("/api/reports/priority-distribution")
+        data = response.get_json()
+
+        assert response.status_code == 200
+        distribution = data["data"]
+        assert [item["priority"] for item in distribution] == ["P0", "P1"]
+
+        p0 = distribution[0]
+        assert p0["total"] == 1 and p0["passed"] == 1
+        assert p0["pass_rate"] == 1.0
+
+        p1 = distribution[1]
+        assert p1["total"] == 1, "种子P1明细应为1条"
+        assert p1["failed"] == 1
+        assert p1["pass_rate"] == 0.0
+
+    def test_priority_distribution_orphan(
+        self, reports_client: FlaskClient
+    ) -> None:
+        """悬空明细（幽灵用例）归unknown优先级且恒排末位。"""
+        _create_finished_batch([
+            ("TM-UC-0001", "用户登录成功校验", "passed", None, 0.5),
+            ("TM-GHOST-PRI", "已删除的幽灵用例", "failed", FAILED_STACK, 0.5),
+        ])
+
+        response = reports_client.get("/api/reports/priority-distribution")
+        data = response.get_json()
+
+        assert response.status_code == 200
+        distribution = data["data"]
+        priorities = [item["priority"] for item in distribution]
+        assert "unknown" in priorities, "悬空明细应归unknown不被丢弃"
+        assert priorities[-1] == "unknown", "unknown 恒为末位"
+
+        unknown = next(
+            item for item in distribution if item["priority"] == "unknown"
+        )
+        assert unknown["total"] == 1 and unknown["failed"] == 1
 
     # ------------------------------------------------------------------
     # 失败用例Top榜

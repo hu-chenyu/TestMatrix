@@ -1,7 +1,7 @@
-{# 质量看板页面（Day36 框架 + Day37 统计卡片渲染）
-   Day37：4 个统计卡片渲染真实数值（用例总数取 cases 列表 total，
-   其余三项取 summary）；趋势折线/饼图/柱状/失败Top（Day41）
-   仍保持“暂无数据”空态，本日不提前实现。 #}
+{# 质量看板页面（Day36 框架 + Day37 统计卡片 + Day41 四图表上线）
+   Day41：趋势折线/模块饼图/优先级堆叠柱对接 reports 接口渲染真实数据，
+   失败 Top 榜 tbody 由 dashboard.js 填充；failed-top 接口不返回 module，
+   表头按方案A为四列（用例编号/名称/失败次数/最近失败时间）。 #}
 {% extends "base.html" %}
 
 {% block title %}质量看板 - TestMatrix{% endblock %}
@@ -132,7 +132,7 @@
     </div>
 </div>
 
-<!-- ========== 4. 失败用例 Top 榜（Day41 填充 tbody，本日为空态占位行） ========== -->
+<!-- ========== 4. 失败用例 Top 榜（Day41：tbody 由 dashboard.js 真实填充） ========== -->
 <div class="row g-3 mb-3">
     <div class="col-12">
         <div class="card">
@@ -145,15 +145,15 @@
                         <tr>
                             <th>用例编号</th>
                             <th>用例名称</th>
-                            <th>所属模块</th>
                             <th class="text-end">失败次数</th>
                             <th>最近失败时间</th>
                         </tr>
                     </thead>
-                    <!-- empty 态占位行：Day41 拿到数据后移除本行再渲染真实行 -->
+                    <!-- empty 态占位行：Day41 拿到数据后由 JS 移除本行再渲染真实行；
+                         失败堆栈通过行 title 悬浮展示，不占列 -->
                     <tbody id="failedTopTableBody">
                         <tr id="failedTopEmpty">
-                            <td colspan="5" class="text-center text-muted py-4">
+                            <td colspan="4" class="text-center text-muted py-4">
                                 <i class="bi bi-inbox me-1"></i>暂无数据
                             </td>
                         </tr>

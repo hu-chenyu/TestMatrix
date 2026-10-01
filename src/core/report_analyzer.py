@@ -1312,6 +1312,123 @@ class ReportRepository:
         return distribution
 
     @staticmethod
+    def get_priority_distribution() -> list[dict[str, Any]]:
+        """
+        优先级执行分布（Dashboard优先级堆叠柱数据源）
+
+        与 get_module_distribution 同构: test_executions LEFT OUTER JOIN
+        test_cases（两表case_id相等）后按 priority + result 分组计数，
+        Python层透视为每优先级一条汇总。悬空历史明细（用例已物理删除）
+        的priority为None，归"unknown"（inner join会丢历史数据）。
+
+        参数:
+            无
+
+        返回:
+            List[Dict[str, Any]]: 每优先级一条，字段:
+                {"priority", "total", "passed", "failed", "error",
+                 "skipped", "pass_rate"}（pass_rate=passed/total，
+                round 4位，total为0时0.0）；排序: P0→P1→P2→P3→unknown，
+                其他非标准优先级按名称排在P3之后、unknown之前；
+                空表返回[]
+
+        异常:
+            sqlalchemy.exc.SQLAlchemyError: 数据库异常时记录error日志后
+                                            原样上抛（不吞异常）
+        """
+        # 延迟导入: 规避core与db模块循环依赖
+        from sqlalchemy import func
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from src.db.db_session import DatabaseSession
+        from src.db.models import TestCase, TestExecution
+
+        try:
+            session = DatabaseSession.get_session()
+            try:
+                # outerjoin保证悬空明细不丢（priority为None）
+                rows = (
+                    session.query(
+                        TestCase.priority,
+                        TestExecution.result,
+                        func.count(TestExecution.id),
+                    )
+                    .outerjoin(
+                        TestCase, TestExecution.case_id == TestCase.case_id
+                    )
+                    .group_by(TestCase.priority, TestExecution.result)
+                    .all()
+                )
+            finally:
+                session.close()
+        except SQLAlchemyError as exc:
+            logger.error(f"优先级分布聚合查询数据库异常 | {exc}")
+            raise
+
+        if not rows:
+            return []
+
+        # pivot: (priority, result, count) -> 每优先级一条全结果计数
+        valid_results = ("passed", "failed", "error", "skipped")
+        buckets: dict[str, dict[str, Any]] = {}
+        for priority, result, count in rows:
+            # 悬空明细priority为None/空串时归unknown（不丢历史数据）
+            priority_name = priority if priority else UNKNOWN_LABEL
+            bucket = buckets.setdefault(
+                priority_name,
+                {
+                    "priority": priority_name,
+                    "total": 0,
+                    "passed": 0,
+                    "failed": 0,
+                    "error": 0,
+                    "skipped": 0,
+                },
+            )
+            bucket["total"] += count
+            if result in valid_results:
+                bucket[result] += count
+
+        # 补pass_rate
+        distribution: list[dict[str, Any]] = []
+        for bucket in buckets.values():
+            total = bucket["total"]
+            bucket["pass_rate"] = (
+                round(bucket["passed"] / total, 4) if total else 0.0
+            )
+            distribution.append(bucket)
+
+        # 排序: P0→P1→P2→P3 固定次序，非标准优先级按名称居后，
+        # unknown 恒为末位（前端堆叠柱 P0-P3-unknown 固定横轴）
+        standard_order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+        def _priority_sort_key(item: dict[str, Any]) -> tuple[int, str]:
+            """
+            优先级排序键（内部函数）
+
+            参数:
+                item (dict): 优先级分布行
+
+            返回:
+                tuple[int, str]: (组序, 名称)；标准P0-P3组序0-3，
+                    其他非空优先级组序50按名称排，unknown组序99恒末位
+            """
+            name = str(item["priority"])
+            if name == UNKNOWN_LABEL:
+                return (99, name)
+            if name in standard_order:
+                return (standard_order[name], name)
+            return (50, name)
+
+        distribution.sort(key=_priority_sort_key)
+
+        logger.info(
+            f"优先级分布聚合完成 | 优先级数: {len(distribution)} | "
+            f"明细分布: {[(item['priority'], item['total']) for item in distribution]}"
+        )
+        return distribution
+
+    @staticmethod
     def get_failed_top(limit: int = 10) -> list[dict[str, Any]]:
         """
         失败用例Top榜（Web失败Top数据源）
