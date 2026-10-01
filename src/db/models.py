@@ -350,3 +350,55 @@ class NotificationDeadLetter(Base):
             f"NotificationDeadLetter(id={self.id}, channel={self.channel!r}, "
             f"execution_id={self.execution_id!r}, attempts={self.attempts})"
         )
+
+
+class NotificationHistory(Base):
+    """
+    通知历史表（notification_history）
+
+    记录每一条实际发送尝试的最终结果（成功/进入死信），用于回溯
+    "哪天给哪个批次发过什么、成没成功"。与只记"重试耗尽"的死信表互补：
+    死信表存完整消息体供重发，历史表存一行一条结果供列表查询。
+
+    渠道未启用（配置性跳过）不写历史——它不是一次真实发送尝试。
+
+    表字段说明:
+        id            自增主键
+        channel       通知渠道: email / wechat
+        execution_id  关联执行批次号（CLI 直发等无批次场景为空串）
+        status        发送结果: success=发送成功 / dead_letter=重试耗尽进死信
+        subject       通知标题/摘要（截断256，便于列表展示，不存全文）
+        attempts      实际尝试次数（成功通常为1，进死信为 1+重试次数）
+        error_message 失败原因（dead_letter 时记录，成功为空串）
+        created_at    落库时间（数据库时间自动填充）
+    """
+
+    __tablename__ = "notification_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, comment="自增主键")
+    channel: Mapped[str] = mapped_column(String(16), nullable=False, comment="通知渠道email/wechat")
+    execution_id: Mapped[str] = mapped_column(String(64), nullable=False, default="", index=True, comment="执行批次号（无批次为空串）")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, comment="结果success/dead_letter")
+    subject: Mapped[str] = mapped_column(String(256), nullable=False, default="", comment="通知标题/摘要")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1, comment="实际尝试次数")
+    error_message: Mapped[str] = mapped_column(Text, nullable=False, default="", comment="失败原因（成功为空）")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), index=True, comment="落库时间"
+    )
+
+    __table_args__ = (
+        Index("idx_nh_channel_status", "channel", "status"),
+        {"comment": "通知发送历史（成功+死信，渠道未启用不记录）"},
+    )
+
+    def __repr__(self) -> str:
+        """
+        模型可读化表示（调试与日志打印用）
+
+        返回:
+            str: 形如 NotificationHistory(id=1, channel='wechat', status='success')
+        """
+        return (
+            f"NotificationHistory(id={self.id}, channel={self.channel!r}, "
+            f"status={self.status!r}, execution_id={self.execution_id!r})"
+        )

@@ -44,6 +44,9 @@ if TYPE_CHECKING:
     # 放 TYPE_CHECKING 块避免运行期导入（两模块无循环依赖，但无需运行期引用）。
     from src.core.report_analyzer import FailedCaseDetail, StatisticsResult
 
+    # NotificationHistory 仅用于 _to_dict 入参注解；运行期仍走函数内延迟导入
+    from src.db.models import NotificationHistory
+
 logger = LogManager.get_logger()
 
 # SMTP连接超时（秒）: 防止网络不通时主流程卡死
@@ -1272,6 +1275,7 @@ class NotificationRouter:
         base_delay: float | None = None,
         use_jitter: bool | None = None,
         dead_letter_repo=None,
+        history_repo=None,
         sleeper=None,
     ):
         """
@@ -1342,6 +1346,11 @@ class NotificationRouter:
         self.dead_letter_repo = (
             dead_letter_repo if dead_letter_repo is not None
             else NotificationDeadLetterRepository()
+        )
+        # 通知历史仓储: 默认 NotificationHistoryRepository，测试可注入 fake
+        self.history_repo = (
+            history_repo if history_repo is not None
+            else NotificationHistoryRepository()
         )
         self.sleeper = sleeper if sleeper is not None else time.sleep
 
@@ -1474,12 +1483,17 @@ class NotificationRouter:
                 )
                 results[channel] = success
                 if success:
+                    # 成功发送写历史（success），供发送记录列表回溯
+                    self._save_history(
+                        notifications[channel], channel,
+                        status="success", attempts=attempts,
+                    )
                     logger.debug(
                         f"渠道通知完成 | 渠道: {channel} | 尝试: {attempts}次 | "
                         f"批次: {execution_id}"
                     )
                 elif fail_reason != "渠道未启用":
-                    # 配置性跳过（未启用）不是发送失败，不写死信
+                    # 配置性跳过（未启用）不是发送失败，不写死信也不写历史
                     logger.warning(
                         f"渠道通知重试耗尽 | 渠道: {channel} | "
                         f"尝试: {attempts}次 | 原因: {fail_reason} | "
@@ -1488,6 +1502,12 @@ class NotificationRouter:
                     self._save_dead_letter(
                         notifications[channel], channel,
                         fail_reason, attempts,
+                    )
+                    # 重试耗尽进死信，同步写一条 dead_letter 历史
+                    self._save_history(
+                        notifications[channel], channel,
+                        status="dead_letter", attempts=attempts,
+                        error_message=fail_reason,
                     )
                 else:
                     logger.debug(
@@ -1607,6 +1627,46 @@ class NotificationRouter:
         except Exception as exc:
             logger.error(
                 f"死信入库失败（已忽略，不影响主流程） | 渠道: {channel} | "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    def _save_history(
+        self,
+        notification: Notification,
+        channel: str,
+        status: str,
+        attempts: int,
+        error_message: str = "",
+    ) -> None:
+        """
+        写入一条通知发送历史（成功/进死信均记录，旁路不阻断主流程）。
+
+        与 _save_dead_letter 的分工: 死信表存完整消息体供人工重发，
+        历史表只存一行结果供"哪天发过什么/成没成"列表查询。
+        渠道未启用（配置性跳过）在调用方就不进入本方法。
+
+        参数:
+            notification (Notification): 通知消息（取批次号/标题）
+            channel (str): 渠道名
+            status (str): success / dead_letter
+            attempts (int): 实际尝试次数
+            error_message (str): 失败原因（成功传空串）
+
+        返回:
+            无（仓储异常仅记 error 日志，绝不向上抛）
+        """
+        try:
+            self.history_repo.save_history(
+                channel=channel,
+                execution_id=notification.execution_id or "",
+                status=status,
+                subject=notification.title,
+                attempts=attempts,
+                error_message=error_message,
+            )
+        except Exception as exc:
+            logger.error(
+                f"通知历史入库失败（已忽略，不影响主流程） | 渠道: {channel} | "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -1892,6 +1952,135 @@ class NotificationDeadLetterRepository:
             "fail_reason": record.fail_reason,
             "attempts": record.attempts,
             "status": record.status,
+            "created_at": record.created_at.isoformat()
+            if record.created_at
+            else "",
+        }
+
+
+class NotificationHistoryRepository:
+    """
+    通知历史数据仓储
+
+    记录每一条真实发送尝试的最终结果（成功/进死信），支持分页与
+    渠道/状态/批次号筛选，供 GET /api/notifications/history 使用。
+    与死信仓储一致采用函数内延迟导入，规避 core→db 循环依赖。
+    """
+
+    SUBJECT_MAX_LEN = 256
+    REASON_MAX_LEN = 1000
+
+    def save_history(
+        self,
+        channel: str,
+        execution_id: str,
+        status: str,
+        subject: str,
+        attempts: int,
+        error_message: str = "",
+    ) -> int:
+        """
+        写入一条通知历史记录
+
+        参数:
+            channel (str): 渠道名（email/wechat）
+            execution_id (str): 执行批次号（无批次为空串）
+            status (str): success / dead_letter
+            subject (str): 通知标题/摘要（超长截断256）
+            attempts (int): 实际尝试次数
+            error_message (str): 失败原因（成功为空，超长截断1000）
+
+        返回:
+            int: 自增主键 id
+
+        异常:
+            sqlalchemy.exc.SQLAlchemyError: 数据库异常向上抛出，
+                由 Router._save_history 捕获消化（旁路不阻断主流程）
+        """
+        from src.db.db_session import DatabaseSession
+        from src.db.models import NotificationHistory
+
+        record = NotificationHistory(
+            channel=channel,
+            execution_id=execution_id or "",
+            status=status,
+            subject=(subject or "")[: self.SUBJECT_MAX_LEN],
+            attempts=attempts,
+            error_message=(error_message or "")[: self.REASON_MAX_LEN],
+        )
+        with DatabaseSession.session_scope() as session:
+            session.add(record)
+            session.flush()
+            return record.id
+
+    def list_history(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        channel: str | None = None,
+        status: str | None = None,
+        execution_id: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """
+        分页查询通知历史（按 created_at 倒序、id 倒序兜底）
+
+        参数:
+            page (int): 页码，从 1 起
+            page_size (int): 每页条数
+            channel (str | None): 可选渠道筛选 email/wechat
+            status (str | None): 可选结果筛选 success/dead_letter
+            execution_id (str | None): 可选批次号精确筛选
+
+        返回:
+            Tuple[List[Dict], int]: (当前页字典列表, 满足条件的总条数)
+        """
+        from src.db.db_session import DatabaseSession
+        from src.db.models import NotificationHistory
+
+        session = DatabaseSession.get_session()
+        try:
+            query = session.query(NotificationHistory)
+            if channel:
+                query = query.filter(NotificationHistory.channel == channel)
+            if status:
+                query = query.filter(NotificationHistory.status == status)
+            if execution_id:
+                query = query.filter(
+                    NotificationHistory.execution_id == execution_id
+                )
+            total = query.count()
+            records = (
+                query.order_by(
+                    NotificationHistory.created_at.desc(),
+                    NotificationHistory.id.desc(),
+                )
+                .offset(max(0, page - 1) * page_size)
+                .limit(page_size)
+                .all()
+            )
+            return [self._to_dict(record) for record in records], total
+        finally:
+            session.close()
+
+    @staticmethod
+    def _to_dict(record: "NotificationHistory") -> dict[str, Any]:
+        """
+        历史模型行转字典（内部方法）
+
+        参数:
+            record (NotificationHistory): 数据库模型实例
+
+        返回:
+            Dict[str, Any]: 列表查询需要的字段（不含全文消息体）
+        """
+        return {
+            "id": record.id,
+            "channel": record.channel,
+            "execution_id": record.execution_id,
+            "status": record.status,
+            "subject": record.subject,
+            "attempts": record.attempts,
+            "error_message": record.error_message,
             "created_at": record.created_at.isoformat()
             if record.created_at
             else "",

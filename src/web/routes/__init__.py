@@ -17,6 +17,7 @@ Flask蓝图路由包
 from src.web.routes.base import base_bp
 from src.web.routes.cases import cases_bp
 from src.web.routes.executions import executions_bp
+from src.web.routes.notifications import notifications_bp
 from src.web.routes.pages import pages_bp
 from src.web.routes.reports import reports_bp
 
@@ -25,5 +26,6 @@ __all__ = [
     "cases_bp",
     "executions_bp",
     "reports_bp",
+    "notifications_bp",
     "pages_bp",
 ]

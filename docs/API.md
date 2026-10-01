@@ -2,12 +2,13 @@
 
 > **基础地址**：`http://host:5000`（本机调试为 `http://127.0.0.1:5000`）
 > **当前版本**：平台版本 v1.0.0，API 版本 v1
-> **文档更新**：2026-09-20（Day30），对应 4 个蓝图共 19 个 HTTP 接口
+> **文档更新**：2026-10-01（Day41 遗漏修复），对应 5 个蓝图共 21 个 HTTP 接口
 > **鉴权说明**：当前版本无认证，仅内网/本机使用，禁止暴露公网。
 
 本文覆盖 TestMatrix Web 后端全部 HTTP 接口，按蓝图（blueprint）组织：
 基础接口（base_bp）、用例管理（cases_bp）、执行管理（executions_bp）、
-报告统计（reports_bp）。所有字段名、枚举值、默认值均与源码逐字一致。
+报告统计（reports_bp）、通知查询（notifications_bp）。所有字段名、枚举值、
+默认值均与源码逐字一致。
 
 ---
 
@@ -1154,6 +1155,157 @@ curl.exe "http://127.0.0.1:5000/api/reports/quality-metrics"
   }
 }
 ```
+
+---
+
+## 6. 通知查询接口（notifications_bp，前缀 /api/notifications）
+
+通知模块的只读可观测性接口（Day41 新增）。通知发送有两张留痕表：
+
+- `notification_history`：每次真实发送尝试一行结果（`success` /
+  `dead_letter`），渠道未启用（配置性跳过）不记录；
+- `notification_dead_letters`：仅重试耗尽进入死信的通知，存完整消息体
+  （HTML/markdown 全文）供人工排查与后续重放。
+
+两个接口均为只读 GET，不提供重放/删除。
+
+### 6.1 GET /api/notifications/history
+
+通知发送历史分页查询，支持渠道、结果状态、批次号三维筛选（均可组合）。
+排序：`created_at` 倒序、`id` 倒序兜底，数据库层 limit/offset 分页。
+
+**Query 参数**：
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| page | int | 否 | 1 | 页码，必须 ≥ 1 |
+| page_size | int | 否 | 20 | 每页条数，1 ~ 100 |
+| channel | string | 否 | 无 | `email` 或 `wechat`，非法值返回 400 |
+| status | string | 否 | 无 | `success` 或 `dead_letter`，非法值返回 400 |
+| execution_id | string | 否 | 无 | 执行批次号精确筛选，空串视为不筛选 |
+
+**请求示例**：
+
+```bash
+curl.exe "http://127.0.0.1:5000/api/notifications/history?status=success&page=1&page_size=20"
+```
+
+**成功响应**（200，空库时 items 为空数组、total 为 0、total_pages 为 0）：
+
+```json
+{
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "items": [
+      {
+        "id": 1,
+        "channel": "wechat",
+        "execution_id": "RUN-20261001-103045-a1b2",
+        "status": "success",
+        "subject": "批次执行完成 RUN-20261001-103045-a1b2",
+        "attempts": 1,
+        "error_message": "",
+        "created_at": "2026-10-01T10:30:47"
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "page_size": 20,
+    "total_pages": 1
+  }
+}
+```
+
+**items 字段说明**：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | int | 自增主键 |
+| channel | string | 通知渠道：`email` / `wechat` |
+| execution_id | string | 关联批次号；CLI 直发等无批次场景为空字符串 |
+| status | string | 发送结果：`success` / `dead_letter` |
+| subject | string | 通知标题/摘要，落库截断 256 字符 |
+| attempts | int | 实际尝试次数（成功通常为 1，死信为 1+重试次数） |
+| error_message | string | 失败原因（成功为空串，落库截断 1000 字符） |
+| created_at | string | 落库时间，ISO 8601 字符串 |
+
+**错误响应**（400，分页参数与枚举非法）：
+
+- `page=0`：`{"code":400,"message":"page必须≥1，page_size须在1-100之间","data":null}`
+- `page_size=999`：同上
+- `page=abc`：`{"code":400,"message":"page和page_size必须为正整数","data":null}`
+- `status=bogus`：`{"code":400,"message":"status 非法：'bogus'，允许值 ['success', 'dead_letter']","data":null}`
+- `channel=sms`：`channel 非法：'sms'，允许值 ['email', 'wechat']`
+
+### 6.2 GET /api/notifications/dead-letters
+
+死信列表分页查询，支持按渠道筛选。排序：按 `id` 倒序（最新在前）。
+死信仓储当前只提供"最近 N 条"能力，本接口取最近 10000 条窗口后在
+内存内过滤分页（死信量级小；量级增大后下沉为 SQL 分页）。
+
+**Query 参数**：
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| page | int | 否 | 1 | 页码，必须 ≥ 1 |
+| page_size | int | 否 | 20 | 每页条数，1 ~ 100 |
+| channel | string | 否 | 无 | `email` 或 `wechat`，非法值返回 400 |
+
+**请求示例**：
+
+```bash
+curl.exe "http://127.0.0.1:5000/api/notifications/dead-letters?channel=wechat"
+```
+
+**成功响应**（200，无死信时 items 为空数组）：
+
+```json
+{
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "items": [
+      {
+        "id": 1,
+        "channel": "wechat",
+        "execution_id": "RUN-20261001-103045-a1b2",
+        "title": "批次执行失败通知",
+        "content": "### 批次执行完成 ...（完整 markdown/HTML 消息体，不截断）",
+        "level": "critical",
+        "fail_reason": "ConnectionError: 企微接口连接超时",
+        "attempts": 4,
+        "status": "dead",
+        "created_at": "2026-10-01T10:31:20"
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "page_size": 20,
+    "total_pages": 1
+  }
+}
+```
+
+**items 字段说明**：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | int | 自增主键 |
+| channel | string | 通知渠道：`email` / `wechat` |
+| execution_id | string | 关联批次号（可为空字符串） |
+| title | string | 通知标题 |
+| content | string | 完整消息体原文（供人工重发，列表接口不截断） |
+| level | string | 通知级别：`info` / `warning` / `critical` |
+| fail_reason | string | 最后一次失败原因（落库截断 1000 字符） |
+| attempts | int | 实际总尝试次数（首次 + 全部重试） |
+| status | string | 死信状态，当前恒为 `dead`（`resent` 为重放扩展位） |
+| created_at | string | 落库时间，ISO 8601 字符串 |
+
+**错误响应**（400）：
+
+- 分页参数非法：文案同 6.1
+- `channel=sms`：`{"code":400,"message":"channel 非法：'sms'，允许值 ['email', 'wechat']","data":null}`
 
 ---
 
