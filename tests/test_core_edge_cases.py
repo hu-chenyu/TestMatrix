@@ -289,11 +289,6 @@ class TestCaseManagerEdgeCases:
                 .order_by(models.TestExecution.id)
                 .all()
             )
-            priorities = [
-                CaseManager.list_cases(
-                    module="用户管理", case_type="api"
-                ),
-            ]
             # 执行顺序与用例优先级排序一致
             assert [record.case_id for record in records] == [
                 "TM-API-0201", "TM-API-0202", "TM-API-0203", "TM-API-0204",

@@ -146,8 +146,9 @@ class TestNotificationEdgeCases:
                 def is_enabled(self):
                     return True
 
-                def send(self, notification):
-                    send_calls.append(1)
+                def send(self, notification, _calls=send_calls):
+                    # 默认参数在类定义时绑定当前循环的 send_calls，避免 B023 闭包晚绑定
+                    _calls.append(1)
                     return False
 
             get_patch, bool_patch = patch_env(ROUTER_ENV)

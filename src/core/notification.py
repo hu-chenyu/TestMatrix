@@ -32,12 +32,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 
 from src.common.env_manager import env_manager
 from src.common.logger import LogManager
+
+if TYPE_CHECKING:
+    # 仅用于类型注解：StatisticsResult/FailedCaseDetail 由 report_analyzer 产出。
+    # 放 TYPE_CHECKING 块避免运行期导入（两模块无循环依赖，但无需运行期引用）。
+    from src.core.report_analyzer import FailedCaseDetail, StatisticsResult
 
 logger = LogManager.get_logger()
 
