@@ -287,7 +287,10 @@ class TestExecutionsQueryApi:
         with app.test_request_context("/api/executions/?page=abc"):
             with pytest.raises(ValidationError) as exc_info:
                 executions_routes._parse_int_param("page", 1)
+        # __cause__ 在 from None 与裸 raise 下都是 None（无区分力）；
+        # __suppress_context__ is True 才是 `raise ... from None` 的唯一可观测特征
         assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
 
     def test_list_invalid_page_size(
         self, executions_client: FlaskClient
