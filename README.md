@@ -79,6 +79,29 @@ allure generate output/allure_results -o output/reports/allure-report --clean
 allure open output/reports/allure-report
 ```
 
+### 启用 Redis 任务队列（可选）
+
+默认纯 SQLite 即可运行，批次执行走进程内线程。需要任务跨进程排队、串行消费时
+可启用 Redis 队列（trigger 路由 LPUSH 入队，独立 worker 进程 BRPOP 消费；
+Redis 故障时自动回退裸线程，任务不丢）：
+
+```bash
+# 1. 安装并启动 Redis（本机默认 redis://127.0.0.1:6379/0）
+#    Windows 可用 Memurai / WSL；macOS: brew install redis && redis-server
+
+# 2. 在 .env 中开启开关（首次运行 python run.py 会自动从 .env.example 生成 .env）
+#    TM_REDIS_ENABLED=true
+#    TM_TASK_QUEUE_ENABLED=true
+#    TM_TASK_WORKER_ENABLED 保持 false 即可：Web 进程不起 in-app worker，
+#    全局由下方独立脚本单进程消费（串行），脚本会在自身进程内自动置位该开关
+
+# 3. 启动 Web（终端 1）
+python run.py
+
+# 4. 另开一个终端启动常驻 worker（Ctrl+C 优雅停止，内置建表与 Redis PING 自检）
+python scripts/start_worker.py
+```
+
 ### Docker方式运行
 
 ```bash

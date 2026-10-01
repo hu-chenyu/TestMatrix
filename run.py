@@ -22,9 +22,63 @@ TestMatrix 一键启动脚本（本地开发 / 开源用户使用）
 
 # argparse: 标准库命令行参数解析器，用于接收 --host/--port/--debug
 import argparse
+import shutil
+from pathlib import Path
+
+# env_manager: 读 .env 配置（load_dotenv 在其模块导入时已执行）
+from src.common.env_manager import env_manager
 
 # create_app: Flask 应用工厂，返回已完成蓝图注册/异常处理/钩子装配的应用实例
 from src.web.app import create_app
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+ENV_FILE = PROJECT_ROOT / ".env"
+ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
+
+
+def ensure_env_file() -> None:
+    """首次启动引导：.env 缺失时从 .env.example 复制默认配置并打印可选功能提示。
+
+    不阻塞启动——基础平台在零配置（纯 SQLite、通知/Redis 全关）下即可运行；
+    本函数只负责让新用户知道"有哪些可选开关、对应哪个环境变量"。
+
+    返回:
+        无
+    """
+    if ENV_FILE.exists():
+        _warn_enabled_but_misconfigured()
+        return
+    if ENV_EXAMPLE.exists():
+        shutil.copyfile(ENV_EXAMPLE, ENV_FILE)
+        print("+" + "=" * 62 + "+")
+        print("|  未检测到 .env，已从 .env.example 创建默认配置             |")
+        print("|                                                            |")
+        print("|  基础功能（Web/SQLite/模拟执行/CI）零配置即可用，以下为可选项：|")
+        print("|  · 企微通知：TM_WECHAT_ENABLED=true + TM_WECHAT_WEBHOOK_URL |")
+        print("|  · 邮件通知：TM_EMAIL_ENABLED=true + TM_EMAIL_SMTP_*        |")
+        print("|  · Redis缓存：TM_REDIS_ENABLED=true                         |")
+        print("|  · Redis队列：TM_TASK_QUEUE_ENABLED=true                    |")
+        print("+ " + "-" * 60 + " +")
+        print(f"  配置文件：{ENV_FILE}（已加入 .gitignore，不会提交）")
+    else:
+        print("[警告] .env 与 .env.example 均不存在，将使用全部内置默认值启动。")
+
+
+def _warn_enabled_but_misconfigured() -> None:
+    """开关打开但关键配置为空时打印警告（功能会静默失效）。
+
+    返回:
+        无
+    """
+    if env_manager.get_bool("TM_WECHAT_ENABLED", False) and not env_manager.get(
+        "TM_WECHAT_WEBHOOK_URL", ""
+    ):
+        print("[警告] TM_WECHAT_ENABLED=true 但 TM_WECHAT_WEBHOOK_URL 为空，企微通知将不生效。")
+    if env_manager.get_bool("TM_EMAIL_ENABLED", False) and (
+        not env_manager.get("TM_EMAIL_SMTP_HOST", "")
+        or "example.com" in str(env_manager.get("TM_EMAIL_SMTP_HOST", ""))
+    ):
+        print("[警告] TM_EMAIL_ENABLED=true 但 SMTP 主机未配置/仍为 example.com，邮件通知将不生效。")
 
 
 def parse_args() -> argparse.Namespace:
@@ -80,6 +134,9 @@ def main() -> None:
     """
     # 1. 解析命令行参数
     args = parse_args()
+
+    # 1.5 首次启动 .env 引导（缺失自动复制+提示；开关空配置告警），不阻塞
+    ensure_env_file()
 
     # 2. 通过应用工厂创建 Flask 实例（不传 config_name 时按 TM_ENV 环境变量，
     #    未设置时走默认开发配置）
