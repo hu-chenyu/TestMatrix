@@ -82,24 +82,24 @@ jobs:
             # pull_request 事件 github.event.before 可能为空，用 origin/main 做兜底基线
             git fetch origin main:refs/remotes/origin/main || true
             BASE_SHA=origin/main
-            CHANGED_SRC=$(git diff --name-only origin/main...HEAD -- '*.py' | grep '^src/' || true)
           else
             BASE_SHA="${{ github.event.before }}"
-            CHANGED_SRC=$(git diff --name-only "$BASE_SHA"...HEAD -- '*.py' | grep '^src/' || true)
+            # fail-closed 必须在算 CHANGED_SRC 之前校验 BASE 可达性：否则 BASE 不可达时
+            # 下面 git diff 失败→CHANGED_SRC 空→会误走"无 src 变更跳过"分支 exit0（假绿）。
+            # cat-file -e 校验是否为可达 commit；空 BASE（"^{commit}"）同样失败，堵住边缘
+            if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              echo "::error::BASE_SHA=${BASE_SHA} 不是可达提交对象（force-push/历史重写/before 丢失？），无法判定新增行类型错误，fail-closed 阻断"
+              exit 1
+            fi
           fi
+          CHANGED_SRC=$(git diff --name-only "$BASE_SHA"...HEAD -- '*.py' | grep '^src/' || true)
           echo "本次变更的 src 文件：${CHANGED_SRC:-（无）}"
           if [ -z "$CHANGED_SRC" ]; then
             echo "无新增/修改 src 文件，跳过 mypy 增量检查"
           else
-            # fail-closed 前置校验：BASE_SHA 不可达（force-push/历史重写/before 丢失）
-            # 时 git diff 报 bad object。必须校验命令退出码本身，不能判 ADDED_LINES 是否为空
-            # （纯删除行改动无 + 行、集合本就该为空，属正常）；diff 失败则无法判定新增行，阻断
-            if ! git diff "$BASE_SHA"...HEAD --unified=0 -- $CHANGED_SRC >/dev/null 2>&1; then
-              echo "::error::无法基于 BASE_SHA=${BASE_SHA} 生成 diff（对象不可达？force-push/历史重写？），无法判定新增行类型错误，fail-closed 阻断"
-              exit 1
-            fi
             # 本次 diff 的"新增行"集合（path:line）。只阻断落在新增行上的类型错误：
             # 未改动行上的存量缺注解错误随专项债豁免，避免一改文件就被全文件存量卡死。
+            # BASE 可达性已在上方 cat-file 校验，此处 git diff 必成功，无需重复守卫。
             ADDED_LINES=$(git diff "$BASE_SHA"...HEAD --unified=0 -- $CHANGED_SRC | awk '
               /^\+\+\+ b\// { file=substr($0,7) }
               /^@@/ {
