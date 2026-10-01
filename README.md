@@ -1,6 +1,6 @@
 # TestMatrix 通用自动化测试效能平台
 
-[![CI](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/) [![pytest: 487 passed](https://img.shields.io/badge/pytest-487%20passed-green)]() [![coverage: 88%](https://img.shields.io/badge/coverage-88%25-brightgreen)]()
+[![CI](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/) [![coverage 85%+](https://img.shields.io/badge/coverage-85%25%2B-brightgreen)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml)
 
 > 面向互联网接口自动化测试的全链路效能平台：用例管理 → 调度执行 → 报告分析 →
 > Web 可视化 → 通知推送 → CI/CD，覆盖自动化框架设计、数据驱动、测试平台化与
