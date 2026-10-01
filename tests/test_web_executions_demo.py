@@ -34,6 +34,8 @@ from src.core.case_manager import CaseManager
 from src.db import models
 from src.db.db_session import DatabaseSession
 from src.web import create_app
+from src.web.exceptions import ValidationError
+from src.web.routes import executions as executions_routes
 
 # 模拟失败堆栈文本（多行结构，验证原样透传不截断）
 FAILED_STACK = (
@@ -272,6 +274,20 @@ class TestExecutionsQueryApi:
         # 非整数页码同样400
         invalid_response = executions_client.get("/api/executions/?page=abc")
         assert invalid_response.status_code == 400, "page=abc应返回400"
+
+    def test_parse_int_param_非整数异常链显式抑制(
+        self, executions_client: FlaskClient
+    ) -> None:
+        """
+        Day40-fix 异常链守卫：page=abc 触发 int 转换失败时，路由用
+        `raise ValidationError(...) from None` 显式抑制底层 ValueError，
+        ValidationError.__cause__ 必须为 None；防止未来重构回退成裸 raise。
+        """
+        app = executions_client.application
+        with app.test_request_context("/api/executions/?page=abc"):
+            with pytest.raises(ValidationError) as exc_info:
+                executions_routes._parse_int_param("page", 1)
+        assert exc_info.value.__cause__ is None
 
     def test_list_invalid_page_size(
         self, executions_client: FlaskClient

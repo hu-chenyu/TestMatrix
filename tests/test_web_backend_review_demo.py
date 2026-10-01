@@ -47,6 +47,8 @@ from src.core.task_queue import stop_worker, task_queue_client
 from src.db import models
 from src.db.db_session import DatabaseSession
 from src.web import create_app
+from src.web.exceptions import ValidationError
+from src.web.routes import reports as reports_routes
 
 # 轮询预算: 模拟执行约0.01s/条，20次×0.3s远超实际耗时防flaky
 POLL_MAX_ATTEMPTS = 20
@@ -363,6 +365,20 @@ class TestReportsEdgeCases:
         body = response.get_json()
         assert body["code"] == 400
         assert "limit" in body["message"]
+
+    def test_parse_int_param_非整数异常链显式抑制(
+        self, review_env: FlaskClient
+    ) -> None:
+        """
+        Day40-fix 异常链守卫：limit=abc 触发 int 转换失败时，路由用
+        `raise ValidationError(...) from None` 显式抑制底层 ValueError，
+        ValidationError.__cause__ 必须为 None；防止未来重构回退成裸 raise。
+        """
+        app = review_env.application
+        with app.test_request_context("/api/reports/failed-top?limit=abc"):
+            with pytest.raises(ValidationError) as exc_info:
+                reports_routes._parse_int_param("limit", 10)
+        assert exc_info.value.__cause__ is None
 
 
 # ===========================================================================
