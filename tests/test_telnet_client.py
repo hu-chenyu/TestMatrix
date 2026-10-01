@@ -19,9 +19,12 @@ TelnetClient 网口通信封装单元测试（本地 socket mock telnet 服务�
 
 import socket
 import threading
+import time
 from collections.abc import Iterator
+from unittest.mock import MagicMock
 
 import pytest
+import src.common.telnet_client as tc
 from src.common.telnet_client import TelnetClient, TelnetClientError
 
 
@@ -36,8 +39,15 @@ class MockTelnetServer:
     仅用于本地回环测试，不实现任何 telnet IAC 协议协商。
     """
 
-    def __init__(self) -> None:
-        """初始化监听 socket 与服务线程，绑定本地随机端口并开始监听。"""
+    def __init__(self, mode: str = "ok") -> None:
+        """初始化监听 socket 与服务线程，绑定本地随机端口并开始监听。
+
+        参数:
+            mode: 服务端行为模式——"ok" 正常登录序列+命令回显；
+                  "auth_fail" 用户名后只回 ERROR 不发 Password/提示符（认证失败）；
+                  "silent" accept 后不发任何 banner（login_timeout 行使）。
+        """
+        self.mode = mode
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(1)
@@ -49,17 +59,38 @@ class MockTelnetServer:
         self.ready.set()
 
     def _serve(self) -> None:
-        """线程主体：接受连接，走完登录序列后循环回显命令直到对端关闭。"""
+        """线程主体：recv 驱动状态机，严格按"收到上一步输入才发下一步提示"交互。
+
+        旧版无条件连发 login:/Password:/$ 会让客户端即使匹配串写错也能
+        被后续数据"喂对"；recv 驱动后每一步必须真正等到客户端输入，
+        客户端 expect 匹配串写错时只会超时，匹配逻辑第一次有了牙齿（T2）。
+        """
         try:
             conn, _ = self._sock.accept()
         except OSError:
             return
         self._conn = conn
         try:
+            if self.mode == "silent":
+                # 不发送任何 banner，仅挂起保持连接（供 login_timeout 测试）
+                while conn.recv(1024):
+                    pass
+                return
+
             conn.sendall(b"login: ")
-            conn.recv(1024)  # 用户名（不校验内容）
+            if not conn.recv(1024):
+                return
+
+            if self.mode == "auth_fail":
+                # 不回 Password 提示符也不给 shell 提示符，登录必须超时失败（T7）
+                conn.sendall(b"ERROR: invalid credentials\n")
+                while conn.recv(1024):
+                    pass
+                return
+
             conn.sendall(b"Password: ")
-            conn.recv(1024)  # 密码（不校验内容）
+            if not conn.recv(1024):
+                return
             conn.sendall(b"$ ")
             while True:
                 data = conn.recv(1024)
@@ -184,27 +215,54 @@ class TestTelnetClientConnect:
         finally:
             client.close()
 
-    def test_connect无监听端口抛telnet异常(self) -> None:
-        """连接无监听的本地端口被拒绝时，包装为 TelnetClientError。"""
-        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        probe.bind(("127.0.0.1", 0))
-        dead_port = probe.getsockname()[1]
-        probe.close()  # 关闭后该端口无监听，连接应被 RST 拒绝
-        client = TelnetClient(host="127.0.0.1", port=dead_port, timeout=1.0)
+    def test_connect连接被拒绝走OSError失败分支(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """D 类：telnetlib 构造抛 ConnectionRefusedError 时精确走"连接失败"分支。
+
+        用 monkeypatch 注入消除平台漂移（Windows 实连可能走超时而非拒绝），
+        断言精确匹配"连接失败"，且该消息不会误命中"连接超时"。
+        """
+        monkeypatch.setattr(
+            tc.telnetlib,
+            "Telnet",
+            MagicMock(side_effect=ConnectionRefusedError("[Errno 111] Connection refused")),
+        )
+        client = TelnetClient(host="127.0.0.1", port=2323, timeout=1.0)
         try:
-            with pytest.raises(TelnetClientError, match="连接"):
+            with pytest.raises(TelnetClientError, match="连接失败") as exc_info:
                 client.connect()
+            assert "连接超时" not in str(exc_info.value)
             assert client.is_connected is False
         finally:
             client.close()
 
-    def test_重复connect幂等(self, mock_server: MockTelnetServer) -> None:
-        """已连接状态下再次 connect 直接跳过，不抛异常。"""
+    def test_connect连接超时走TimeoutError分支(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """D 类：telnetlib 构造抛 TimeoutError 时精确走"连接超时"分支。"""
+        monkeypatch.setattr(
+            tc.telnetlib,
+            "Telnet",
+            MagicMock(side_effect=TimeoutError("timed out")),
+        )
+        client = TelnetClient(host="127.0.0.1", port=2323, timeout=1.0)
+        try:
+            with pytest.raises(TelnetClientError, match="连接超时") as exc_info:
+                client.connect()
+            assert "连接失败" not in str(exc_info.value)
+        finally:
+            client.close()
+
+    def test_重复connect幂等且底层连接不重建(self, mock_server: MockTelnetServer) -> None:
+        """T1：已连接后再次 connect 跳过，且 self._conn 必须是同一个对象。
+
+        变异守卫：删除 connect() 的 is_connected 提前返回会新建第二条 TCP
+        连接覆盖旧连接（旧连接泄漏），同一性断言即失败。
+        """
         client = TelnetClient(host="127.0.0.1", port=mock_server.port, timeout=3.0)
         try:
             client.connect()
+            first_conn = client._conn
             client.connect()
             assert client.is_connected is True
+            assert client._conn is first_conn
         finally:
             client.close()
 
@@ -235,6 +293,41 @@ class TestTelnetClientConnect:
                 client.login(username="root", password="admin")
         finally:
             client.close()
+
+    def test_login认证失败index小于0抛telnet异常(self) -> None:
+        """T7：服务端只回 ERROR、不给 Password/shell 提示符时，expect 全超时
+        （index<0），login 必须抛"登录超时"TelnetClientError。
+
+        变异守卫：删除源码 index<0 分支会让超时被当成登录成功返回，本测试失败。
+        """
+        server = MockTelnetServer(mode="auth_fail")
+        client = TelnetClient(host="127.0.0.1", port=server.port, timeout=0.5)
+        try:
+            client.connect()
+            with pytest.raises(TelnetClientError, match="登录超时"):
+                client.login(username="root", password="wrong")
+        finally:
+            client.close()
+            server.close()
+
+    def test_login_timeout显式参数被行使_快速失败(self) -> None:
+        """T9：静默 server 不发 banner，login_timeout=0.1 必须在 ~0.3s 内超时。
+
+        客户端默认 timeout=3.0；若源码忽略 login_timeout 恒用默认值，
+        三次 expect 各等 3 秒，总耗时约 9 秒，elapsed<2 断言失败。
+        """
+        server = MockTelnetServer(mode="silent")
+        client = TelnetClient(host="127.0.0.1", port=server.port, timeout=3.0)
+        start = time.perf_counter()
+        try:
+            client.connect()
+            with pytest.raises(TelnetClientError, match="登录超时"):
+                client.login(username="root", password="admin", login_timeout=0.1)
+            elapsed = time.perf_counter() - start
+            assert elapsed < 2.0, f"login_timeout=0.1 未生效，实际 {elapsed:.2f}s"
+        finally:
+            client.close()
+            server.close()
 
 
 # ----------------------------------------------------------------------
@@ -295,3 +388,93 @@ class TestTelnetClientLifecycle:
         with TelnetClient(host="127.0.0.1", port=mock_server.port, timeout=3.0) as client:
             assert client.is_connected is True
         assert client.is_connected is False
+
+
+# ----------------------------------------------------------------------
+# mock 驱动：telnetlib 缺失与 login/execute/close 异常路径（E 类）
+# ----------------------------------------------------------------------
+class TestTelnetClientMockedPaths:
+    """通过 monkeypatch/MagicMock 覆盖无真机难以触发的异常分支。
+
+    覆盖：telnetlib 被移除（PEP 594）、login 的 EOFError/通用异常包装、
+    execute 写入失败与读取 EOFError 包装、close 吞 OSError 容错。
+    """
+
+    def test_telnetlib不可用时connect抛运行时错误(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """E：模块级 telnetlib 为 None（Python 3.13+）时，connect 抛明确 RuntimeError。"""
+        monkeypatch.setattr(tc, "telnetlib", None)
+        client = TelnetClient(host="127.0.0.1", port=2323)
+        try:
+            with pytest.raises(RuntimeError, match="telnetlib 已在当前 Python 版本移除"):
+                client.connect()
+        finally:
+            client.close()
+
+    def test_login对端关闭EOFError包装为认证失败(self) -> None:
+        """E：expect 抛 EOFError（对端关闭连接）时包装为"认证失败"TelnetClientError。"""
+        fake_conn = MagicMock()
+        fake_conn.expect.side_effect = EOFError()
+        client = TelnetClient(host="127.0.0.1", port=2323)
+        client._conn = fake_conn
+        try:
+            with pytest.raises(TelnetClientError, match="认证失败"):
+                client.login(username="root", password="admin")
+        finally:
+            client.close()
+
+    def test_login其他异常包装为登录流程异常(self) -> None:
+        """E：expect 抛非 EOF 异常时走统一兜底，包装为"登录流程异常"。"""
+        fake_conn = MagicMock()
+        fake_conn.expect.side_effect = ValueError("unexpected expect state")
+        client = TelnetClient(host="127.0.0.1", port=2323)
+        client._conn = fake_conn
+        try:
+            with pytest.raises(TelnetClientError, match="登录流程异常"):
+                client.login(username="root", password="admin")
+        finally:
+            client.close()
+
+    def test_execute写入OSError包装为命令写入失败(self) -> None:
+        """E：write 抛 OSError（连接断开）时包装为"命令写入失败"。"""
+        fake_conn = MagicMock()
+        fake_conn.write.side_effect = OSError("broken pipe")
+        client = TelnetClient(host="127.0.0.1", port=2323)
+        client._conn = fake_conn
+        try:
+            with pytest.raises(TelnetClientError, match="命令写入失败"):
+                client.execute("ls")
+        finally:
+            client.close()
+
+    def test_expect模式读取EOFError包装为读取输出失败(self) -> None:
+        """E：expect 收割循环中 read_very_eager 抛 EOFError 时包装为"读取输出失败"。"""
+        fake_conn = MagicMock()
+        fake_conn.read_very_eager.side_effect = EOFError()
+        client = TelnetClient(host="127.0.0.1", port=2323)
+        client._conn = fake_conn
+        try:
+            with pytest.raises(TelnetClientError, match="读取输出失败"):
+                client.execute("ls", expect="$", timeout=0.3)
+        finally:
+            client.close()
+
+    def test_无expect收割时EOFError包装为读取输出失败(self) -> None:
+        """E：无 expect 的固定收割中 read_very_eager 抛 EOFError 同样包装。"""
+        fake_conn = MagicMock()
+        fake_conn.read_very_eager.side_effect = EOFError()
+        client = TelnetClient(host="127.0.0.1", port=2323)
+        client._conn = fake_conn
+        try:
+            with pytest.raises(TelnetClientError, match="读取输出失败"):
+                client.execute("ls", wait_time=0)
+        finally:
+            client.close()
+
+    def test_close吞掉底层OSError不向上抛(self) -> None:
+        """E：底层 close 抛 OSError 时仅警告，client.close() 不抛且实例置 None。"""
+        fake_conn = MagicMock()
+        fake_conn.close.side_effect = OSError("close failed")
+        client = TelnetClient(host="127.0.0.1", port=2323)
+        client._conn = fake_conn
+        client.close()
+        assert client._conn is None
