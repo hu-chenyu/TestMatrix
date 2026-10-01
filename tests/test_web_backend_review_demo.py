@@ -378,7 +378,10 @@ class TestReportsEdgeCases:
         with app.test_request_context("/api/reports/failed-top?limit=abc"):
             with pytest.raises(ValidationError) as exc_info:
                 reports_routes._parse_int_param("limit", 10)
+        # __cause__ 在 from None 与裸 raise 下都是 None（无区分力）；
+        # __suppress_context__ is True 才是 `raise ... from None` 的唯一可观测特征
         assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
 
 
 # ===========================================================================

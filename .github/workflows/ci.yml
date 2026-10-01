@@ -8,7 +8,7 @@
 # 2. 步骤顺序：依赖安装 → ruff 全量强制（src+tests，不 ignore 规则）
 #    → mypy 增量（仅阻断本次 diff 新增行上的类型错误，未改动行存量豁免）
 #    → mypy 全量基线（豁免不阻断，::warning:: 给稳定趋势数）
-#    → pytest 全量 484（含覆盖率门禁 --cov-fail-under=85）→ pip-audit 完整报告 + 分级门禁 → 探测版本结果汇总
+#    → pytest 全量 487（含覆盖率门禁 --cov-fail-under=85）→ pip-audit 完整报告 + 分级门禁 → 探测版本结果汇总
 # 3. pip-audit 门禁：HIGH/CRITICAL（含严重级未知，fail-closed）且不在
 #    .pip-audit-allowlist.txt（必须带未过期的过期日，缺日/过期均按未豁免处理）内
 #    才阻断；MODERATE/LOW 仅告警
@@ -91,9 +91,16 @@ jobs:
           if [ -z "$CHANGED_SRC" ]; then
             echo "无新增/修改 src 文件，跳过 mypy 增量检查"
           else
+            # fail-closed 前置校验：BASE_SHA 不可达（force-push/历史重写/before 丢失）
+            # 时 git diff 报 bad object。必须校验命令退出码本身，不能判 ADDED_LINES 是否为空
+            # （纯删除行改动无 + 行、集合本就该为空，属正常）；diff 失败则无法判定新增行，阻断
+            if ! git diff "$BASE_SHA"...HEAD --unified=0 -- $CHANGED_SRC >/dev/null 2>&1; then
+              echo "::error::无法基于 BASE_SHA=${BASE_SHA} 生成 diff（对象不可达？force-push/历史重写？），无法判定新增行类型错误，fail-closed 阻断"
+              exit 1
+            fi
             # 本次 diff 的"新增行"集合（path:line）。只阻断落在新增行上的类型错误：
             # 未改动行上的存量缺注解错误随专项债豁免，避免一改文件就被全文件存量卡死。
-            ADDED_LINES=$(git diff "$BASE_SHA"...HEAD --unified=0 -- $CHANGED_SRC 2>/dev/null | awk '
+            ADDED_LINES=$(git diff "$BASE_SHA"...HEAD --unified=0 -- $CHANGED_SRC | awk '
               /^\+\+\+ b\// { file=substr($0,7) }
               /^@@/ {
                 if (match($0, /\+[0-9]+(,[0-9]+)?/)) {
@@ -150,7 +157,7 @@ jobs:
           echo "::warning::TestMatrix mypy 全量存量错误 ${baseline_count} 个（趋势基线，只减不增；增量步骤已硬阻断变更文件自身新增错误）"
           echo "全量基线错误数=${baseline_count}（豁免不阻断），mypy 退出码=${baseline_code}"
 
-      - name: pytest 全量回归（484 passed）+ 覆盖率门禁（≥85%）
+      - name: pytest 全量回归（487 passed）+ 覆盖率门禁（≥85%）
         id: pytest-run
         # 覆盖率不足/测试失败退出码 1 判红；退出码 5（无测试被收集）同样判红——
         # testpaths 固定为 tests/，0 收集只可能是配置/路径损坏，不设容忍以防静默通过
