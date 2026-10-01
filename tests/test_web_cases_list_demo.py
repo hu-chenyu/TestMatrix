@@ -27,6 +27,8 @@ from flask.testing import FlaskClient
 from src.db import models
 from src.db.db_session import DatabaseSession
 from src.web import create_app
+from src.web.exceptions import ValidationError
+from src.web.routes import cases as cases_routes
 
 
 # ===========================================================================
@@ -300,6 +302,20 @@ class TestCasesListApi:
         # 非整数页码同样400
         invalid_response = cases_client.get("/api/cases/?page=abc")
         assert invalid_response.status_code == 400, "page=abc应返回400"
+
+    def test_parse_int_param_非整数异常链显式抑制(
+        self, cases_client: FlaskClient
+    ) -> None:
+        """
+        Day40-fix 异常链守卫：page=abc 触发 int 转换失败时，路由用
+        `raise ValidationError(...) from None` 显式抑制底层 ValueError，
+        ValidationError.__cause__ 必须为 None；防止未来重构回退成裸 raise。
+        """
+        app = cases_client.application
+        with app.test_request_context("/api/cases/?page=abc"):
+            with pytest.raises(ValidationError) as exc_info:
+                cases_routes._parse_int_param("page", 1)
+        assert exc_info.value.__cause__ is None
 
     def test_list_cases_page_size_exceed_max(
         self, cases_client: FlaskClient

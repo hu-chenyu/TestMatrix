@@ -6,15 +6,17 @@
 #    continue-on-error——失败步骤如实显示红叉并产生 annotation，
 #    末尾"探测版本结果汇总"步骤把失败项汇总成 ::warning::，信号不丢失
 # 2. 步骤顺序：依赖安装 → ruff 全量强制（src+tests，不 ignore 规则）
-#    → mypy 仅检查本次提交新增/修改的 src 文件（git diff 过滤，存量文件渐进收紧）
+#    → mypy 增量（仅阻断本次 diff 新增行上的类型错误，未改动行存量豁免）
+#    → mypy 全量基线（豁免不阻断，::warning:: 给稳定趋势数）
 #    → pytest 全量 484（含覆盖率门禁 --cov-fail-under=85）→ pip-audit 完整报告 + 分级门禁 → 探测版本结果汇总
 # 3. pip-audit 门禁：HIGH/CRITICAL（含严重级未知，fail-closed）且不在
 #    .pip-audit-allowlist.txt（必须带未过期的过期日，缺日/过期均按未豁免处理）内
 #    才阻断；MODERATE/LOW 仅告警
 # 4. 已接入覆盖率门禁（pytest 步骤 --cov=src --cov-fail-under=85，Day40 由 80 收紧；
 #    零收集 exit 5 不设容忍）、不含 Docker/部署步骤、不含失败通知（均为后期阶段）
-# 5. mypy strict 存量类型债（202 个）过渡期豁免不阻断，错误数以 ::warning:: 追踪，
-#    另立专项计划只减不增；新增/修改代码仍须 strict 合规
+# 5. mypy strict 双层策略（Day40-fix 加固）：增量步骤硬阻断"本次新增行"上的类型错误
+#    （工具链崩溃/输出异常也判红，不假绿），未改动行存量错误随专项债豁免；全量基线
+#    步骤只 ::warning:: 追踪总数（Day40 起 196 个）只减不增。strict=true 与禁 ignore 不变
 # ==============================================================================
 name: CI
 
@@ -27,7 +29,9 @@ on:
 jobs:
   test:
     name: Python ${{ matrix.python-version }}${{ matrix.experimental && '（探测版本，不阻断）' || '' }}
-    runs-on: ubuntu-latest
+    # 钉死 ubuntu-24.04：GitHub 的 ubuntu 滚动 latest 标签将于 2026-10-19 迁到 26.04，
+    # 首次全绿期避开 runner 镜像大版本迁移引入的不可控变量（Day40-fix）
+    runs-on: ubuntu-24.04
     # job 级开关（非 strategy、非 step 级）：3.12 探测位 job 失败不把整条 workflow run 拖红；
     # 步骤不设 step 级 continue-on-error，失败步骤保留红叉与 annotation 真实信号。
     # 3.11 主版本 experimental=false，等价于关闭，任何一步失败照常阻断
@@ -47,12 +51,12 @@ jobs:
 
     steps:
       - name: 检出代码（fetch-depth=0 拉完整历史，供 mypy 步骤 git diff）
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: 安装 Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -68,34 +72,83 @@ jobs:
         id: ruff-check
         run: ruff check src tests
 
-      - name: mypy 增量检查（存量类型债豁免，不阻断；错误数以 warning 追踪）
+      - name: mypy 增量检查（仅阻断本次新增行上的类型错误；未改动行存量豁免）
         id: mypy-check
         shell: bash
         run: |
+          # 工具链守卫：mypy 不存在时必须判红，绝不能读作"0 错误"假绿（修复2）
+          command -v mypy >/dev/null || { echo "::error::mypy 未安装，工具链故障，阻断 CI"; exit 1; }
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             # pull_request 事件 github.event.before 可能为空，用 origin/main 做兜底基线
             git fetch origin main:refs/remotes/origin/main || true
+            BASE_SHA=origin/main
             CHANGED_SRC=$(git diff --name-only origin/main...HEAD -- '*.py' | grep '^src/' || true)
           else
-            CHANGED_SRC=$(git diff --name-only "${{ github.event.before }}"...HEAD -- '*.py' | grep '^src/' || true)
+            BASE_SHA="${{ github.event.before }}"
+            CHANGED_SRC=$(git diff --name-only "$BASE_SHA"...HEAD -- '*.py' | grep '^src/' || true)
           fi
           echo "本次变更的 src 文件：${CHANGED_SRC:-（无）}"
           if [ -z "$CHANGED_SRC" ]; then
-            echo "无新增/修改 src 文件，跳过 mypy"
+            echo "无新增/修改 src 文件，跳过 mypy 增量检查"
           else
-            # 存量类型债（Day39 实测 202 个，多为缺返回注解/泛型参数）另立专项计划，
-            # 当日 mypy 非零退出不阻断 CI；但完整输出保留在日志（不吞），错误数
-            # 汇总为 ::warning:: annotation，使存量债可见、可追踪、只减不增。
-            # 新增/修改代码仍须合规，禁止以 type: ignore/放宽 strict 换绿。
+            # 本次 diff 的"新增行"集合（path:line）。只阻断落在新增行上的类型错误：
+            # 未改动行上的存量缺注解错误随专项债豁免，避免一改文件就被全文件存量卡死。
+            ADDED_LINES=$(git diff "$BASE_SHA"...HEAD --unified=0 -- $CHANGED_SRC 2>/dev/null | awk '
+              /^\+\+\+ b\// { file=substr($0,7) }
+              /^@@/ {
+                if (match($0, /\+[0-9]+(,[0-9]+)?/)) {
+                  hunk=substr($0, RSTART+1, RLENGTH-1); split(hunk, hp, ",")
+                  start=hp[1]; cnt=(hp[2]==""?1:hp[2]); for (i=0;i<cnt;i++) print file ":" start+i
+                }
+              }')
+            # GitHub bash 默认 set -e，mypy 有存量错误退出码非 0，需临时放开
             set +e
             mypy_output=$(mypy $CHANGED_SRC 2>&1)
             mypy_code=$?
+            set -e
             echo "$mypy_output"
-            err_count=$(printf '%s\n' "$mypy_output" | grep -c ': error:' || true)
-            echo "::warning::TestMatrix mypy 存量类型错误 ${err_count} 个（专项债追踪，不阻断 CI，只减不增；新增代码须合规）"
-            echo "mypy 原始退出码=${mypy_code}（存量豁免），错误数=${err_count}，本步骤恒 success"
-            exit 0
+            # 路径分隔符归一化：Linux runner 输出正斜杠（tr 无副作用），与 git 新增行路径可比
+            normalized=$(printf '%s\n' "$mypy_output" | tr '\\' '/')
+            # follow-imports 全集错误数（含依赖文件存量债，仅 warning 追踪）
+            # mypy 默认输出 path:line: error:（无列号），正则兼容带/不带列号两种格式
+            err_count=$(printf '%s\n' "$normalized" | awk '/:[0-9]+(:[0-9]+)?: error:/{c++} END{print c+0}')
+            # 新增行错误数：错误行（path:line）必须命中本次 diff 新增行集合（修复1 强制力核心）
+            new_err_count=$(printf '%s\n' "$normalized" | awk -v added="$ADDED_LINES" '
+              BEGIN{ n=split(added,a,"\n"); for(i=1;i<=n;i++) added_map[a[i]]=1 }
+              /:[0-9]+(:[0-9]+)?: error:/ { split($0,p,":"); if ((p[1]":"p[2]) in added_map) hit++ }
+              END{ print hit+0 }')
+            # 崩溃守卫：非零退出码但零错误行=mypy 崩溃/输出格式异常，不能读作 0 错误（修复2）
+            if [ "$mypy_code" -ne 0 ] && [ "$err_count" -eq 0 ]; then
+              echo "::error::mypy 执行异常（退出码 ${mypy_code} 但错误行数为 0，疑似工具链崩溃或输出格式变化），阻断 CI"
+              exit 1
+            fi
+            # 本次新增/修改行上出现 strict 错误=硬阻断，不享受存量豁免（修复1）
+            if [ "$new_err_count" -gt 0 ]; then
+              echo "::error::本次 diff 新增行上存在 ${new_err_count} 个 mypy 错误（strict 合规要求，新增代码不豁免，禁止 type: ignore）"
+              exit 1
+            fi
+            echo "::warning::TestMatrix mypy follow 全集存量错误 ${err_count} 个（本次新增行 0，存量随专项债豁免只减不增）"
+            echo "增量门槛：新增行错误=${new_err_count}（>0 阻断），follow 存量总错误=${err_count}（豁免），mypy 退出码=${mypy_code}"
           fi
+
+      - name: mypy 全量基线（存量豁免，仅 warning 追踪趋势）
+        id: mypy-baseline
+        shell: bash
+        run: |
+          # 全量口径 mypy src：数字不随当次提交碰了哪些文件波动，作为跨 commit 趋势基线（修复3）
+          command -v mypy >/dev/null || { echo "::error::mypy 未安装，工具链故障，阻断 CI"; exit 1; }
+          set +e
+          baseline_output=$(mypy src 2>&1)
+          baseline_code=$?
+          set -e
+          echo "$baseline_output" | tail -3
+          baseline_count=$(printf '%s\n' "$baseline_output" | awk '/:[0-9]+(:[0-9]+)?: error:/{c++} END{print c+0}')
+          if [ "$baseline_code" -ne 0 ] && [ "$baseline_count" -eq 0 ]; then
+            echo "::error::mypy 全量基线执行异常（退出码 ${baseline_code} 但错误数为 0，疑似工具链崩溃或输出格式变化），阻断 CI"
+            exit 1
+          fi
+          echo "::warning::TestMatrix mypy 全量存量错误 ${baseline_count} 个（趋势基线，只减不增；增量步骤已硬阻断变更文件自身新增错误）"
+          echo "全量基线错误数=${baseline_count}（豁免不阻断），mypy 退出码=${baseline_code}"
 
       - name: pytest 全量回归（484 passed）+ 覆盖率门禁（≥85%）
         id: pytest-run
