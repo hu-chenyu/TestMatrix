@@ -48,10 +48,10 @@ import statistics
 import sys
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
 
 # 项目根目录（scripts/的上一级）必须在import src.*之前确定并加入
 # sys.path，保证"直接脚本运行"与"-m模块运行"两种方式均可导入
@@ -59,18 +59,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import redis
-from flask import Flask
-
-from src.common.logger import LogManager
-from src.core.cache import (
+import redis  # noqa: E402
+from flask import Flask  # noqa: E402
+from src.common.logger import LogManager  # noqa: E402
+from src.core.cache import (  # noqa: E402
     cache_client,
     cases_list_key,
-    reports_summary_key,
 )
-from src.core.case_manager import CaseManager
-from src.db.db_session import DatabaseSession
-from src.web import create_app
+from src.core.case_manager import CaseManager  # noqa: E402
+from src.db.db_session import DatabaseSession  # noqa: E402
+from src.web import create_app  # noqa: E402
 
 logger = LogManager.get_logger()
 
@@ -201,7 +199,7 @@ class BenchmarkDataSeeder:
         异常:
             无
         """
-        self.execution_ids: List[str] = []
+        self.execution_ids: list[str] = []
 
     def _pick_priority(self, roll: float) -> str:
         """
@@ -291,8 +289,9 @@ class BenchmarkDataSeeder:
                 remark=f"缓存基准批次{batch_index}",
             )
             start_base = datetime.now()
-            for order, case in enumerate(chosen_cases):
-                # 每条独立按pass_rate概率判定结果
+            for case in chosen_cases:
+                # 每条独立按pass_rate概率判定结果（原 enumerate 的 order 未使用，
+                # B007 清理时去掉 enumerate，循环语义不变）
                 is_passed = random.random() < pass_rate
                 result = "passed" if is_passed else "failed"
                 start_time = start_base
@@ -404,8 +403,8 @@ class LatencyStats:
         异常:
             无
         """
-        self.samples: List[float] = []
-        self._wall_seconds: Optional[float] = None
+        self.samples: list[float] = []
+        self._wall_seconds: float | None = None
 
     def add(self, latency_ms: float) -> None:
         """
@@ -486,7 +485,7 @@ class LatencyStats:
         """最大延迟（毫秒）"""
         return round(max(self.samples), 3) if self.samples else 0.0
 
-    def qps(self, total_seconds: Optional[float] = None) -> float:
+    def qps(self, total_seconds: float | None = None) -> float:
         """
         计算每秒请求数QPS
 
@@ -513,7 +512,7 @@ class LatencyStats:
             return 0.0
         return round(len(self.samples) / denominator, 2)
 
-    def to_dict(self, total_seconds: Optional[float] = None) -> dict:
+    def to_dict(self, total_seconds: float | None = None) -> dict:
         """
         导出全部指标为字典（供报告渲染）
 
@@ -736,7 +735,7 @@ class CacheBenchmarkRunner:
         def worker() -> None:
             """工作线程: 独立客户端发per_thread个请求并线程安全记样本"""
             thread_client = self.app.test_client()
-            local_samples: List[float] = []
+            local_samples: list[float] = []
             for _ in range(per_thread):
                 start = time.perf_counter()
                 response = thread_client.get(path)
@@ -849,7 +848,7 @@ class CacheBenchmarkRunner:
 
     def run_all(
         self, request_count: int = 200, concurrency: int = 10
-    ) -> Dict[str, dict]:
+    ) -> dict[str, dict]:
         """
         顺序执行全部性能场景（关/开两组同序列）+ 正确性场景
 
@@ -864,7 +863,7 @@ class CacheBenchmarkRunner:
         异常:
             AssertionError: 任一接口非200时抛出
         """
-        results: Dict[str, dict] = {}
+        results: dict[str, dict] = {}
 
         def _pair(name: str, runner: Callable[[bool], LatencyStats]) -> None:
             """跑关/开两组并收录指标（内部函数）"""

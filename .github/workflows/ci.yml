@@ -5,10 +5,10 @@
 #    用【job 级】continue-on-error 保证整体不阻断流水线，但步骤级不套
 #    continue-on-error——失败步骤如实显示红叉并产生 annotation，
 #    末尾"探测版本结果汇总"步骤把失败项汇总成 ::warning::，信号不丢失
-# 2. 步骤顺序：依赖安装 → ruff 全量强制（src+tests，不 ignore 规则）
+# 2. 步骤顺序：依赖安装 → ruff 全量强制（src+tests+scripts，不 ignore 规则）
 #    → mypy 增量（仅阻断本次 diff 新增行上的类型错误，未改动行存量豁免）
 #    → mypy 全量基线（豁免不阻断，::warning:: 给稳定趋势数）
-#    → pytest 全量 487（含覆盖率门禁 --cov-fail-under=85）→ pip-audit 完整报告 + 分级门禁 → 探测版本结果汇总
+#    → pytest 全量（含覆盖率门禁 --cov-fail-under=85，测试数以实际运行为准不硬编码）→ pip-audit 完整报告 + 分级门禁 → 探测版本结果汇总
 # 3. pip-audit 门禁：HIGH/CRITICAL（含严重级未知，fail-closed）且不在
 #    .pip-audit-allowlist.txt（必须带未过期的过期日，缺日/过期均按未豁免处理）内
 #    才阻断；MODERATE/LOW 仅告警
@@ -68,9 +68,9 @@ jobs:
           pip install -r requirements.txt
           pip install ruff mypy pip-audit
 
-      - name: ruff 全量静态检查（src + tests，规则不 ignore，存量问题清单化后按模块日修复）
+      - name: ruff 全量静态检查（src + tests + scripts，规则不 ignore，存量问题清单化后按模块日修复）
         id: ruff-check
-        run: ruff check src tests
+        run: ruff check src tests scripts
 
       - name: mypy 增量检查（仅阻断本次新增行上的类型错误；未改动行存量豁免）
         id: mypy-check
@@ -84,13 +84,14 @@ jobs:
             BASE_SHA=origin/main
           else
             BASE_SHA="${{ github.event.before }}"
-            # fail-closed 必须在算 CHANGED_SRC 之前校验 BASE 可达性：否则 BASE 不可达时
-            # 下面 git diff 失败→CHANGED_SRC 空→会误走"无 src 变更跳过"分支 exit0（假绿）。
-            # cat-file -e 校验是否为可达 commit；空 BASE（"^{commit}"）同样失败，堵住边缘
-            if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-              echo "::error::BASE_SHA=${BASE_SHA} 不是可达提交对象（force-push/历史重写/before 丢失？），无法判定新增行类型错误，fail-closed 阻断"
-              exit 1
-            fi
+          fi
+          # fail-closed 守卫两分支共用，必须在算 CHANGED_SRC 之前校验 BASE 可达性：
+          # PR 分支 fetch 失败导致 origin/main 缺失、push 分支 before 不可达（force-push/
+          # 历史重写）都会在此判红；否则 git diff 失败→CHANGED_SRC 空→误走"无 src 变更
+          # 跳过"分支 exit0（假绿）。cat-file -e 同时校验空 BASE（"^{commit}"）边缘
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::BASE_SHA=${BASE_SHA} 不是可达提交对象（force-push/历史重写/before 丢失/PR基线fetch失败？），无法判定新增行类型错误，fail-closed 阻断"
+            exit 1
           fi
           CHANGED_SRC=$(git diff --name-only "$BASE_SHA"...HEAD -- '*.py' | grep '^src/' || true)
           echo "本次变更的 src 文件：${CHANGED_SRC:-（无）}"
@@ -157,7 +158,7 @@ jobs:
           echo "::warning::TestMatrix mypy 全量存量错误 ${baseline_count} 个（趋势基线，只减不增；增量步骤已硬阻断变更文件自身新增错误）"
           echo "全量基线错误数=${baseline_count}（豁免不阻断），mypy 退出码=${baseline_code}"
 
-      - name: pytest 全量回归（487 passed）+ 覆盖率门禁（≥85%）
+      - name: pytest 全量回归 + 覆盖率门禁（--cov-fail-under=85，测试数以实际输出为准）
         id: pytest-run
         # 覆盖率不足/测试失败退出码 1 判红；退出码 5（无测试被收集）同样判红——
         # testpaths 固定为 tests/，0 收集只可能是配置/路径损坏，不设容忍以防静默通过

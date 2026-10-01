@@ -142,9 +142,13 @@ def main() -> int:
     print("Worker 已就绪，等待队列任务……按 Ctrl+C 优雅停止。")
     print("-" * 64)
 
-    # worker 是 daemon 线程，主线程必须阻塞，否则进程立即退出
+    # worker 是 daemon 线程，主线程必须阻塞，否则进程立即退出。
+    # wait 必须带 timeout 轮询：Windows 下 Event.wait() 是 C 层阻塞，
+    # 无 timeout 时挂起的 Ctrl+C/Ctrl+Break 信号处理器永远得不到解释器
+    # 派发机会（进程不退出）；0.2s 周期返回使信号最迟 0.2s 内被处理。
     try:
-        _exit_event.wait()
+        while not _exit_event.wait(timeout=0.2):
+            pass
     except KeyboardInterrupt:
         # 信号处理器已覆盖常规路径，此处为双保险
         stop_worker()
