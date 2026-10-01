@@ -1,20 +1,29 @@
 """
-TelnetClient 网口通信封装单元测试（本地 socket mock telnet 服务端方案）
+TelnetClient 网口通信封装单元测试（本地 socket mock 服务端 + monkeypatch 双方案）
 
 覆盖范围:
     - TelnetClientError 异常消息格式（带/不带 host）
     - TelnetClient 构造参数校验（空 host、port=0、port 越界）
     - 本地 socket mock 服务端的 connect/login/execute/close 全流程
-    - 连接失败、未连接调用、空命令、expect 超时等异常路径
+      （connect 幂等断言到底层连接实例同一性，防第二条 TCP 连接泄漏）
+    - 连接失败双分支：monkeypatch 注入 ConnectionRefusedError/TimeoutError，
+      分别精确断言"连接失败"/"连接超时"，消除实连的操作系统平台漂移
+    - login 认证失败（index<0 分支）、login_timeout 显式参数行使
+    - 未连接调用、空命令、expect 超时等异常路径
+    - telnetlib 不可用（置 None，PEP 594）抛 RuntimeError
+    - login 的 EOFError/通用异常、execute 写入 OSError/读取 EOFError、
+      close 吞 OSError 等异常包装路径
     - 上下文管理器 __enter__/__exit__ 自动连接与断开
 
 测试方案:
-    不连接任何真实外部设备：在 127.0.0.1 上用 socket 监听 OS 分配的随机端口，
-    子线程接受单个连接后按 "login: → Password: → $ 提示符" 序列与客户端交互，
-    命令阶段回显命令并返回固定输出与新提示符。用 threading.Event 通知主线程
-    服务端已 listen，用 fixture 的 yield/finally 保证 socket 关闭与线程 join，
-    杜绝端口与线程泄漏。全程禁用固定 sleep 赌时序，超时由 socket/telnet
-    客户端的 timeout 参数控制。
+    不连接任何真实外部设备：在 127.0.0.1 上用 socket 监听 OS 分配的随机端口。
+    MockTelnetServer 采用 recv 驱动状态机（不是无条件连发提示符），分三模式：
+    "ok" 正常 login:/Password:/$ 序列+命令回显、"auth_fail" 用户名后只回 ERROR
+    （驱动 index<0 认证失败分支）、"silent" accept 后不发 banner（行使
+    login_timeout）。用 threading.Event 通知主线程服务端已 listen，
+    fixture 的 yield/finally 保证 socket shutdown+close 与线程 join(timeout)，
+    杜绝端口与线程泄漏。全程禁用固定 sleep 赌时序，超时由 telnet client 的
+    timeout/login_timeout 与 socket 超时控制（变异测试以耗时上界断言参数生效）。
 """
 
 import socket

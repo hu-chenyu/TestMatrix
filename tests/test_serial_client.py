@@ -1,19 +1,26 @@
 """
-SerialClient 串口封装单元测试（loop:// 伪串口方案，不依赖真实硬件）
+SerialClient 串口封装单元测试（loop:// 伪串口 + MagicMock/monkeypatch 双方案）
 
 覆盖范围:
     - SerialClientError 异常消息格式（带/不带 port）
     - SerialClient 构造参数校验（空 port、非法 baudrate）
     - loop:// 回环伪串口的 open/close/is_open 与重复调用幂等性
+      （幂等断言到底层 serial 实例同一性，防旧连接泄漏）
     - 上下文管理器 __enter__/__exit__ 自动开关
-    - send_command 回环读取（无 expect 全量收割 / 有 expect 特征等待）
+    - send_command 分派验证（有 expect 必须走 read_until、无 expect 走 read_all，
+      用 MagicMock 断言调用路径，特征串由 mock 注入而非命令回显自带）
+    - _reset_input_buffer 每次发送前调用一次、read_until 显式 timeout 真正生效
     - send_command/read_until/read_all 的异常路径（空命令、未打开、超时、空缓冲）
-    - list_available_ports 静态方法返回类型
+    - 物理端口不在枚举、Serial 构造/write/read/close/reset 抛 SerialException
+      时统一包装为 SerialClientError（含失败容错不阻断）
+    - list_available_ports 对 comports() 枚举结果原样透传（monkeypatch 假设备）
 
 测试方案:
     使用 pyserial 内置 loop:// 协议 URL：写入的字节经回环立即可读，
     无需物理串口/USB 转串口模块。SerialClient.open() 对含 "://" 的
-    端口标识走 serial_for_url 分支，与物理 COM 口走同一套读写封装。
+    端口标识走 serial_for_url 分支，与物理 COM 口走同一套读写封装；
+    无真机难以触发的物理端口/SerialException 分支用 MagicMock 与
+    monkeypatch 注入。变异测试（Day39-fix）9 个盲区点全部可被本文件抓住。
 """
 
 import time
