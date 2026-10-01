@@ -16,7 +16,12 @@ SerialClient 串口封装单元测试（loop:// 伪串口方案，不依赖真�
     端口标识走 serial_for_url 分支，与物理 COM 口走同一套读写封装。
 """
 
+import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock, PropertyMock
+
 import pytest
+import serial
 from src.common.serial_client import SerialClient, SerialClientError
 
 
@@ -106,13 +111,19 @@ class TestSerialClientLoopback:
         finally:
             client.close()
 
-    def test_重复open幂等不抛异常(self) -> None:
-        """已打开状态下再次 open 直接跳过，不重复创建设备也不报错。"""
+    def test_重复open幂等不抛异常且底层实例不重建(self) -> None:
+        """已打开状态下再次 open 直接跳过：不报错，且底层串口实例必须是同一个对象。
+
+        变异守卫：若删除 open() 中的 is_open 提前返回，第二次 open 会新建
+        serial 实例覆盖 self._serial，本断言即失败（防止旧连接泄漏）。
+        """
         loop_client_proxy = SerialClient(port="loop://")
         loop_client_proxy.open()
+        first_serial = loop_client_proxy._serial
         try:
             loop_client_proxy.open()
             assert loop_client_proxy.is_open is True
+            assert loop_client_proxy._serial is first_serial
         finally:
             loop_client_proxy.close()
 
@@ -140,10 +151,43 @@ class TestSerialClientCommands:
         result = loop_client.send_command("PING\n", wait_time=0.1)
         assert "PING" in result
 
-    def test_send_command有expect等待特征字符串(self, loop_client: SerialClient) -> None:
-        """发送含 OK 的命令，expect=OK 在回环数据中命中后返回。"""
-        result = loop_client.send_command("AT+VERSION OK\n", expect="OK", wait_time=0.1)
-        assert "OK" in result
+    def test_send_command有expect走read_until分支_响应不依赖命令回显(self) -> None:
+        """expect 非 None 时必须走 read_until 分派，且响应来自设备而非命令自身回显。
+
+        变异守卫（S2）：命令 "AT+VERSION\\n" 不含特征串 "DEVICE_READY"，
+        read_until 被 mock 为返回设备注入的响应；若源码误删 expect 分支
+        恒走 read_all，则 read_until 零调用且拿不到注入响应，断言失败。
+        """
+        fake_serial = MagicMock()
+        fake_serial.is_open = True
+        client = SerialClient(port="loop://")
+        client._serial = fake_serial
+        client.read_until = MagicMock(return_value="DEVICE_READY")  # send_command 调 self.read_until
+        client.read_all = MagicMock(return_value="ALL_OUTPUT")
+        try:
+            result = client.send_command("AT+VERSION\n", expect="DEVICE_READY", wait_time=0)
+            assert result == "DEVICE_READY"
+            client.read_until.assert_called_once()
+            assert "DEVICE_READY" not in "AT+VERSION\n"  # 特征串确实不来自命令回显
+            client.read_all.assert_not_called()
+        finally:
+            client.close()
+
+    def test_send_command无expect走read_all分支(self) -> None:
+        """expect=None 时走 read_all 收割分支，read_until 不被调用（S2 对照）。"""
+        fake_serial = MagicMock()
+        fake_serial.is_open = True
+        client = SerialClient(port="loop://")
+        client._serial = fake_serial
+        client.read_until = MagicMock(return_value="DEVICE_READY")
+        client.read_all = MagicMock(return_value="ALL_OUTPUT")
+        try:
+            result = client.send_command("AT+VERSION\n", wait_time=0)
+            assert result == "ALL_OUTPUT"
+            client.read_all.assert_called_once()
+            client.read_until.assert_not_called()
+        finally:
+            client.close()
 
     def test_send_command空命令抛value错误(self, loop_client: SerialClient) -> None:
         """空字符串命令抛 ValueError，不触达底层串口。"""
@@ -156,6 +200,13 @@ class TestSerialClientCommands:
         with pytest.raises(SerialClientError, match="未打开"):
             client.send_command("ATI\n")
         client.close()
+
+    def test_read_until真实回环命中特征返回内容(self, loop_client: SerialClient) -> None:
+        """真 loop:// 端到端：read_until 在回环缓冲中命中特征串并返回（覆盖成功返回分支）。"""
+        loop_client._serial.write(b"BOOT_OK\n")
+        loop_client._serial.flush()
+        result = loop_client.read_until(expect="BOOT_OK", timeout=1.0)
+        assert "BOOT_OK" in result
 
     def test_read_until超时抛串口异常(self, loop_client: SerialClient) -> None:
         """expect 特征在超时窗口内不出现（只写不含特征的数据）时抛 SerialClientError。"""
@@ -190,7 +241,151 @@ class TestSerialClientCommands:
 class TestSerialClientEdgeCases:
     """其余工具方法与边界行为测试。"""
 
-    def test_list_available_ports返回列表类型(self) -> None:
-        """list_available_ports 恒返回 list（无物理串口时为空列表，不抛异常）。"""
+    def test_list_available_ports返回系统枚举内容(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """monkeypatch comports 返回含假设备的枚举，断言结果原样透传设备名。
+
+        变异守卫（S6）：若 list_available_ports 恒返回 []，假设备名丢失即失败，
+        取代旧版恒真的 isinstance(list) 同义反复断言。
+        """
+        monkeypatch.setattr(
+            serial.tools.list_ports,
+            "comports",
+            lambda: [SimpleNamespace(device="COM_FAKE_99")],
+        )
         ports = SerialClient.list_available_ports()
         assert isinstance(ports, list)
+        assert "COM_FAKE_99" in ports
+
+
+# ----------------------------------------------------------------------
+# mock 驱动：分派验证（S7/S8）与物理/异常路径（E 类）
+# ----------------------------------------------------------------------
+class TestSerialClientMockedPaths:
+    """通过 monkeypatch/MagicMock 覆盖无真机难以触发的分支。
+
+    覆盖：send_command 前置清缓冲调用（S7）、read_until 显式超时生效（S8）、
+    物理端口不存在、串口构造/写入/读取/关闭异常包装、清缓冲失败容错。
+    """
+
+    def test_send_command发送前调用reset_input_buffer一次(self) -> None:
+        """S7：每次发命令前必须先清接收缓冲，防止上次残留串入本次响应。"""
+        fake_serial = MagicMock()
+        fake_serial.is_open = True
+        fake_serial.read_all.return_value = ""
+        client = SerialClient(port="loop://")
+        client._serial = fake_serial
+        try:
+            client.send_command("AT\n", wait_time=0)
+            fake_serial.reset_input_buffer.assert_called_once()
+        finally:
+            client.close()
+
+    def test_read_until显式timeout短于客户端默认超时_快速失败(self) -> None:
+        """S8：显式 timeout 必须真正缩短等待，而非被默认 3.0s 覆盖。
+
+        真 loop:// 且缓冲无数据：client 默认 timeout=2.0，显式传 0.05，
+        必须在 1 秒内抛超时；若源码忽略显式值恒用默认值，耗时约 2 秒断言失败。
+        （断言的是 deadline 生效，不依赖固定 sleep 赌结果，超时是确定性事件。）
+        """
+        client = SerialClient(port="loop://", timeout=2.0)
+        client.open()
+        start = time.perf_counter()
+        try:
+            with pytest.raises(SerialClientError, match="读取超时"):
+                client.read_until(expect="##NEVER_APPEAR##", timeout=0.05)
+            elapsed = time.perf_counter() - start
+            assert elapsed < 1.0, f"显式 0.05s 超时未生效，实际耗时 {elapsed:.2f}s（疑似用了默认 2.0s）"
+        finally:
+            client.close()
+
+    def test_物理端口不在枚举时open抛串口异常(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """E：comports 枚举为空时 open 物理端口，抛带设备列表提示的 SerialClientError。"""
+        monkeypatch.setattr(serial.tools.list_ports, "comports", lambda: [])
+        client = SerialClient(port="COM_NOT_EXIST")
+        with pytest.raises(SerialClientError, match="不存在"):
+            client.open()
+        assert client._serial is None
+
+    def test_串口构造serial异常包装为串口异常(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """E：物理 serial.Serial 构造抛 SerialException 时包装为 SerialClientError。"""
+        monkeypatch.setattr(
+            serial.tools.list_ports,
+            "comports",
+            lambda: [SimpleNamespace(device="COM1")],
+        )
+        monkeypatch.setattr(
+            serial,
+            "Serial",
+            MagicMock(side_effect=serial.SerialException("access denied")),
+        )
+        client = SerialClient(port="COM1")
+        with pytest.raises(SerialClientError, match="串口打开失败"):
+            client.open()
+        assert client._serial is None
+
+    def test_命令写入serial异常包装为串口异常(self) -> None:
+        """E：write 抛 SerialException 时包装为 SerialClientError（命令写入失败）。"""
+        fake_serial = MagicMock()
+        fake_serial.is_open = True
+        fake_serial.write.side_effect = serial.SerialException("write io error")
+        client = SerialClient(port="loop://")
+        client._serial = fake_serial
+        try:
+            with pytest.raises(SerialClientError, match="命令写入失败"):
+                client.send_command("AT\n", wait_time=0)
+        finally:
+            client.close()
+
+    def test_read_until读取serial异常包装为串口异常(self) -> None:
+        """E：read_until 轮询中 in_waiting 抛 SerialException 时包装为读取异常。"""
+        fake_serial = MagicMock()
+        type(fake_serial).in_waiting = PropertyMock(
+            side_effect=serial.SerialException("read io error")
+        )
+        client = SerialClient(port="loop://")
+        client._serial = fake_serial
+        try:
+            with pytest.raises(SerialClientError, match="读取异常"):
+                client.read_until(expect="X", timeout=0.3)
+        finally:
+            client.close()
+
+    def test_read_all读取serial异常包装为串口异常(self) -> None:
+        """E：read_all 中 in_waiting 抛 SerialException 时包装为读取异常。"""
+        fake_serial = MagicMock()
+        type(fake_serial).in_waiting = PropertyMock(
+            side_effect=serial.SerialException("read io error")
+        )
+        client = SerialClient(port="loop://")
+        client._serial = fake_serial
+        try:
+            with pytest.raises(SerialClientError, match="读取异常"):
+                client.read_all()
+        finally:
+            client.close()
+
+    def test_close吞掉底层关闭异常不向上抛(self) -> None:
+        """E：底层 close 抛 SerialException 时仅记录警告，close() 不抛且实例置 None。"""
+        fake_serial = MagicMock()
+        fake_serial.is_open = True
+        fake_serial.close.side_effect = serial.SerialException("close io error")
+        client = SerialClient(port="loop://")
+        client._serial = fake_serial
+        client.close()  # 不抛异常
+        assert client._serial is None
+
+    def test_清空接收缓冲失败不阻断命令发送(self) -> None:
+        """E：reset_input_buffer 抛异常仅警告，send_command 继续执行并正常返回。"""
+        fake_serial = MagicMock()
+        fake_serial.is_open = True
+        fake_serial.in_waiting = 16
+        fake_serial.reset_input_buffer.side_effect = serial.SerialException("reset io error")
+        fake_serial.read.return_value = b"AFTER_RESET_FAIL"
+        client = SerialClient(port="loop://")
+        client._serial = fake_serial
+        try:
+            result = client.send_command("AT\n", wait_time=0)
+            assert result == "AFTER_RESET_FAIL"
+            fake_serial.write.assert_called_once()
+        finally:
+            client.close()
