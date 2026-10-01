@@ -71,7 +71,8 @@ def _parse_int_param(name: str, default: int) -> int:
     try:
         return int(raw_value)
     except (TypeError, ValueError):
-        raise ValidationError("limit必须为正整数")
+        # 参数校验失败是干净的业务错误，与底层 TypeError/ValueError 无因果链，显式抑制
+        raise ValidationError("limit必须为正整数") from None
 
 
 @reports_bp.route("/summary")

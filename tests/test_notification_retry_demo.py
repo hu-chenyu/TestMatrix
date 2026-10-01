@@ -465,7 +465,7 @@ class TestRetryEndToEnd:
         # jitter区间断言: 第k次等待∈[base×2^(k-1), ×1.25]
         base_delays = [1.0, 2.0, 4.0]
         assert len(sleeper.delays) == 3
-        for actual, base in zip(sleeper.delays, base_delays):
+        for actual, base in zip(sleeper.delays, base_delays, strict=True):
             assert base <= actual <= base * 1.25, (
                 f"delay {actual} 不在 [{base}, {base * 1.25}] 区间"
             )
