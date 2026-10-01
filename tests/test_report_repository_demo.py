@@ -27,6 +27,7 @@ from src.core.report_analyzer import (
     ReportStatistics,
     StatisticsResult,
 )
+from src.db import models
 from src.db.db_session import DatabaseSession
 
 # 项目根目录（本文件位于 tests/ 下，向上一级为项目根）
@@ -350,3 +351,134 @@ class TestEndToEndIntegration:
         # 5. 趋势查询含该批次
         trend = ReportRepository.get_trend_data(limit=10)
         assert any(item["execution_id"] == execution_id for item in trend)
+
+
+# ===========================================================================
+# Day41 优先级执行分布聚合
+# ===========================================================================
+@allure.feature("报告统计仓储")
+@allure.story("优先级分布聚合")
+@allure.severity(allure.severity_level.CRITICAL)
+@pytest.mark.api
+@pytest.mark.regression
+class TestPriorityDistribution:
+    """get_priority_distribution：P0-P3分组/unknown悬空/固定排序/通过率"""
+
+    @staticmethod
+    def _seed(
+        cases: list[tuple[str, str]],
+        executions: list[tuple[str, str]],
+    ) -> None:
+        """
+        直接写ORM造数（仓储单测，不经CaseManager链路）
+
+        参数:
+            cases (list[tuple[str, str]]): (case_id, priority) 用例行
+            executions (list[tuple[str, str]]): (case_id, result) 明细行，
+                统一挂在 RUN-PRIORITY-0001 批次下
+
+        返回:
+            无
+        """
+        with DatabaseSession.session_scope() as session:
+            for case_id, priority in cases:
+                session.add(
+                    models.TestCase(
+                        case_id=case_id,
+                        name=case_id,
+                        module="优先级测试模块",
+                        priority=priority,
+                    )
+                )
+            for case_id, result in executions:
+                session.add(
+                    models.TestExecution(
+                        execution_id="RUN-PRIORITY-0001",
+                        case_id=case_id,
+                        case_name=case_id,
+                        result=result,
+                        duration=0.01,
+                    )
+                )
+
+    def test_empty_returns_empty_list(self, temp_db: Path) -> None:
+        """无任何执行明细时返回空列表（空库安全降级）。"""
+        assert ReportRepository.get_priority_distribution() == []
+
+    def test_p0_to_p3_grouping_and_order(self, temp_db: Path) -> None:
+        """P0-P3 各结果计数正确，返回顺序固定 P0→P1→P2→P3。"""
+        self._seed(
+            cases=[
+                ("TM-P0-0001", "P0"),
+                ("TM-P1-0001", "P1"),
+                ("TM-P2-0001", "P2"),
+                ("TM-P3-0001", "P3"),
+            ],
+            executions=[
+                ("TM-P0-0001", "passed"),
+                ("TM-P1-0001", "passed"),
+                ("TM-P1-0001", "failed"),
+                ("TM-P2-0001", "error"),
+                ("TM-P3-0001", "skipped"),
+            ],
+        )
+
+        distribution = ReportRepository.get_priority_distribution()
+
+        assert [item["priority"] for item in distribution] == [
+            "P0",
+            "P1",
+            "P2",
+            "P3",
+        ]
+        p0, p1, p2, p3 = distribution
+        assert p0["total"] == 1 and p0["passed"] == 1
+        assert p0["pass_rate"] == 1.0
+        assert p1["total"] == 2, "P1 应有两条明细"
+        assert p1["passed"] == 1 and p1["failed"] == 1
+        assert p1["pass_rate"] == 0.5
+        assert p2["total"] == 1 and p2["error"] == 1
+        assert p2["pass_rate"] == 0.0
+        assert p3["total"] == 1 and p3["skipped"] == 1
+        assert p3["pass_rate"] == 0.0
+
+    def test_orphan_goes_unknown_and_sorts_last(
+        self, temp_db: Path
+    ) -> None:
+        """悬空明细（用例已物理删除）归 unknown 且恒排末位。"""
+        self._seed(
+            cases=[("TM-P1-0001", "P1")],
+            executions=[
+                ("TM-P1-0001", "passed"),
+                ("TM-GHOST-9999", "failed"),
+            ],
+        )
+
+        distribution = ReportRepository.get_priority_distribution()
+
+        assert [item["priority"] for item in distribution] == [
+            "P1",
+            "unknown",
+        ], "unknown 必须排在 P1 之后（末位）"
+        unknown = distribution[-1]
+        assert unknown["total"] == 1, "悬空明细应完整计数不被丢弃"
+        assert unknown["failed"] == 1
+
+    def test_fields_complete(self, temp_db: Path) -> None:
+        """每行字段契约完整（七字段，与API文档逐字一致）。"""
+        self._seed(
+            cases=[("TM-P0-0001", "P0")],
+            executions=[("TM-P0-0001", "passed")],
+        )
+
+        distribution = ReportRepository.get_priority_distribution()
+
+        assert set(distribution[0].keys()) == {
+            "priority",
+            "total",
+            "passed",
+            "failed",
+            "error",
+            "skipped",
+            "pass_rate",
+        }
