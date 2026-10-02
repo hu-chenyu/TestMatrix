@@ -483,22 +483,28 @@ def _write_github_annotation(level: str, title: str, message: str) -> None:
 
 
 @pytest.hookimpl(trylast=True)
-def _emit_github_diagnosis_annotation(config, exitstatus) -> None:
+def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
     """
-    会话最末: 把失败证据合并为**单条**注解回传（仅CI环境生效）
+    会话结束: 把失败证据合并为**单条**注解回传（仅CI环境生效）
 
-    挂在 pytest_sessionfinish 而非 pytest_terminal_summary:
-    short test summary 由主 reporter 的 pytest_terminal_summary 打印，
-    conftest 的同名钩子注册更晚、反而先于它执行，此时缓冲区还是空的。
-    sessionfinish 是最后一个钩子，一定在全部摘要输出之后。
+    为什么挂在 pytest_terminal_summary 而不是 pytest_sessionfinish:
+    实测 Run #26 从 terminal_summary 发出的注解能被 GitHub 收到，
+    而 Run #27 改挂 sessionfinish 后注解完全消失（发出位置太靠日志末尾，
+    超出 GitHub 的日志扫描窗口）。既然 terminal_summary 是**已实证可用**
+    的位置，就固定用它，不动这个已验证的变量，只换载荷内容。
 
     为什么只发一条: GitHub 对 workflow command 生成的注解有数量上限，
-    逐用例各发一条会被截断丢弃（实测：逐用例注解全部丢失，仅幸存一条），
-    合并为单条可一次拿到全部证据。
+    逐用例各发一条会被截断丢弃（Run #26 实测逐用例注解全部丢失）。
+
+    载荷来源: 直读 reporter.stats['failed']——它就是 TestReport 列表，
+    自带 nodeid 与 longrepr。pytest 的 short test_summary 用 _tw.line
+    直接写、绕过多层包装，文本解析在 write_line/_tw.line/trylast
+    三种挂点下均捕获不到 FAILED 行，故不再走文本路线。
 
     参数:
-        config (pytest.Config): pytest配置对象
+        terminalreporter: pytest 终端报告器
         exitstatus (int): pytest退出码
+        config (pytest.Config): pytest配置对象
 
     返回:
         无
@@ -506,17 +512,13 @@ def _emit_github_diagnosis_annotation(config, exitstatus) -> None:
     if not os.environ.get("GITHUB_ACTIONS"):
         return
     try:
-        reporter = config.pluginmanager.get_plugin("terminalreporter")
-        stats = getattr(reporter, "stats", {}) if reporter else {}
+        stats = getattr(terminalreporter, "stats", {})
         parts = [
             f"{key}={len(stats.get(key, []))}"
             for key in ("passed", "failed", "error", "skipped", "rerun")
         ]
         chunks = [f"exitstatus={exitstatus} " + " ".join(parts)]
 
-        # 直接从 reporter.stats 取失败/错误报告（TestReport 自带 nodeid 与
-        # longrepr），比解析终端输出可靠：short test summary 走 _tw.line
-        # 直接写，绕过多层包装，文本解析易漏。
         failed_reports = list(stats.get("failed", [])) + list(
             stats.get("error", [])
         )
@@ -527,10 +529,10 @@ def _emit_github_diagnosis_annotation(config, exitstatus) -> None:
             chunks.append(f"FAILED[{nodeid}] :: " + " | ".join(tail[-5:])[:600])
 
         # 覆盖率门禁未达标时没有任何失败报告，需单独识别
-        lines = getattr(config, "_tm_captured_summary_lines", None) or []
-        for line in lines:
+        for line in getattr(config, "_tm_captured_summary_lines", None) or []:
             if "Required test coverage" in line:
                 chunks.append(line.strip()[:300])
+                break
 
         _write_github_annotation(
             "error", "pytest-diagnosis", " || ".join(chunks)[:3500]
@@ -562,5 +564,3 @@ def pytest_sessionfinish(session, exitstatus):
     session_logger = LogManager.get_logger()
     session_logger.info(summary)
     session_logger.info("=" * 80)
-    # 临时诊断: 把失败证据回传为GitHub注解（仅CI生效，修绿后随本段一并还原）
-    _emit_github_diagnosis_annotation(session.config, exitstatus)
