@@ -445,49 +445,22 @@ def _install_summary_capture(config) -> None:
     reporter = config.pluginmanager.get_plugin("terminalreporter")
     if reporter is None:
         return
-    original_write_line = reporter.write_line
+    # 必须挂在 _tw.line 而非 reporter.write_line: pytest 的
+    # short_test_summary 用 self._tw.line 直接写，绕过 write_line，
+    # 挂在 write_line 上会漏掉全部 FAILED 行
+    terminal_writer = getattr(reporter, "_tw", None)
+    if terminal_writer is None:
+        return
+    original_line = terminal_writer.line
     captured: list = []
 
-    def _tee_write_line(line, **markup) -> None:
-        """原始写行不变，同时把关键行收进缓冲区"""
-        captured.append(line)
-        original_write_line(line, **markup)
+    def _tee_line(s, **markup) -> None:
+        """原始写行不变，同时把行收进缓冲区"""
+        captured.append(s)
+        original_line(s, **markup)
 
-    reporter.write_line = _tee_write_line
+    terminal_writer.line = _tee_line
     config._tm_captured_summary_lines = captured
-
-
-def _flush_summary_annotations(config) -> None:
-    """
-    把捕获的终态摘要关键行回传为注解（仅CI环境生效）
-
-    参数:
-        config (pytest.Config): pytest配置对象
-
-    返回:
-        无
-    """
-    if not os.environ.get("GITHUB_ACTIONS"):
-        return
-    lines = getattr(config, "_tm_captured_summary_lines", None)
-    if not lines:
-        return
-    keywords = (
-        "FAILED", "ERROR ", "Required test coverage", "TOTAL",
-        "passed", "failed", "coverage",
-    )
-    interesting = [
-        line.strip()
-        for line in lines
-        if any(keyword in line for keyword in keywords)
-    ]
-    # 去重并限流，避免注解过多被 GitHub 丢弃
-    seen: list = []
-    for line in interesting:
-        if line not in seen:
-            seen.append(line)
-    for line in seen[-15:]:
-        _write_github_annotation("error", "pytest-summary", line[:900])
 
 
 def _write_github_annotation(level: str, title: str, message: str) -> None:
@@ -509,18 +482,23 @@ def _write_github_annotation(level: str, title: str, message: str) -> None:
     sys.__stdout__.flush()
 
 
-def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
+@pytest.hookimpl(trylast=True)
+def _emit_github_diagnosis_annotation(config, exitstatus) -> None:
     """
-    会话结束: 把最终统计与覆盖率结果回传为注解（仅CI环境生效）
+    会话最末: 把失败证据合并为**单条**注解回传（仅CI环境生效）
 
-    存在性: pytest 的失败出口不止"用例失败"一种。--cov-fail-under 未达标
-    时全部用例都通过，但 pytest 同样 exit 1，此时不会有任何 makereport 失败
-    事件，注解回传会完全落空。回传终态统计即可区分这两类失败。
+    挂在 pytest_sessionfinish 而非 pytest_terminal_summary:
+    short test summary 由主 reporter 的 pytest_terminal_summary 打印，
+    conftest 的同名钩子注册更晚、反而先于它执行，此时缓冲区还是空的。
+    sessionfinish 是最后一个钩子，一定在全部摘要输出之后。
+
+    为什么只发一条: GitHub 对 workflow command 生成的注解有数量上限，
+    逐用例各发一条会被截断丢弃（实测：逐用例注解全部丢失，仅幸存一条），
+    合并为单条可一次拿到全部证据。
 
     参数:
-        terminalreporter: pytest 终端报告器
-        exitstatus (int): pytest 退出码
-        config: pytest 配置对象
+        config (pytest.Config): pytest配置对象
+        exitstatus (int): pytest退出码
 
     返回:
         无
@@ -528,16 +506,35 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
     if not os.environ.get("GITHUB_ACTIONS"):
         return
     try:
-        stats = getattr(terminalreporter, "stats", {})
+        reporter = config.pluginmanager.get_plugin("terminalreporter")
+        stats = getattr(reporter, "stats", {}) if reporter else {}
         parts = [
             f"{key}={len(stats.get(key, []))}"
             for key in ("passed", "failed", "error", "skipped", "rerun")
         ]
-        message = (
-            f"exitstatus={exitstatus} " + " ".join(parts)
+        chunks = [f"exitstatus={exitstatus} " + " ".join(parts)]
+
+        # 直接从 reporter.stats 取失败/错误报告（TestReport 自带 nodeid 与
+        # longrepr），比解析终端输出可靠：short test summary 走 _tw.line
+        # 直接写，绕过多层包装，文本解析易漏。
+        failed_reports = list(stats.get("failed", [])) + list(
+            stats.get("error", [])
         )
-        _write_github_annotation("error", "pytest-session-summary", message)
-        _flush_summary_annotations(config)
+        for report in failed_reports[:10]:
+            nodeid = getattr(report, "nodeid", "<unknown>")
+            longrepr = str(getattr(report, "longrepr", "") or "")
+            tail = [ln.strip() for ln in longrepr.splitlines() if ln.strip()]
+            chunks.append(f"FAILED[{nodeid}] :: " + " | ".join(tail[-5:])[:600])
+
+        # 覆盖率门禁未达标时没有任何失败报告，需单独识别
+        lines = getattr(config, "_tm_captured_summary_lines", None) or []
+        for line in lines:
+            if "Required test coverage" in line:
+                chunks.append(line.strip()[:300])
+
+        _write_github_annotation(
+            "error", "pytest-diagnosis", " || ".join(chunks)[:3500]
+        )
     except Exception:  # noqa: BLE001 注解是诊断辅助，失败不得影响测试结果
         pass
 
@@ -565,3 +562,5 @@ def pytest_sessionfinish(session, exitstatus):
     session_logger = LogManager.get_logger()
     session_logger.info(summary)
     session_logger.info("=" * 80)
+    # 临时诊断: 把失败证据回传为GitHub注解（仅CI生效，修绿后随本段一并还原）
+    _emit_github_diagnosis_annotation(session.config, exitstatus)
