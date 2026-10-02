@@ -148,10 +148,11 @@ class EnvManager:
 
         参数:
             key (str): 配置键名
-            default (bool): 键不存在时的默认值
+            default (bool): 键不存在**或值无法识别**时的默认值
 
         返回:
-            bool: 转换后的布尔值（'true'/'1'/'yes'为真，'false'/'0'/'no'为假）
+            bool: 转换后的布尔值（'true'/'1'/'yes'/'on'为真，
+                  'false'/'0'/'no'/'off'为假，其余值返回default）
 
         异常:
             无（值非法时返回default，不抛出异常）
@@ -159,7 +160,15 @@ class EnvManager:
         raw = self.get(key)
         if raw is None:
             return default
-        return str(raw).strip().lower() in ("true", "1", "yes", "on")
+        # 无法识别的值返回 default 而非 False——调用方传入 default=True 时，
+        # 拼写错误的配置（如 TM_TASK_WORKER_ENABLED=enabled）会静默变成
+        # "关闭"，把配置错误伪装成显式关闭，比直接报错更难排查。
+        normalized = str(raw).strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off"):
+            return False
+        return default
 
     # ------------------------------------------------------------------
     # 业务语义配置属性

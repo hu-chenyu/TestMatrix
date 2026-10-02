@@ -271,6 +271,12 @@ class ReportAnalyzer:
                 AttributeError,         # 字段形态异常
                 TypeError,              # 字段类型异常
                 KeyError,               # 必需键缺失
+                OSError,                # 文件在扫描与解析之间被删除/无权限
+                                        # （FileNotFoundError/PermissionError
+                                        #   均为其子类；allure目录正被写入
+                                        #   或被CI产物轮转/杀软同步时
+                                        #   会命中，修复前会穿透本except
+                                        #   令整批统计全部丢失）
             ) as exc:
                 # 单文件任何形态损坏都只warning跳过，保证整批解析不中断
                 skipped += 1

@@ -164,12 +164,18 @@ class TestGlobalExceptionHandlers:
         assert data["code"] == 400
         assert data["message"] == "字段缺失"
 
-    def test_unhandled_exception_500(self) -> None:
+    def test_unhandled_exception_500(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """
         测试兜底异常捕获: 路由raise RuntimeError("意外错误")，
         客户端收到HTTP 500且响应不泄露堆栈信息；
         生产模式（TESTING=False）下仅返回通用错误消息
+
+        注: 生产环境已 fail-fast 要求 TM_SECRET_KEY，故构造生产应用前
+        需先注入密钥（缺密钥的 fail-fast 行为由
+        tests/test_p2_hardening_demo.py::TestSecretKeyFailFast 专项覆盖）。
         """
+        monkeypatch.setenv("TM_SECRET_KEY", "test-only-prod-key")
+
         # TESTING模式: 保留原始异常消息（便于调试），但不泄露堆栈
         test_client = _create_exception_app("test").test_client()
         response = test_client.get("/api/trigger/runtime")

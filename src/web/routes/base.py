@@ -52,7 +52,7 @@ def _probe_database() -> None:
         session.execute(text("SELECT 1"))
 
 
-def _check_database() -> tuple[bool, str]:
+def _check_database() -> tuple[bool, str, str]:
     """
     带超时保护的数据库连通性检查
 
@@ -60,13 +60,19 @@ def _check_database() -> tuple[bool, str]:
     未完成即判定数据库不可用（网络黑洞/连接堆积等场景），
     确保/health接口自身始终可控返回，不随数据库hang死。
 
+    返回值刻意拆成「对外摘要」与「内部详情」两段：摘要不含连接串与SQL，
+    详情仅供 TESTING 模式回显与日志使用（口径同 6.7 TESTING/生产双模式）。
+
     参数:
         无
 
     返回:
-        tuple[bool, str]: (是否连通, 失败原因描述)；
-        连通时第二元素为空字符串，失败时为**不含连接串与SQL**的异常类型名
-        （原始异常仅进日志，见 except 分支注释）
+        tuple[bool, str, str]: (是否连通, 对外摘要, 内部详情)
+        - 连通: (True, "", "")
+        - 超时: (False, 超时描述, 超时描述)
+        - 探测异常: (False, 异常类型名摘要, 完整异常文本)
+          完整文本含 SQLAlchemy 连接URL与SQL片段，**禁止**在非 TESTING
+          环境回显（/health 无鉴权且常被监控高频轮询）
     """
     executor = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="health-db-probe"
@@ -74,19 +80,17 @@ def _check_database() -> tuple[bool, str]:
     future = executor.submit(_probe_database)
     try:
         future.result(timeout=HEALTH_DB_PROBE_TIMEOUT)
-        return True, ""
+        return True, "", ""
     except FutureTimeoutError:
         future.cancel()
-        return False, f"数据库探测超时（超过{HEALTH_DB_PROBE_TIMEOUT}秒）"
+        detail = f"数据库探测超时（超过{HEALTH_DB_PROBE_TIMEOUT}秒）"
+        return False, detail, detail
     except Exception as exc:  # noqa: BLE001 健康检查需兜住全部数据库异常
-        # 只回传异常类型名：str(exc) 会携带完整 SQLAlchemy 连接URL
-        # （MySQL 模式下含用户名/库名）与 SQL 片段，属于内部实现细节。
-        # /health 无鉴权且常被监控轮询，原文外泄风险高于一般接口。
-        # 完整上下文交由日志保留，供运维排查。
+        # 完整上下文交由日志保留，供运维排查
         logger.warning(
             f"数据库健康探测失败 | 类型: {type(exc).__name__} | {exc}"
         )
-        return False, f"数据库不可用（{type(exc).__name__}）"
+        return False, f"数据库不可用（{type(exc).__name__}）", f"{type(exc).__name__}: {exc}"
     finally:
         # wait=False: 超时场景下不等待探测线程结束，立即释放主流程
         executor.shutdown(wait=False)
@@ -114,15 +118,28 @@ def health():
     探测逻辑: 执行SELECT 1轻量查询（带超时保护），
     数据库异常不影响进程存活，仅将服务标记为降级状态。
 
+    错误信息双模式（口径同 6.7 与 exceptions.py 全局处理器）:
+        TESTING=True  -> 回显完整异常详情，便于测试与本地联调定位
+        TESTING=False -> 只回显不含连接串/SQL的异常类型名摘要。
+                         /health 无鉴权且常被监控高频轮询，SQLAlchemy 异常
+                         文本含连接URL（MySQL 模式下含用户名/库名）与SQL片段，
+                         生产环境回显等于主动泄露内部实现细节
+
     返回:
         数据库正常: code=200，
             data={"status": "healthy", "database": "connected",
                   "timestamp": ISO时间, "env": 当前环境}
         数据库异常: code=503（服务降级），
             data={"status": "degraded", "database": "disconnected",
-                  "error": 异常摘要, "timestamp": ISO时间, "env": 当前环境}
+                  "error": 异常摘要或详情（按TESTING门控）,
+                  "timestamp": ISO时间, "env": 当前环境}
     """
-    connected, error_message = _check_database()
+    connected, public_summary, internal_detail = _check_database()
+    # 仅TESTING模式回显详情；生产环境一律用脱敏摘要
+    from flask import current_app
+
+    is_testing = bool(current_app.config.get("TESTING"))
+    error_message = internal_detail if is_testing else public_summary
     common = {
         "timestamp": datetime.now(UTC).isoformat(),
         "env": env_manager.current_env,

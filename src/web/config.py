@@ -109,10 +109,17 @@ def resolve_secret_key(config_class: type[Config]) -> str:
 
     解析规则:
         1. TM_SECRET_KEY 环境变量存在且非空 -> 直接使用（生产唯一正确姿势）
-        2. 否则生成一个进程级随机 key 并返回
+        2. 生产环境未配置 -> 抛 ValueError **fail-fast 拒绝启动**
+        3. dev/test 环境未配置 -> 生成进程级随机 key（本地开发零配置可用）
 
-    为什么要延后到工厂阶段: 类属性在 import 时求值，多 worker 部署下各进程
+    为什么延后到工厂阶段: 类属性在 import 时求值，多 worker 部署下各进程
     会得到不同的随机 key，导致跨进程 session/签名互相无法校验。
+
+    为什么生产必须 fail-fast: 随机 key 每次重启都变、且多 worker 各不相同，
+    session 在进程间与重启后必然失效；这属于"配置错了却在运行中悄悄降级"的
+    最坏形态——服务看着是好的，登录态却随机失效。启动即失败把问题暴露在
+    部署时刻，比运行后排查便宜得多。dev/test 保留随机 key 是刻意的：
+    本地零配置即可跑通，不应为开发体验强制配置。
 
     参数:
         config_class (type[Config]): 当前生效的配置类，用于判断是否生产环境
@@ -121,23 +128,20 @@ def resolve_secret_key(config_class: type[Config]) -> str:
         str: 可用的 SECRET_KEY
 
     异常:
-        无（未配置时降级为随机 key，仅记警告不阻断启动）
+        ValueError: 生产环境未配置 TM_SECRET_KEY 时抛出，阻断启动
     """
     configured = os.getenv("TM_SECRET_KEY", "").strip()
     if configured:
         return configured
 
-    generated = secrets.token_hex(32)
     if config_class is ProductionConfig:
-        # 生产环境未配密钥是个真实问题：随机 key 每次重启都变，多 worker
-        # 各不相同，session 在进程间和重启后必然失效。此处只告警不抛异常，
-        # 避免把"当前能跑"的部署直接打挂；是否强制要求由部署侧决定。
-        print(
-            "[警告] TM_SECRET_KEY 未设置，生产环境将使用进程级随机密钥："
-            "服务重启后所有 session 失效，多 worker 部署下各进程密钥不一致。"
-            "请在 .env 中显式配置 TM_SECRET_KEY。"
+        raise ValueError(
+            "生产环境必须显式配置 TM_SECRET_KEY：缺失时框架会退化为进程级"
+            "随机密钥，服务每次重启即失效，且多 worker 部署下各进程密钥"
+            "互不相同，session 必然随机失效。请在 .env 中设置该变量后重启。"
         )
-    return generated
+
+    return secrets.token_hex(32)
 
 
 def get_config(env_name: str | None = None) -> type[Config]:

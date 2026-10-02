@@ -52,6 +52,39 @@ REQUIRED_FIELDS = ("case_id", "name", "module")
 VALID_PRIORITIES = ("P0", "P1", "P2", "P3")
 
 
+def _normalize_scalar(value: Any) -> Any:
+    """
+    把Excel/YAML读出的标量数值归一为字符串
+
+    背景: Excel 在用户手工录入时会把纯数字内容自动存为数值类型，
+    openpyxl 原样返回 int/float/bool（如 case_id=1001、tags=123）。
+    若直接按 str 校验，这类非空单元格会被误判为"必填字段缺失"，
+    错误信息与事实相反、排障方向被带偏。
+
+    转换范围刻意收窄:
+        - str        -> strip 后的自身
+        - bool       -> "True"/"False"（放在 int 之前，bool 是 int 子类）
+        - int/float  -> 去尾零的字符串（1001 -> "1001"，1.0 -> "1"）
+        - None/复合值 -> 原样返回，由调用方按缺失/非法处理
+
+    参数:
+        value (Any): 原始单元格值
+
+    返回:
+        Any: 归一后的值；非标量类型原样返回
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        # 整数值浮点（1.0）不应变成 "1.0"，与 Excel 显示口径一致
+        return str(int(value)) if value.is_integer() else str(value)
+    return value
+
+
 class DataDriverError(Exception):
     """
     数据驱动统一异常类
@@ -184,7 +217,11 @@ class DataDriver:
                 continue
             if priority_list and case.get("priority") not in priority_list:
                 continue
-            if tags_list and not set(case.get("tags", [])) & set(tags_list):
+            # 兜底: case.get("tags") 可能为 None（调用方自造字典绕过
+            # load_cases 规范化时），set(None) 抛 TypeError 会让整条筛选
+            # 中断。None 视为无标签，交给交集判定自然跳过。
+            case_tags = case.get("tags") or []
+            if tags_list and not set(case_tags) & set(tags_list):
                 continue
             matched.append(case)
 
@@ -375,9 +412,16 @@ class DataDriver:
         validated = dict(case)
         validated.pop("_row_number", None)
 
-        # 必填字段校验: 非空字符串
+        # 必填字段校验前先做标量归一化。
+        # 背景: Excel 在用户手工录入时会把纯数字内容自动存为数值类型，
+        # openpyxl 原样返回 int/float/bool。修复前硬性要求 str，case_id=1001
+        # 会报"必填字段缺失"，而单元格明明非空——错误信息把排障方向指错。
+        # 归一化只对 str/int/float/bool 生效（bool 单独处理为 "True"/"False"），
+        # None 仍判缺失，dict/list 等复合值不做转换（避免产生无意义文本）。
         for field in REQUIRED_FIELDS:
             value = validated.get(field)
+            value = _normalize_scalar(value)
+            validated[field] = value
             if not isinstance(value, str) or not value.strip():
                 raise DataDriverError(
                     f"{where}必填字段'{field}'缺失或为空（要求非空字符串），"
@@ -386,7 +430,7 @@ class DataDriver:
                 )
 
         # 优先级校验: 必须为P0-P3（大小写容错，统一大写回写）
-        priority = validated.get("priority")
+        priority = _normalize_scalar(validated.get("priority"))
         if not isinstance(priority, str) or priority.strip().upper() not in VALID_PRIORITIES:
             raise DataDriverError(
                 f"{where}字段'priority'非法: {priority!r}，合法取值: {list(VALID_PRIORITIES)}",
@@ -395,7 +439,8 @@ class DataDriver:
         validated["priority"] = priority.strip().upper()
 
         # 标签校验: 列表或逗号分隔字符串，统一规范化为列表
-        tags = validated.get("tags", [])
+        # 数字标签（如 123）先归一为字符串再走逗号分隔路径
+        tags = _normalize_scalar(validated.get("tags", []))
         if isinstance(tags, str):
             tags = [item.strip() for item in tags.split(",") if item.strip()]
         elif isinstance(tags, list):
