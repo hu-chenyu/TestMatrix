@@ -23,6 +23,7 @@
       内联样式是邮件HTML的事实标准
 """
 
+import html
 import random
 import re
 import smtplib
@@ -33,6 +34,7 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -534,7 +536,7 @@ class EmailReportTemplate:
             '<!DOCTYPE html>\n<html>\n<head>\n'
             '<meta charset="utf-8">\n'
             '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
-            f"<title>测试报告 {execution_id}</title>\n</head>\n"
+            f"<title>测试报告 {self._esc(execution_id)}</title>\n</head>\n"
             f'<body style="margin: 0; padding: 16px; '
             f"background-color: #f4f5f7; font-family: {FONT_FAMILY};\">\n"
             f'<div style="max-width: 600px; margin: 0 auto; '
@@ -561,7 +563,9 @@ class EmailReportTemplate:
         """
         color = self._get_pass_rate_color(stat.pass_rate, stat.total)
         rate_text = self._format_pass_rate(stat.pass_rate, stat.total)
-        batch_text = f"批次 {execution_id}" if execution_id else "测试执行"
+        batch_text = (
+            f"批次 {self._esc(execution_id)}" if execution_id else "测试执行"
+        )
         return (
             f'<div style="text-align: center; padding: 8px 0 16px 0;">\n'
             f'<div style="color: {COLOR_GRAY}; font-size: 14px;">{batch_text}</div>\n'
@@ -663,7 +667,7 @@ class EmailReportTemplate:
         )
         rows = "\n".join(
             f'<tr>\n'
-            f'<td style="{TD_STYLE}">{module.name}</td>\n'
+            f'<td style="{TD_STYLE}">{self._esc(module.name)}</td>\n'
             f'<td style="{TD_STYLE}">{module.total}</td>\n'
             f'<td style="{TD_STYLE}">{module.passed}</td>\n'
             f'<td style="{TD_STYLE}">{module.failed}</td>\n'
@@ -695,7 +699,7 @@ class EmailReportTemplate:
 
         rows = "\n".join(
             f'<tr>\n'
-            f'<td style="{TD_STYLE}">{priority.name}</td>\n'
+            f'<td style="{TD_STYLE}">{self._esc(priority.name)}</td>\n'
             f'<td style="{TD_STYLE}">{priority.total}</td>\n'
             f'<td style="{TD_STYLE}">{priority.passed}</td>\n'
             f'<td style="{TD_STYLE}">{priority.failed}</td>\n'
@@ -744,17 +748,17 @@ class EmailReportTemplate:
             owner_section = (
                 f'<div style="padding: 8px 0; color: {COLOR_RED}; '
                 f'font-weight: bold;">请以下负责人关注：'
-                f"{'、'.join(owner_names)}</div>\n"
+                f"{self._esc('、'.join(owner_names))}</div>\n"
             )
 
         rows = "\n".join(
             f'<tr style="{FAILED_ROW_STYLE}">\n'
-            f'<td style="{TD_STYLE}">{detail.name}</td>\n'
-            f'<td style="{TD_STYLE}">{detail.module}</td>\n'
-            f'<td style="{TD_STYLE}">{detail.priority}</td>\n'
-            f'<td style="{TD_STYLE}">{detail.owner or "-"}</td>\n'
+            f'<td style="{TD_STYLE}">{self._esc(detail.name)}</td>\n'
+            f'<td style="{TD_STYLE}">{self._esc(detail.module)}</td>\n'
+            f'<td style="{TD_STYLE}">{self._esc(detail.priority)}</td>\n'
+            f'<td style="{TD_STYLE}">{self._esc(detail.owner) or "-"}</td>\n'
             f'<td style="{TD_STYLE} font-size: 12px;">'
-            f"{self._truncate(detail.error_message)}</td>\n"
+            f"{self._esc(self._truncate(detail.error_message))}</td>\n"
             f"</tr>"
             for detail in failed_details
         )
@@ -856,6 +860,30 @@ class EmailReportTemplate:
         return f"{ms / 1000:.2f} s"
 
     @staticmethod
+    def _esc(value: Any) -> str:
+        """
+        HTML 转义（内部方法，防邮件端 HTML 注入）
+
+        报告中的用例名/模块名/负责人/错误信息均来自平台数据，而这些数据
+        源头包含用户可写入的用例字段（module/name 经 /api/cases 落库）与
+        Allure 失败消息。它们被 f-string 直接拼进邮件 HTML 表格单元格，
+        攻击者可借此注入标签、外链或远程图片（跟踪像素），让收件人看到被
+        伪造的"可信测试报告"。此方法是所有数据字段进入 HTML 的唯一出口。
+
+        参数:
+            value (Any): 原始值（None 归一为空串）
+
+        返回:
+            str: 转义后的纯文本，可安全嵌入 HTML
+
+        异常:
+            无
+        """
+        if value is None:
+            return ""
+        return html.escape(str(value), quote=True)
+
+    @staticmethod
     def _truncate(message: str, max_length: int = ERROR_MESSAGE_MAX_LENGTH) -> str:
         """
         截断超长错误信息（内部方法）
@@ -926,6 +954,29 @@ class EmailReportTemplate:
 # ======================================================================
 # 企业微信机器人webhook通知（Day12）
 # ======================================================================
+def _mask_webhook_url(webhook_url: str) -> str:
+    """
+    剥离 webhook URL 的 query 与 fragment，只保留协议/主机/路径
+
+    企微机器人 webhook 的凭据就放在 query 串的 key 参数里。任何需要把
+    webhook 地址写进日志的地方都必须过这里——包括 requests 异常路径
+    （urllib3 的 MaxRetryError 文本自带完整 URL，不脱敏即明文泄露 key）。
+
+    参数:
+        webhook_url (str): 原始 webhook 地址
+
+    返回:
+        str: 去掉 query/fragment 后的安全地址；解析失败时返回固定占位串
+    """
+    try:
+        parts = urlsplit(str(webhook_url))
+    except ValueError:
+        return "<webhook地址解析失败>"
+    if not parts.scheme and not parts.netloc:
+        return "<webhook地址非法>"
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
 class WeChatNotifier(BaseNotifier):
     """
     企业微信机器人webhook通知器
@@ -943,7 +994,8 @@ class WeChatNotifier(BaseNotifier):
         响应 {"errcode": 0, "errmsg": "ok"} 表示成功。
 
     安全设计:
-        - webhook URL含key属敏感信息，日志只打印前30字符脱敏
+        - webhook URL含key属敏感信息，日志一律经 _mask_webhook_url 剥离
+          query 后输出；异常路径同样只打异常类型名，绝不打 str(exc)
         - send()捕获全部异常返回bool，绝不影响主流程
     """
 
@@ -1059,8 +1111,13 @@ class WeChatNotifier(BaseNotifier):
             )
         except requests.exceptions.RequestException as exc:
             # 网络层异常: ConnectionError/Timeout等全部子类
+            # 绝不打 str(exc): requests/urllib3 的连接层异常文本自带完整请求
+            # URL（"Max retries exceeded with url: /cgi-bin/webhook/send?key=XXX"），
+            # 而 webhook key 正是该接口的凭据，直接打日志等于明文泄露。
+            # 改为只记异常类型名 + 剥离 query 的目标地址。
             logger.error(
-                f"企微通知网络异常 | {type(exc).__name__}: {exc}"
+                f"企微通知网络异常 | {type(exc).__name__} | "
+                f"目标: {_mask_webhook_url(self.webhook_url)}"
             )
             return False
 
@@ -1072,6 +1129,17 @@ class WeChatNotifier(BaseNotifier):
             logger.error(
                 f"企微通知响应解析失败 | 状态码: {response.status_code} | "
                 f"响应: {response.text[:100]}"
+            )
+            return False
+
+        if not isinstance(result, dict):
+            # 响应是合法 JSON 但不是对象（数组/null/字符串）：多见于 webhook
+            # 误配到其他服务或网关返回包裹结构。此时 result.get 会抛
+            # AttributeError 逃出 send()，违反 BaseNotifier "绝不向上抛"
+            # 契约，还会让重试与死信记录被无意义的 AttributeError 淹没。
+            logger.error(
+                f"企微通知响应结构异常 | 状态码: {response.status_code} | "
+                f"期望JSON对象，实际: {type(result).__name__}"
             )
             return False
 

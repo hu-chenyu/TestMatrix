@@ -5,7 +5,8 @@ HTTP请求统一封装模块
     - 基于requests.Session的连接池复用，提升批量用例执行性能
     - 内置超时控制与网络级自动重试（连接失败/5xx状态码触发）
     - 统一异常捕获: 网络异常包装为HttpClientError，附带请求上下文
-    - 全链路日志: 请求与响应自动脱敏记录（Authorization/Token/密码字段打码）
+    - 全链路日志: 请求与响应自动脱敏记录（Authorization/Token/密码字段打码，
+      URL 查询串中的 token/key/password 等凭据参数同样打码）
     - 统一入口request()方法支撑get/post/put/delete/patch快捷方法
 
 使用示例:
@@ -18,6 +19,7 @@ HTTP请求统一封装模块
 
 import time
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -33,6 +35,22 @@ MAX_LOG_BODY_LENGTH = 2048
 SENSITIVE_HEADERS = ("authorization", "token", "cookie", "set-cookie", "api-key")
 # 请求体中需要脱敏的字段名（小写匹配）
 SENSITIVE_BODY_FIELDS = ("password", "passwd", "secret", "token", "access_key")
+# URL 查询串中需要脱敏的参数名（小写匹配）。常见于 token 走 query 的 OAuth
+# 风格接口、以及 webhook key 这类把凭据放在 ?key= 的回调地址。
+SENSITIVE_QUERY_FIELDS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "access_token",
+    "key",
+    "apikey",
+    "api_key",
+)
+# 查询串脱敏后的占位值
+QUERY_MASK = "***"
+# 日志中展示 URL 的最大长度（字符），超出部分截断，防止长签名串刷爆日志
+MAX_LOG_URL_LENGTH = 512
 
 
 class HttpClientError(Exception):
@@ -256,12 +274,14 @@ class HttpClient:
 
         method = method.strip().upper()
         url = self._build_url(path)
+        # 日志/异常统一使用脱敏 URL；实际请求仍用原始 url
+        safe_url = self._safe_url(url)
         # 未显式传超时时使用客户端统一超时配置
         kwargs.setdefault("timeout", self.timeout)
 
         # 请求前置日志（脱敏）
         logger.debug(
-            f"HTTP请求 >>> {method} {url} | "
+            f"HTTP请求 >>> {method} {safe_url} | "
             f"params: {self._mask_data(kwargs.get('params'))} | "
             f"headers: {self._mask_headers(kwargs.get('headers'))} | "
             f"body: {self._truncate(self._mask_data(kwargs.get('json') or kwargs.get('data')))}"
@@ -271,29 +291,39 @@ class HttpClient:
         try:
             response = self.session.request(method, url, **kwargs)
         except requests.exceptions.Timeout as exc:
-            logger.error(f"HTTP请求超时 | {method} {url} | 超时配置: {kwargs.get('timeout')}s")
+            logger.error(f"HTTP请求超时 | {method} {safe_url} | 超时配置: {kwargs.get('timeout')}s")
             raise HttpClientError(
-                f"请求超时: {method} {url}（{kwargs.get('timeout')}s）",
-                request_info={"method": method, "url": url, "type": "timeout"},
+                f"请求超时: {method} {safe_url}（{kwargs.get('timeout')}s）",
+                request_info={"method": method, "url": safe_url, "type": "timeout"},
             ) from exc
         except requests.exceptions.ConnectionError as exc:
-            logger.error(f"HTTP连接失败 | {method} {url} | {exc}")
+            # 注意: 不打印 str(exc)——requests 连接层异常文本自带完整 URL，
+            # 会绕过 _safe_url 二次泄露查询串凭据，只记异常类型名
+            logger.error(f"HTTP连接失败 | {method} {safe_url} | {type(exc).__name__}")
             raise HttpClientError(
-                f"连接失败: {method} {url}，请检查网络与服务可达性",
-                request_info={"method": method, "url": url, "type": "connection_error"},
+                f"连接失败: {method} {safe_url}，请检查网络与服务可达性",
+                request_info={
+                    "method": method,
+                    "url": safe_url,
+                    "type": "connection_error",
+                },
             ) from exc
         except requests.exceptions.RequestException as exc:
-            logger.error(f"HTTP请求异常 | {method} {url} | {exc}")
+            logger.error(f"HTTP请求异常 | {method} {safe_url} | {type(exc).__name__}")
             raise HttpClientError(
-                f"请求异常: {method} {url} - {exc}",
-                request_info={"method": method, "url": url, "type": "request_error"},
+                f"请求异常: {method} {safe_url} ({type(exc).__name__})",
+                request_info={
+                    "method": method,
+                    "url": safe_url,
+                    "type": "request_error",
+                },
             ) from exc
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000
 
         # 响应后置日志（脱敏+截断）
         logger.debug(
-            f"HTTP响应 <<< {method} {url} | "
+            f"HTTP响应 <<< {method} {safe_url} | "
             f"状态码: {response.status_code} | 耗时: {elapsed_ms:.1f}ms | "
             f"body: {self._truncate(self._safe_body(response))}"
         )
@@ -301,7 +331,7 @@ class HttpClient:
         # 状态码异常时提升日志级别为警告（不中断用例，由断言层决定成败）
         if response.status_code >= 400:
             logger.warning(
-                f"HTTP响应异常状态 | {method} {url} | 状态码: {response.status_code}"
+                f"HTTP响应异常状态 | {method} {safe_url} | 状态码: {response.status_code}"
             )
 
         return response
@@ -369,6 +399,50 @@ class HttpClient:
         if isinstance(data, list):
             return [HttpClient._mask_data(item) for item in data]
         return data
+
+    @staticmethod
+    def _safe_url(url: str) -> str:
+        """
+        构造可安全写入日志的 URL（查询串敏感参数脱敏 + 长度截断）
+
+        背景: 本模块已对 Authorization/Token 请求头与 password/token 请求体
+        字段做脱敏，但 URL 本身此前原样进日志与异常消息。而凭据走 query 的
+        接口极常见（?token=xxx / ?key=xxx），且 requests 的连接层异常文本
+        自带完整 URL，会二次绕过脱敏。本方法补齐该缺口。
+
+        参数:
+            url (str): 原始 URL
+
+        返回:
+            str: 脱敏并截断后的 URL，可安全落日志/进异常消息
+        """
+        try:
+            parts = urlsplit(str(url))
+        except ValueError:
+            # 极端畸形 URL 连解析都失败时，直接按纯文本截断，不因脱敏而抛错
+            return HttpClient._truncate(url, MAX_LOG_URL_LENGTH)
+
+        if not parts.query:
+            return HttpClient._truncate(
+                urlunsplit((parts.scheme, parts.netloc, parts.path, "", "")),
+                MAX_LOG_URL_LENGTH,
+            )
+
+        pairs = parse_qsl(parts.query, keep_blank_values=True)
+        masked_pairs = [
+            (name, QUERY_MASK if name.lower() in SENSITIVE_QUERY_FIELDS else value)
+            for name, value in pairs
+        ]
+        safe_url = urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(masked_pairs),
+                "",
+            )
+        )
+        return HttpClient._truncate(safe_url, MAX_LOG_URL_LENGTH)
 
     @staticmethod
     def _truncate(text: Any, limit: int = MAX_LOG_BODY_LENGTH) -> str:

@@ -311,9 +311,11 @@ async function loadTrendChart() {
                     const idx = params[0].dataIndex;
                     const row = rows[idx];
                     const ratePct = (Number(row.pass_rate) * 100).toFixed(1);
+                    // 同 P0 饼图 tooltip：自定义 formatter 返回值不转义，
+                    // 一旦 execution_id 改为可由用户指定即为等价 XSS
                     return (
                         "<div style='max-width:260px;word-break:break-all'>" +
-                        "批次：" + row.execution_id + "<br>" +
+                        "批次：" + escapeHtml(row.execution_id) + "<br>" +
                         "通过：" + row.passed + " / 失败：" + row.failed +
                         " / 异常：" + row.error + "<br>" +
                         "通过率：<b>" + ratePct + "%</b></div>"
@@ -389,8 +391,13 @@ async function loadModulePieChart() {
                 formatter: function (param) {
                     const row = param.data._row;
                     const ratePct = (Number(row.pass_rate) * 100).toFixed(1);
+                    // ECharts 5 tooltip 默认 renderMode:"html"，自定义 formatter 的
+                    // 返回值被当作 HTML 直接注入 tooltip DOM（ECharts 只对 {b}/{c}
+                    // 模板占位符做 encodeHTML，不转义自定义返回值）。module 来自
+                    // POST /api/cases/ 且后端仅校验长度不校验字符集，必须转义，
+                    // 否则构成存储型 XSS。escapeHtml 由 main.js 全局提供。
                     return (
-                        row.module + "<br>总数：" + row.total +
+                        escapeHtml(row.module) + "<br>总数：" + row.total +
                         " / 通过：" + row.passed +
                         " / 失败：" + row.failed +
                         " / 异常：" + row.error +

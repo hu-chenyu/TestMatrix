@@ -491,6 +491,31 @@ _UNIX_ABS_PATH = re.compile(
 )
 
 
+# 单条日志字段的最大长度（字符），防止超长用户输入刷爆日志
+MAX_LOG_FIELD_LENGTH = 200
+
+# 日志字段中的控制字符（换行/回车/制表/垂直制表/换页）统一折叠为空格。
+# 用户可控字段（如下载文件名）若原样写入日志，其中的换行会终止当前日志行，
+# 后续内容被解析为一条独立日志——攻击者可借此伪造审计记录（日志注入）。
+_CONTROL_CHARS = re.compile(r"[\r\n\t\v\f]")
+
+
+def _sanitize_log_field(value: str) -> str:
+    """
+    日志字段单行化与截断（防日志注入）
+
+    参数:
+        value (str): 原始字段值（通常是用户可控的字符串）
+
+    返回:
+        str: 折叠为单行并截断后的安全文本
+    """
+    collapsed = _CONTROL_CHARS.sub(" ", str(value))
+    if len(collapsed) > MAX_LOG_FIELD_LENGTH:
+        return f"{collapsed[:MAX_LOG_FIELD_LENGTH]}...[已截断]"
+    return collapsed
+
+
 def _sanitize_error_message(raw: str) -> str:
     """
     对错误消息中的服务端绝对路径做脱敏，仅保留文件名（basename）
@@ -575,7 +600,14 @@ def import_cases():
 
     # 4. 清洗文件名后落盘临时目录（secure_filename剥离路径分隔符等危险字符）
     tmp_dir = tempfile.mkdtemp(prefix="tm_case_import_")
-    tmp_file = Path(tmp_dir) / secure_filename(original_name)
+    # secure_filename 会剥掉全部非 ASCII 字符：纯中文名会被压成空串
+    # （secure_filename('用例数据.xlsx') == 'xlsx'，扩展名连同分隔点一起丢失），
+    # 导致落盘文件名无后缀、被 data_driver 判成"格式不支持"。因此清洗后若
+    # 结果不含后缀，用原始名的后缀补回。仍为纯 ASCII 安全名，不引入路径风险。
+    safe_stem = secure_filename(Path(original_name).stem)
+    safe_suffix = Path(original_name).suffix.lower()
+    safe_name = f"{safe_stem}{safe_suffix}" if safe_stem else f"import{safe_suffix}"
+    tmp_file = Path(tmp_dir) / safe_name
     try:
         upload.save(tmp_file)
 
@@ -599,9 +631,12 @@ def import_cases():
 
     # 导入完成业务埋点（Day29）: 新增/更新计数与原始文件名落日志
     # （文件名取原始上传名，非secure_filename清洗名，口径同响应data）
+    # original_name 完全由客户端控制，其中的换行/控制字符会伪造日志行
+    # （日志注入），因此写入前统一折叠为单行并截断长度。
     logger.info(
         f"用例导入完成 | inserted={stats['inserted']} | "
-        f"updated={stats['updated']} | 文件={original_name}"
+        f"updated={stats['updated']} | "
+        f"文件={_sanitize_log_field(original_name)}"
     )
 
     return success(

@@ -17,8 +17,11 @@ from flask import Blueprint
 from sqlalchemy import text
 
 from src.common.env_manager import env_manager
+from src.common.logger import LogManager
 from src.db.db_session import DatabaseSession
 from src.web.response import error, success
+
+logger = LogManager.get_logger()
 
 base_bp = Blueprint("base", __name__)
 
@@ -62,7 +65,8 @@ def _check_database() -> tuple[bool, str]:
 
     返回:
         tuple[bool, str]: (是否连通, 失败原因描述)；
-        连通时第二元素为空字符串，失败时为异常摘要（供排查）
+        连通时第二元素为空字符串，失败时为**不含连接串与SQL**的异常类型名
+        （原始异常仅进日志，见 except 分支注释）
     """
     executor = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="health-db-probe"
@@ -75,7 +79,14 @@ def _check_database() -> tuple[bool, str]:
         future.cancel()
         return False, f"数据库探测超时（超过{HEALTH_DB_PROBE_TIMEOUT}秒）"
     except Exception as exc:  # noqa: BLE001 健康检查需兜住全部数据库异常
-        return False, str(exc)
+        # 只回传异常类型名：str(exc) 会携带完整 SQLAlchemy 连接URL
+        # （MySQL 模式下含用户名/库名）与 SQL 片段，属于内部实现细节。
+        # /health 无鉴权且常被监控轮询，原文外泄风险高于一般接口。
+        # 完整上下文交由日志保留，供运维排查。
+        logger.warning(
+            f"数据库健康探测失败 | 类型: {type(exc).__name__} | {exc}"
+        )
+        return False, f"数据库不可用（{type(exc).__name__}）"
     finally:
         # wait=False: 超时场景下不等待探测线程结束，立即释放主流程
         executor.shutdown(wait=False)

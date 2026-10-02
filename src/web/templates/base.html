@@ -4,6 +4,21 @@
     <meta charset="UTF-8">
     <!-- 移动端视口适配：宽度跟随设备，初始缩放 1，禁止用户缩放避免布局抖动 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!--
+        内容安全策略（CSP）——XSS 纵深防御。
+        ECharts tooltip 等第三方 API 需要产出 HTML 字符串，若任一汇点漏转义
+        （本轮修复的饼图 tooltip 存储型 XSS 即此类），本策略可阻断 payload 执行
+        与外连外传。取值依据当前实际资源构成，无外链 CDN：
+          script-src 'self'      全部脚本为本地静态文件，无内联 <script>
+          style-src  'unsafe-inline'  dashboard.html 存在行内 style 属性，
+                                      Bootstrap 亦以 CSSOM 设置样式，两者都需要它
+          img/font-src 'self' data:     bootstrap-icons 字体与可能的内联图
+          connect-src 'self'    全部接口请求同源
+        注意：frame-ancestors 在 meta 中被浏览器忽略，点击劫持防护走 app.py 的
+        X-Frame-Options 响应头，不要在此处重复声明造成"已加固"的错觉。
+    -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
     <title>{% block title %}TestMatrix{% endblock %}</title>
 
     <!-- Bootstrap5 样式（本地静态资源，离线可用，不依赖外网CDN） -->
