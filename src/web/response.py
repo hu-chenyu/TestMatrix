@@ -8,7 +8,9 @@ return jsonify(...)，保证全平台响应格式统一为:
 设计说明:
     - 各函数返回(payload字典, HTTP状态码)元组，作为Flask视图返回值时
       由Flask自动序列化为JSON响应（与jsonify走同一序列化通道，
-      JSON_AS_ASCII等应用配置对二者行为一致）
+      中文原样输出、不按键排序——这是Flask 2.3+的默认行为，由
+      app.json.ensure_ascii/sort_keys控制，此处不再设置已废弃的
+      JSON_AS_ASCII/JSON_SORT_KEYS 应用配置）
     - code同时作为业务码与HTTP状态码，客户端可通过响应体code字段
       或HTTP状态码统一判断处理结果
     - 函数返回纯字典元组而非Response对象，便于在应用上下文之外

@@ -33,6 +33,7 @@ import traceback
 from typing import Any
 
 from flask import Flask
+from werkzeug.exceptions import HTTPException
 
 from src.common.logger import LogManager
 from src.web.response import error
@@ -164,6 +165,31 @@ def register_error_handlers(app: Flask) -> None:
         if app.config.get("TESTING") and original is not None:
             return error(str(original), 500)
         return error("服务器内部错误", 500)
+
+    @app.errorhandler(HTTPException)
+    def handle_http_exception(exc: HTTPException) -> tuple[dict[str, Any], int]:
+        """
+        捕获 werkzeug/flask 原生 HTTPException（除已被单独注册的 404/405/500）
+
+        为什么必须显式处理: Flask 2.3 的错误处理器查找会**先按状态码**、
+        再按异常类沿 MRO 回退。本文件注册了一个 `Exception` 兜底处理器，
+        而 `HTTPException` 是 `Exception` 的子类——于是 413 Request Entity
+        Too Large 这类由 werkzeug 主动抛出的 HTTP 异常会落进兜底分支，
+        被错误地转成 500 + "服务器内部错误"。后果是：监控无法区分
+        "客户端上传超限（正常拦截）"与"服务端真故障"，且丢失了原始
+        状态码。注册本处理器后，HTTPException 在 MRO 中先于 Exception
+        命中，原始状态码得以保留（404/405/500 仍由各自的按码处理器优先，
+        行为不变）。
+
+        异常:
+            无
+        """
+        code = exc.code or 500
+        # 保留 werkzeug 的可读描述（如 "413 Request Entity Too Large"），
+        # 但不暴露内部实现细节
+        description = exc.description or exc.name or "HTTP请求失败"
+        logger.warning(f"HTTP异常 | code={code} | 说明: {description}")
+        return error(description, code)
 
     @app.errorhandler(Exception)
     def handle_unexpected_error(

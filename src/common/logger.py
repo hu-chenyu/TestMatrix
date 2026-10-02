@@ -105,12 +105,21 @@ class LogManager:
                 format=log_format,
                 filter=lambda record: record["extra"].setdefault("trace_id", "-") or True,
                 enqueue=True,
+                # 与下方两个文件通道保持一致：关闭变量值展开与回溯打印。
+                # 控制台输出常被 CI 日志采集器原样收走，diagnose 泄露的局部
+                # 变量值（含密码/token）会随构建日志长期留存
+                diagnose=False,
+                backtrace=False,
             )
 
-        # 文件输出通道: DEBUG全量落盘，按天切割，UTF-8编码，多进程写入安全
+        # 文件输出通道: 按配置级别过滤（与控制台一致），按天切割，UTF-8编码，
+        # 多进程写入安全。
+        # 注意: 此前此处硬编码 level="DEBUG"，导致 log_level 参数对主日志文件
+        # 完全无效——生产设 ERROR 仍会全量落盘，放大敏感信息泄露面。
+        # 现改为跟随 log_level；确需全量排查时显式传 TM_LOG_LEVEL=DEBUG 即可。
         logger.add(
             str(cls._log_dir / "testmatrix_{time:YYYY-MM-DD}.log"),
-            level="DEBUG",
+            level=log_level,
             format=log_format,
             rotation="00:00",
             retention=f"{retention_days} days",

@@ -1,8 +1,8 @@
 /* ==========================================================================
-   TestMatrix 公共前端脚本（Day35 前端骨架）
+   TestMatrix 公共前端脚本
    职责：
-     1. 通用工具函数：formatDate（ISO 时间转可读格式）；
-     2. showToast：基于 Bootstrap5 Toast 的成功/失败两态消息提示；
+     1. 通用工具函数：formatDate（ISO 时间转可读格式）、escapeHtml（HTML 转义）；
+     2. showToast：基于 Bootstrap5 Toast 的多态消息提示；
      3. DOMContentLoaded 后初始化全局 toast 容器，并对导航当前项做
         active 高亮兜底（服务端已按 active_nav 渲染时不重复处理）。
    ========================================================================== */
@@ -34,15 +34,47 @@ function formatDate(isoString) {
 }
 
 /**
- * 展示 Bootstrap5 Toast 浮动消息（成功/失败两态）
+ * HTML 特殊字符转义（XSS 防御单一入口）
+ *
+ * 任何把后端数据拼进 HTML 字符串的汇点都必须先过这里。注意这不能替代
+ * textContent —— 首选 textContent/ createElement，本函数仅用于"必须产出
+ * HTML 字符串"的第三方 API（如 ECharts tooltip formatter，其返回值会被
+ * 当作 HTML 直接注入 tooltip DOM）。
+ *
+ * @param {*} value 任意值（null/undefined 归一为空串）
+ * @returns {string} 转义后的纯文本，可安全拼入 HTML
+ */
+function escapeHtml(value) {
+    if (value === null || value === undefined) {
+        return "";
+    }
+    return String(value).replace(/[&<>"']/g, function (char) {
+        return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+        }[char];
+    });
+}
+
+// showToast 支持的语义类型（Bootstrap5 text-bg-* 配色，warning/info 为官方内置）
+const TM_TOAST_TYPES = ["success", "danger", "warning", "info"];
+
+/**
+ * 展示 Bootstrap5 Toast 浮动消息
  *
  * @param {string} message 消息正文
  * @param {string} [type="success"] 消息类型：success 成功（绿）/danger 失败（红）
+ *        /warning 警告（黄）/info 提示（蓝）；无法识别的取值降级为 success
  * @returns {void}
  */
 function showToast(message, type) {
-    // 未显式指定类型时按成功态处理
-    type = type === "danger" ? "danger" : "success";
+    // 白名单归一化：未显式指定或取值非法时按成功态处理。
+    // 修复前只映射 danger/success 两态，导致调用方传 "warning" 时被渲染成
+    // 绿色成功样式，却配着"加载失败"文案，告警在视觉上被彻底弱化。
+    type = TM_TOAST_TYPES.indexOf(type) >= 0 ? type : "success";
 
     // 取初始化阶段创建的全局容器，不存在则兜底直接返回（非 DOM 环境保护）
     const container = document.getElementById("tm-toast-container");
@@ -119,6 +151,9 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 });
 
-// 显式暴露工具函数，供 Day36+ 各页面脚本调用
+// 显式暴露工具函数，供各页面脚本调用
+// escapeHtml 必须挂到 window：main.js 是 base.html 唯一全站加载的脚本，
+// 是 XSS 转义能力的唯一公共入口（dashboard.html 不加载 cases.js）
 window.formatDate = formatDate;
 window.showToast = showToast;
+window.escapeHtml = escapeHtml;

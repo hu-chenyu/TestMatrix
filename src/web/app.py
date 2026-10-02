@@ -34,7 +34,7 @@ from flask import Flask, g, request
 
 from src.common.logger import LogManager
 from src.core.task_queue import start_worker, stop_worker
-from src.web.config import get_config
+from src.web.config import get_config, resolve_secret_key
 from src.web.exceptions import register_error_handlers
 from src.web.routes import (
     base_bp,
@@ -72,6 +72,9 @@ def create_app(config_name: str | None = None) -> Flask:
     # 2. 加载配置
     config_class = get_config(config_name)
     app.config.from_object(config_class)
+    # SECRET_KEY 必须在工厂阶段解析（配置类属性在 import 期求值会让多 worker
+    # 部署的各进程拿到不同随机密钥，跨进程 session 互相失效）
+    app.config["SECRET_KEY"] = resolve_secret_key(config_class)
 
     logger.info(
         f"Flask应用工厂初始化完成 | 环境: {config_name or 'TM_ENV'} | "
@@ -169,9 +172,22 @@ def _register_request_hooks(app: Flask) -> None:
             - SSE流式接口（/api/executions/<id>/events）的after_request
               在流生成器完整跑完后才触发，耗时长属正常现象，不做过滤
         """
-        # 1. 安全响应头（保持既有两行原样，浏览器侧基础防护）
+        # 1. 安全响应头
+        #    X-Content-Type-Options: 禁止浏览器 MIME 嗅探
+        #    X-Frame-Options:        点击劫持防护。
+        #        注意 CSP 的 frame-ancestors 在 <meta> 声明中会被浏览器忽略，
+        #        本响应头是唯一有效的点击劫持防线，不能删。
+        #    Referrer-Policy:        跨站跳转不外泄完整 URL（本平台 URL 含
+        #        execution_id/case_id 等业务标识）
+        #    HSTS:                   仅在 HTTPS 下有意义，明文 HTTP 响应会被
+        #        浏览器忽略，因此本地 http 调试无副作用。不加 includeSubDomains
+        #        ——本项目通常是自建工具，同域可能存在其他 HTTP 服务，
+        #        强制子域升级 HTTPS 会造成非预期中断
+        #    （CSP 走 base.html 的 <meta>，此处不重复设置，避免两处漂移）
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
 
         # 2. 取请求开始时间（不存在时None兜底，绝不因日志缺计时搞挂响应）
         request_start = getattr(g, "request_start", None)
