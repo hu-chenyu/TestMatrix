@@ -268,11 +268,15 @@ class SerialClient:
             logger.error(f"串口写入失败 | {self.port} | {exc}")
             raise SerialClientError(f"命令写入失败: {exc}", port=self.port) from exc
 
-        # 等待板卡处理并输出响应
-        time.sleep(wait_time)
-
         if expect is not None:
+            # 有特征串时不再盲等: read_until 内部已按 0.05s 节拍轮询到
+            # 特征出现或超时，send_command 先无条件 sleep(wait_time)
+            # 等于让每条 expect 命令恒定多付一次空等（板卡 10ms 应答
+            # 也要干等满 wait_time），批量命令时线性放大
             return self.read_until(expect=expect, encoding=encoding)
+        # 无特征串时 wait_time 的语义是"收割这段窗口内的全部输出"，
+        # 必须真的等够时长——去掉会读到空缓冲区
+        time.sleep(wait_time)
         return self.read_all(encoding=encoding)
 
     def read_until(
