@@ -312,7 +312,14 @@ class SerialClient:
         buffer = bytearray()
 
         try:
-            while time.monotonic() < deadline:
+            # do-while 语义（v3 修复 V2-P3-2）: 原写法
+            # `while time.monotonic() < deadline` 在**首次读之前**判定，
+            # timeout=0 时循环体一次都不执行 —— 明明缓冲区里已有期望
+            # 字节也必然落到下面抛"读取超时"。v1 把 `timeout or
+            # self.timeout` 改成"0 即零等待"后，实际把"慢但能用"变成了
+            # "必然失败"。改成先读一次再判 deadline: timeout=0 的语义
+            # 回归为"非阻塞排空缓冲区"——读到就返回，读不到立即退出。
+            while True:
                 n_bytes = self._serial.in_waiting
                 if n_bytes:
                     buffer.extend(self._serial.read(n_bytes))
@@ -320,8 +327,9 @@ class SerialClient:
                         result = buffer.decode(encoding, errors="replace")
                         logger.debug(f"串口响应已接收 <<< [{self.port}] {result!r}")
                         return result
-                else:
-                    time.sleep(0.05)
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
         except serial.SerialException as exc:
             logger.error(f"串口读取异常 | {self.port} | {exc}")
             raise SerialClientError(f"串口读取异常: {exc}", port=self.port) from exc

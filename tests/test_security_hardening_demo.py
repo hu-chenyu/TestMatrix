@@ -1,7 +1,7 @@
 ﻿"""
 TestMatrix 国庆大扫除 · 阶段2 Commit A：安全与凭据类修复的回归测试
 
-本文件为每一条**安全修复**提供"漏洞已封堵"的证明（话术 2.13），覆盖：
+本文件为每一条**安全修复**提供"漏洞已封堵"的证明（提示词 2.13），覆盖：
 
     P0  dashboard.js 饼图 tooltip 存储型 XSS —— module 未转义
     P1  notification.py 企微 webhook key 随 requests 异常原文写入日志
