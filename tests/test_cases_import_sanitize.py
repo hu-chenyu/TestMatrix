@@ -134,6 +134,44 @@ class TestSanitizeErrorMessage:
         assert "a.yaml" in out
         assert "b.yaml" in out
 
+    @allure.story("Unix 常见根目录前缀全部覆盖")
+    @pytest.mark.parametrize(
+        "prefix",
+        ["/etc", "/srv", "/data", "/mnt", "/www"],
+        ids=["etc", "srv", "data", "mnt", "www"],
+    )
+    def test_unix_common_prefixes_covered(self, prefix):
+        """
+        etc / srv / data / mnt / www 五个前缀必须纳入脱敏（V2-P3-6）
+
+        修复前前缀元组只有 tmp/home/Users/var/opt/usr/root/private/
+        Applications，容器化部署常见的 /etc、/data、/mnt 全部零匹配，
+        路径原样回显。已实证 `/data/uploads/secret/cases.yaml` 与
+        `/etc/testmatrix/upload/cases.yaml` 均未脱敏。
+        """
+        out = _sanitize_error_message(
+            f"数据文件 {prefix}/uploads/secret/cases.yaml 解析失败"
+        )
+
+        assert f"{prefix}/uploads" not in out, f"{prefix} 前缀未脱敏: {out}"
+        assert "secret" not in out, f"{prefix} 下的子目录未脱敏: {out}"
+        assert "cases.yaml" in out, f"文件名应保留: {out}"
+
+    @allure.story("原有 Unix 前缀不受扩展影响")
+    @pytest.mark.parametrize(
+        "prefix",
+        ["/tmp", "/home", "/var", "/opt", "/usr", "/root", "/private"],
+        ids=["tmp", "home", "var", "opt", "usr", "root", "private"],
+    )
+    def test_existing_unix_prefixes_still_covered(self, prefix):
+        """扩充分缀后原有前缀仍正常脱敏（防前缀表被改坏）"""
+        out = _sanitize_error_message(
+            f"数据文件 {prefix}/tm_case_import_x/a.yaml 解析失败"
+        )
+
+        assert "tm_case_import_x" not in out, f"{prefix} 前缀未脱敏: {out}"
+        assert "a.yaml" in out
+
     # ------------------------------------------------------------------
     # v3 新增: 含空格路径（v2 审查 V2-P1-2）
     #

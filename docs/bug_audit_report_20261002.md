@@ -328,7 +328,7 @@ worker 逃逸异常: AttributeError: 'list' object has no attribute 'get'
 
 ---
 
-## 六、已知问题复核（话术 3.2.2 列表）
+## 六、已知问题复核（提示词 3.2.2 列表）
 
 | # | 级别 | 位置 | 复核结论 |
 |---|---|---|---|

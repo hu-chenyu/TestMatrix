@@ -522,6 +522,121 @@ class TestDescriptionTagsCoexist:
 
 
 # ===========================================================================
+# H组: 串口 read_until 的零超时语义（V2-P3-2）
+# ===========================================================================
+@allure.feature("大扫除v3 P3低风险修复")
+@allure.story("串口 read_until 零超时")
+@allure.severity(allure.severity_level.CRITICAL)
+@pytest.mark.regression
+class TestReadUntilZeroTimeout:
+    """timeout=0 应为"非阻塞排空缓冲区"而非"必然超时" """
+
+    @staticmethod
+    def _client_with_buffer(payload: bytes) -> Any:
+        """构造一个缓冲区里已有数据的串口客户端替身"""
+        from unittest.mock import MagicMock
+
+        from src.common.serial_client import SerialClient
+
+        client = SerialClient(port="loop://")
+        fake = MagicMock()
+        fake.in_waiting = len(payload)
+        fake.read.return_value = payload
+        client._serial = fake
+        return client
+
+    def test_zero_timeout_reads_existing_buffer(self) -> None:
+        """
+        timeout=0 且缓冲区已有期望字节时必须正常返回
+
+        修复前 `while time.monotonic() < deadline` 在**首次读之前**判定，
+        timeout=0 时循环体一次都不执行，缓冲区里明明有数据也必然抛超时。
+        v1 把 `timeout or self.timeout` 改成"0 即零等待"后，实际把
+        "慢但能用"变成了"必然失败"。
+        """
+        client = self._client_with_buffer(b"DEVICE_READY\n")
+
+        try:
+            result = client.read_until("DEVICE_READY", timeout=0)
+        finally:
+            client.close()
+
+        assert "DEVICE_READY" in result, (
+            f"零超时应排空缓冲区并返回已有内容，实际: {result!r}"
+        )
+
+    def test_zero_timeout_without_data_raises_immediately(self) -> None:
+        """
+        timeout=0 且缓冲区无数据时立即抛超时（不空等）
+
+        这是"非阻塞"的关键另一半：不能因为改成 do-while 就退化成
+        至少等一轮 poll 间隔。
+        """
+        from unittest.mock import MagicMock
+
+        from src.common.serial_client import SerialClient, SerialClientError
+
+        client = SerialClient(port="loop://")
+        fake = MagicMock()
+        fake.in_waiting = 0
+        client._serial = fake
+
+        try:
+            with pytest.raises(SerialClientError, match="读取超时"):
+                client.read_until("NEVER_APPEARS", timeout=0)
+        finally:
+            client.close()
+
+    def test_positive_timeout_still_waits_for_data(self) -> None:
+        """
+        正超时仍是"轮询等待"语义（对照组，防止 do-while 改过头）
+
+        第一次读为空时应当继续轮询，而不是立刻判超时。
+        """
+
+        class _LateDataSerial:
+            """前两轮无数据、第三轮才有数据的串口替身"""
+
+            # SerialClient.is_open 会读 _serial.is_open，桩必须提供
+            is_open = True
+
+            def __init__(self) -> None:
+                self.polls = 0
+                self.reads = 0
+
+            @property
+            def in_waiting(self) -> int:
+                """第三次轮询起报告有数据"""
+                self.polls += 1
+                return 1 if self.polls >= 3 else 0
+
+            def read(self, _count: int) -> bytes:
+                """记录读取并返回期望数据"""
+                self.reads += 1
+                return b"LATE_DATA"
+
+            def close(self) -> None:
+                """无资源可释放"""
+                return None
+
+        from src.common.serial_client import SerialClient
+
+        client = SerialClient(port="loop://")
+        fake = _LateDataSerial()
+        client._serial = fake
+
+        try:
+            result = client.read_until("LATE_DATA", timeout=2)
+        finally:
+            client.close()
+
+        assert "LATE_DATA" in result
+        assert fake.polls >= 3, (
+            f"正超时应继续轮询直到拿到数据，实际只轮询了 {fake.polls} 次"
+        )
+
+
+# ===========================================================================
 # G组: 缓存失效统一兜底
 # ===========================================================================
 @allure.feature("大扫除v3健壮性修复")

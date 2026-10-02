@@ -519,7 +519,7 @@ _WIN_ABS_PATH = re.compile(
     rf"[A-Za-z]:\\(?:{_PATH_CHAR}*\\)?({_PATH_NAME_CHAR}+)"
 )
 _UNIX_ABS_PATH = re.compile(
-    r"/(?:tmp|home|Users|var|opt|usr|root|private|Applications)"
+    r"/(?:tmp|home|Users|var|opt|usr|root|private|Applications|etc|srv|data|mnt|www)"
     rf"(?:{_PATH_CHAR}*/)?({_PATH_NAME_CHAR_POSIX}+)"
 )
 
@@ -672,7 +672,12 @@ def import_cases():
 
     return success(
         data={
-            "file_name": original_name,
+            # v3 修复 V2-P3-10: 与上面的日志口径对齐，统一走
+            # _sanitize_log_field。filename 完全由客户端控制，未折叠换行
+            # 时回显给前端存在观感与信息暴露口径不一致（日志已清洗、响应
+            # 未清洗）。已确认非 XSS——toast 走 textContent 由浏览器转义，
+            # 这里修的是两处口径不一致。
+            "file_name": _sanitize_log_field(original_name),
             "total": stats["total"],
             "inserted": stats["inserted"],
             "updated": stats["updated"],
