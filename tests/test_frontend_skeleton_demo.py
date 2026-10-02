@@ -163,12 +163,14 @@ class TestFrontendSkeleton:
 
         说明: Day36 起 /dashboard 已由占位卡片重写为真实看板框架，
         其特征文案改为框架分区标题（失败用例 Top 榜）；
-        /cases、/executions 仍为 Day35 占位页。
+        Day42 起 /cases 已上线为完整用例管理页，特征文案改为该页
+        独有的“批量导入”按钮（区别于导航栏同名链接文案）；
+        /executions 仍为 Day35 占位页。
         """
         # 页面路径 → 特征标题（与pages子模板当前内容逐一对应）
         page_expectations = (
             ("/dashboard", "失败用例 Top 榜"),
-            ("/cases", "用例管理建设中"),
+            ("/cases", "批量导入"),
             ("/executions", "执行记录建设中"),
         )
         for path, placeholder_title in page_expectations:
