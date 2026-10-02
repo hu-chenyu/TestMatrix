@@ -55,12 +55,28 @@ function showToast(message, type) {
     toastEl.className =
         "toast align-items-center text-bg-" + type + " border-0";
     toastEl.setAttribute("role", "alert");
-    toastEl.innerHTML =
-        '<div class="d-flex">' +
-        '<div class="toast-body">' + message + "</div>" +
-        '<button type="button" class="btn-close btn-close-white me-2 m-auto" ' +
-        'data-bs-dismiss="toast" aria-label="关闭"></button>' +
-        "</div>";
+    // 用 DOM API 构造 toast 内容：message 走 textContent，浏览器自动转义
+    // < > & " 等字符。改用 createElement 是为消除字符串拼接式 HTML 赋值
+    // 形成的 XSS 汇点——调用方（cases.js 等）会把后端 error.message 喂进来，
+    // 一旦后端错误文案回显用户输入，拼接过来的 message 就会被解析执行
+    const toastInner = document.createElement("div");
+    toastInner.className = "d-flex";
+
+    const toastBody = document.createElement("div");
+    toastBody.className = "toast-body";
+    // 纯文本赋值：即使 message 含 <script> 也只作为字面量显示，不被解析执行
+    toastBody.textContent = message;
+
+    // 关闭按钮：结构固定无用户数据，用 DOM API 保持与原结构完全一致
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "btn-close btn-close-white me-2 m-auto";
+    closeBtn.setAttribute("data-bs-dismiss", "toast");
+    closeBtn.setAttribute("aria-label", "关闭");
+
+    toastInner.appendChild(toastBody);
+    toastInner.appendChild(closeBtn);
+    toastEl.appendChild(toastInner);
     container.appendChild(toastEl);
 
     // 实例化 Toast 并展示，3 秒自动消失；关闭后移除节点避免 DOM 堆积

@@ -104,9 +104,11 @@
                     <th class="text-end text-nowrap">操作</th>
                 </tr>
             </thead>
-            <!-- 初始 loading 态；data-case-id 由 JS 渲染到操作按钮上供事件委托读取 -->
+            <!-- 初始 loading 态：服务端直出，JS 接管前避免空表闪烁；
+                 cases.js 的 renderLoadingRow() 会在首次 loadCases 时覆盖本行，
+                 故此处不带 id（无任何脚本引用，留 id 即为死标识） -->
             <tbody id="casesTableBody">
-                <tr id="casesLoadingRow">
+                <tr>
                     <td colspan="9" class="text-center text-muted py-4">
                         <span class="spinner-border spinner-border-sm me-1"
                               aria-hidden="true"></span>加载中...
