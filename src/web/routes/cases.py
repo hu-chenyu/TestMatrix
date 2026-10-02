@@ -495,25 +495,42 @@ def delete_case(case_id: str):
 # 3) 但空格不能无条件放行，否则贪婪匹配会跨过散文吞掉下一条路径
 #    （`.../a.yaml then /tmp/.../b.yaml` 只剩 b.yaml）。故空格仅在
 #    "其后紧跟的非空格串能在同段内遇到分隔符"时才算路径字符：
-#      - `John Smith\AppData` → 空格后是 `Smith\` → 放行
-#      - `a.yaml then /tmp`   → 空格后是 `then `（非空格串后又是空格，
-#                              遇不到分隔符）→ 不放行，路径在此终止
-#    已知限制: 只支持**单个**空格。`John Smith` / `Program Files` 这类
-#    单空格目录名是真实形态；多空格目录名与"散文后接新路径"在正则层面
-#    无法区分（前者 `a b c/x` 要求跨多个空格，后者 `x then /tmp` 要求
-#    断开），按真实形态取舍，不为构造场景牺牲既有"多处路径都能脱敏"
-#    的行为。
+#      - `John Smith\AppData`  → 空格后是 `Smith\` → 放行
+#      - `John  Smith\secret`  → 连续两个空格，同样放行（见下方 {1,}）
+#      - `a.yaml then /tmp`    → 空格后是 `then `（非空格串后又是空格，
+#                                 遇不到分隔符）→ 不放行，路径在此终止
 # 4) 捕获组 1 排除分隔符，保证只保留 basename；目录段整体放进可选的
 #    `(?:...)?`，使 `C:\a.yaml` 这类无目录短路径也能收敛。
+# 5) **name 类的普通分支同样必须排除空格**（与 _PATH_CHAR 对齐）。
+#    v3 只改了 _PATH_CHAR 而漏改两个 name 类，导致同一条消息里的第二条
+#    Windows 路径整体泄露：basename 组因允许空格而吞下 `a.yaml in D:`
+#    （连同下一个盘符前缀），非重叠扫描从 `D:` 之后继续，剩余
+#    `\y\b.ini` 不再以 `[A-Za-z]:\` 开头 → 零匹配 → 原样回显。
+#    实证：`see C:\x\a.yaml in D:\y\b.ini` 在 v3 输出 `see a.yaml in
+#    D:\y\b.ini`（v2 是 `see a.yaml in b.ini`，即能力回退）。
 # 注意：字符类内的 `]` 必须转义，否则会提前闭合字符类。
 _PATH_STOP = r"\r\n\"'，、)\]"
-# 路径中可出现的单个字符：非终止符**且非空格**，或满足"空格前瞻"的空格。
-# 空格必须从普通分支里排除——否则第一个分支就会直接吃掉空格，前瞻
-# 分支永远轮不到，`a.yaml then` 里的空格仍会被当路径字符
-_PATH_CHAR = rf"(?:[^{_PATH_STOP} ]| (?=[^ \r\n\"'，、)\]]*[\\/]))"
-# 文件名部分额外排除分隔符，否则 group 1 会把整条路径都吞进去
-_PATH_NAME_CHAR = rf"(?:[^{_PATH_STOP}\\]| (?=[^ \r\n\"'，、)\]]*[\\/]))"
-_PATH_NAME_CHAR_POSIX = rf"(?:[^{_PATH_STOP}/]| (?=[^ \r\n\"'，、)\]]*/))"
+# 各类字符的"禁止集合"显式拆出，避免在 f-string 里手写字符类时把
+# 空格/反斜杠写到括号外面（那会让整条正则静默失配，不报错只不匹配）。
+# 注意：字符类里要排除的是**正则转义后的反斜杠**，故必须用 "\\\\"（值
+# 为两个反斜杠）；写成 " \\"（值仅一个）会被当成转义下一个字符。
+_BS = "\\\\"  # 正则字符类中代表"一个反斜杠"的写法
+# 目录段**不**排除反斜杠：目录段本就要跨 `Users\John Smith\AppData\...`
+# 逐层消费；只有文件名段需要排除分隔符，否则 group 1 会把整条路径
+# （含散文与下一条路径的盘符前缀）都吞进去
+_PATH_BODY_CHARS = _PATH_STOP + " "             # 目录段：仅排除空格
+_PATH_WIN_NAME_CHARS = _PATH_STOP + " " + _BS    # Windows 文件名段：再排除反斜杠
+_PATH_POSIX_NAME_CHARS = _PATH_STOP + "/ "       # POSIX 文件名段：再排除斜杠
+# 空格前瞻：其后紧跟的非空格串能在同段内遇到分隔符，才算路径字符。
+# 用 {1,} 而非单个——多空格目录名（`John  Smith`）是合法形态，收紧成
+# 单空格会让账户名原样回显（泄露比"多脱敏损诊断值"严重得多）。
+_PATH_SPACE_WIN = r" {1,}(?=[^ \r\n\"'，、)\]]*[\\/])"
+_PATH_SPACE_POSIX = r" {1,}(?=[^ \r\n\"'，、)\]]*/)"
+_PATH_CHAR = rf"(?:[^{_PATH_BODY_CHARS}]|{_PATH_SPACE_WIN})"
+# 文件名部分额外排除分隔符与空格，否则 group 1 会把整条路径（含散文
+# 与下一条路径的盘符前缀）都吞进去
+_PATH_NAME_CHAR = rf"(?:[^{_PATH_WIN_NAME_CHARS}]|{_PATH_SPACE_WIN})"
+_PATH_NAME_CHAR_POSIX = rf"(?:[^{_PATH_POSIX_NAME_CHARS}]|{_PATH_SPACE_POSIX})"
 
 _WIN_ABS_PATH = re.compile(
     rf"[A-Za-z]:\\(?:{_PATH_CHAR}*\\)?({_PATH_NAME_CHAR}+)"

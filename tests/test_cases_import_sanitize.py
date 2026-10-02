@@ -172,6 +172,59 @@ class TestSanitizeErrorMessage:
         assert "tm_case_import_x" not in out, f"{prefix} 前缀未脱敏: {out}"
         assert "a.yaml" in out
 
+    @allure.story("同一条消息中的两处 Windows 路径都被脱敏")
+    def test_two_windows_paths_in_one_message(self):
+        """
+        同一条消息里的**两条** Windows 路径都必须脱敏（v5 修复的能力回退）
+
+        回归点: v3 给 _PATH_CHAR 加了空格排除，却漏改两个 name 类。
+        basename 组因允许空格而吞下 `a.yaml in D:`（连同下一个盘符
+        前缀），re.sub 非重叠扫描从 `D:` 之后继续，剩余 `\\y\\b.ini`
+        不再以 `[A-Za-z]:\\` 开头 → 零匹配 → 第二条路径原样回显。
+        实证（v3）: `see C:\\x\\a.yaml in D:\\y\\b.ini` -> `see a.yaml in D:\\y\\b.ini`
+        而 v2 是 `see a.yaml in b.ini`，即能力回退。
+        既有两条"多处路径"用例都用 POSIX 路径，恰好绕开了这个洞。
+        """
+        out = _sanitize_error_message(
+            "see " + "C:" + "\\x\\a.yaml in D:" + "\\y\\b.ini"
+        )
+
+        assert "D:" not in out, f"第二个盘符前缀泄露: {out}"
+        assert "b.ini" in out, f"第二个文件名应保留: {out}"
+        assert "a.yaml" in out, f"第一个文件名应保留: {out}"
+
+    @allure.story("多空格目录名收敛（账户名不泄露）")
+    def test_multi_space_directory_name(self):
+        """
+        目录名含**连续多个空格**时也必须完整收敛（v5 修复）
+
+        回归点: v3 的空格前瞻只支持单个空格，`John  Smith` 这类多空格
+        目录名会让前瞻失败、匹配在此终止，账户名与剩余全路径原样回显。
+        放宽为 {1,} 后收敛，且散文断开能力不受影响（见下一条用例）。
+        """
+        out = _sanitize_error_message(
+            "open C:" + "\\Users" + "\\John  Smith" + "\\secret.yaml failed"
+        )
+
+        assert "John" not in out, f"多空格账户名泄露: {out}"
+        assert "secret.yaml" in out, f"文件名应保留: {out}"
+
+    @allure.story("多空格放宽后散文断开能力不回退")
+    def test_multi_space_relaxation_keeps_prose_break(self):
+        """
+        放宽为 {1,} 后，"散文 + 新路径"仍必须在散文处断开
+
+        这是放宽的代价检查: 若一改成 ` *` 之类的前瞻，`a.yaml then /tmp/...`
+        会被整体匹配，第二条路径的目录结构又会被吞进去。
+        """
+        out = _sanitize_error_message(
+            "first /tmp/tm_case_import_1/a.yaml then /tmp/tm_case_import_2/b.yaml failed"
+        )
+
+        assert "tm_case_import_1" not in out, f"第一条目录泄露: {out}"
+        assert "tm_case_import_2" not in out, f"第二条目录泄露: {out}"
+        assert "a.yaml" in out and "b.yaml" in out
+
     # ------------------------------------------------------------------
     # v3 新增: 含空格路径（v2 审查 V2-P1-2）
     #

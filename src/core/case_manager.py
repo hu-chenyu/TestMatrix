@@ -844,12 +844,18 @@ class CaseManager:
             # 可触发的缺陷；判定逻辑本身由
             # test_v3_robustness_demo.py 直接注入异常验证。
             if not _is_unique_case_id_violation(exc):
+                # 完整异常（含 INSERT 语句与全部绑定列值）只进日志，
+                # 不进异常 message：路由只翻译 CaseConflictError，泛型
+                # CaseManagerError 会原样上抛到全局 Exception 处理器，
+                # 而该处理器在 TESTING 下 `return error(str(exc), 500)`
+                # 会把 SQL 与列值回显进响应体（v5 审查 V3-P3-6）
                 logger.error(
                     f"用例创建完整性违例（非唯一约束）| 用例: {case_id_value} | "
                     f"{type(exc).__name__}: {exc}"
                 )
                 raise CaseManagerError(
-                    f"用例创建完整性违例（检查字段是否为空/超长）: {exc}",
+                    "用例创建完整性违例（检查字段是否为空/超长），"
+                    "详情见服务端日志",
                     context={
                         "operation": "create_case",
                         "case_id": case_id_value,
