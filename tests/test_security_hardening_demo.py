@@ -40,7 +40,11 @@ import pytest
 import requests
 from flask.testing import FlaskClient
 from src.common.env_manager import env_manager
-from src.common.http_client import HttpClient
+from src.common.http_client import (
+    SENSITIVE_BODY_FIELDS,
+    SENSITIVE_QUERY_FIELDS,
+    HttpClient,
+)
 from src.common.logger import LogManager
 from src.core.notification import (
     EmailReportTemplate,
@@ -914,6 +918,89 @@ class TestHttpClientUrlMasking:
         message = str(exc_info.value)
         assert secret not in message, f"异常消息泄露查询串凭据: {message}"
         assert "api.example.com" in message, "脱敏后应保留主机名供排障"
+
+
+# ======================================================================
+# 阶段D: http_client 请求体凭据字段脱敏口径对齐
+# ======================================================================
+class TestHttpClientBodyFieldMasking:
+    """请求体侧凭据字段必须与查询串侧同口径脱敏"""
+
+    def test_access_token_in_body_is_masked(self) -> None:
+        """
+        access_token 放在 JSON body 里必须打码
+
+        回归点: SENSITIVE_BODY_FIELDS 历史上只有 access_key 而没有
+        access_token，而 SENSITIVE_QUERY_FIELDS 早已收录。同一份凭据
+        放 query 里安全、放 body 里原样进日志——OAuth 风格接口把
+        access_token 放 body 是标准做法，等于给这条路径开了个口子。
+        """
+        secret = "SUPERSECRET-access-token-xyz"
+        masked = HttpClient._mask_data(
+            {"grant_type": "client_credentials", "access_token": secret}
+        )
+
+        assert secret not in str(masked), f"access_token 泄露: {masked}"
+        assert masked["access_token"] == "***"
+        assert masked["grant_type"] == "client_credentials", (
+            "非敏感字段必须原样保留，否则日志失去排障价值"
+        )
+
+    @pytest.mark.parametrize(
+        "field_name",
+        [
+            "password",
+            "passwd",
+            "secret",
+            "token",
+            "access_token",
+            "api_key",
+            "apikey",
+            "access_key",
+            "ACCESS_TOKEN",
+            "Api_Key",
+        ],
+        ids=lambda n: n,
+    )
+    def test_every_credential_body_field_is_masked(self, field_name: str) -> None:
+        """
+        凭据字段一律打码且大小写不敏感（内部统一 lower() 比对）
+        """
+        masked = HttpClient._mask_data({field_name: "SENSITIVE-VALUE"})
+
+        assert masked[field_name] == "***", f"{field_name} 未打码"
+
+    def test_business_key_field_is_not_masked(self) -> None:
+        """
+        裸 key 字段**不**打码（刻意排除，锁定该决策）
+
+        排除理由: 查询串侧的 key 是为 ?key=xxx 这类回调凭据而设；
+        请求体里名为 key 的字段通常是业务数据（字典键、分片键），
+        打码会显著削弱排障能力。api_key/apikey 已覆盖真正的
+        API 凭据命名。
+        """
+        masked = HttpClient._mask_data({"key": "order-20260916-0001"})
+
+        assert masked["key"] == "order-20260916-0001", (
+            "业务 key 字段不应被打码，否则日志无法定位问题"
+        )
+
+    def test_body_credential_set_covers_query_credential_set(self) -> None:
+        """
+        结构不变量: 查询串侧的凭据字段必须全部被请求体侧覆盖
+
+        这是本轮缺口的根因守卫——两侧字段表是各自独立维护的字面量，
+        历史上新增 access_token 时只改了查询串侧。凡是凭据类字段
+        （裸 key 除外），body 侧漏一个就是一次凭据进日志的缺口，
+        本断言让它在 CI 上立刻变红而不是等到被人发现。
+        """
+        query_credentials = set(SENSITIVE_QUERY_FIELDS) - {"key"}
+
+        assert query_credentials <= set(SENSITIVE_BODY_FIELDS), (
+            "请求体脱敏字段未覆盖查询串侧凭据: "
+            f"{sorted(query_credentials - set(SENSITIVE_BODY_FIELDS))}"
+        )
+
 
 
 # ======================================================================

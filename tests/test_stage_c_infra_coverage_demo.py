@@ -369,10 +369,10 @@ class TestHttpClientCoverage:
         递归。漏掉 list 分支时，批量接口的 [{"password": ...}] 载荷
         会把凭据原样打进日志。
 
-        字段口径按 SENSITIVE_BODY_FIELDS 现状断言（password/secret/
-        token/access_key）。注意该元组**不含** access_token —— 与
-        SENSITIVE_QUERY_FIELDS 已收录 access_token 不一致，属阶段C
-        发现的遗留口径缺口，已单独上报待定，本轮不改行为。
+        字段口径按 SENSITIVE_BODY_FIELDS 断言（password/secret/token/
+        access_token/api_key/apikey/access_key）。该元组在阶段D 已与
+        SENSITIVE_QUERY_FIELDS 的凭据类字段对齐（此前漏收 access_token，
+        同一份凭据放 JSON body 里就会原样进日志）。
         """
         masked = HttpClient._mask_data(
             [
