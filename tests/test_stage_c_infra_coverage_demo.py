@@ -224,21 +224,22 @@ class TestDatabaseSessionCoverage:
 
         assert parsed.host == "fe80::1", f"IPv6 地址解析错误: {parsed.host!r}"
 
-    def test_mysql_host_with_colon_is_bracketed(
+    def test_mysql_host_with_colon_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """
-        误配的含冒号 host（形如 127.0.0.1:3307）也被括号保护而非崩在解析
+        误配的 host:port 形态必须显式拒绝，而不是被当成 IPv6 补方括号
 
-        这类配置本质是错的（端口另有配置项），但此刻的行为应是
-        "可解析、可诊断"，而不是整段 ValueError 把配置问题变成启动崩溃。
+        v3 的判定是"含冒号即 IPv6"，会把 `127.0.0.1:3307` 误加方括号变
+        成 `[127.0.0.1:3307]`，把一条**响亮的配置错误**（解析即
+        ValueError）变成静默连不上。v5 改为按冒号数量区分：多冒号才是
+        IPv6，单冒号是 host:port 误配，提示改用 TM_DB_MYSQL_PORT。
         """
         monkeypatch.setenv("TM_DB_TYPE", "mysql")
         monkeypatch.setenv("TM_DB_MYSQL_HOST", "127.0.0.1:3307")
 
-        parsed = make_url(DatabaseSession._build_db_url())
-
-        assert parsed.host == "127.0.0.1:3307"
+        with pytest.raises(ValueError, match="TM_DB_MYSQL_PORT"):
+            DatabaseSession._build_db_url()
 
     def test_mysql_host_and_database_not_encoded(
         self, monkeypatch: pytest.MonkeyPatch

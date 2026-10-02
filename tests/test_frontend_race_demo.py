@@ -32,7 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 def _extract_function_body(source: str, func_name: str) -> str:
     """
-    截取指定 JS 函数的函数体文本（花括号配对，跳过字符串与注释）
+    截取指定 JS 函数的函数体文本（花括号配对，跳过字符串字面量）
 
     为什么需要（v3 修复 V2-P2-8）: cases.js 里有 5 处 `catch (error)`
     与 5 处 `finally`。直接对全文做 `catch...finally` 正则，取到的是
@@ -42,8 +42,13 @@ def _extract_function_body(source: str, func_name: str) -> str:
     消除这种误报。
 
     花括号必须配对而非"到下一个 } 为止": 函数体内的对象字面量、
-    模板字符串、嵌套块都会让朴素的截断提前结束。字符串/注释里的
+    模板字符串、嵌套块都会让朴素的截断提前结束。字符串字面量里的
     花括号与引号同样需要跳过，否则 `"}"` 这类字面量会破坏配对。
+
+    口径边界（v5 更正，原 docstring 承诺过头）: 本实现只跳过 `' " \``
+    三种引号包裹的字面量并处理反斜杠转义，**不识别注释**。注释里出现
+    孤立引号或花括号仍会干扰配对。目标函数 loadCases 当前无此情况，
+    但这是调用方须自查的前提，不得当作通用 JS 解析器使用。
 
     参数:
         source (str): 整个 JS 文件文本

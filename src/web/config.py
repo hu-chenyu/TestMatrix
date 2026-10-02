@@ -16,6 +16,10 @@ Flask Web应用配置模块
 import os
 import secrets
 
+from src.common.logger import LogManager
+
+logger = LogManager.get_logger()
+
 # 上传请求体大小上限（字节）。Werkzeug 在 Content-Length 超过该值时直接
 # 拒绝请求，不会把请求体读进内存/落盘。
 # 设为 0 表示不限制——但那样任何人都能用 /api/cases/import 打满磁盘，
@@ -171,7 +175,17 @@ def get_config(env_name: str | None = None) -> type[Config]:
         ValueError: 传入的环境名不在 config_map 中时抛出
     """
     if env_name is None:
-        env_name = os.getenv("TM_ENV", "dev")
+        # 缺省 TM_ENV 是 v5 补的告警点（见下方说明）：这条路径正是
+        # "生产漏配 TM_ENV"的入口，必须让它**响亮**而不是静默
+        raw_env = os.getenv("TM_ENV")
+        env_name = raw_env if raw_env else "dev"
+        if not raw_env:
+            logger.warning(
+                "TM_ENV 未显式配置，已按 dev 缺省：DEBUG 将开启且 SECRET_KEY "
+                "退化为进程级随机密钥（多 worker 部署下各进程密钥互不相同，"
+                "session 会随机失效）。生产部署请显式设置 TM_ENV=prod 并"
+                "配置 TM_SECRET_KEY。"
+            )
 
     if env_name not in config_map:
         raise ValueError(

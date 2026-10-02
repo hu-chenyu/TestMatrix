@@ -15,7 +15,7 @@ TestMatrix 大扫除 v2 · 任务一：executions SSE 与入参边缘路径覆�
     651-653    DB重建时明细查询异常降级单帧               test_db_rebuild_detail_error_degrades
     694-702    通道缺失 + 批次 failed 的单帧直发          test_events_failed_batch_single_frame
     703-714    通道缺失 + 非终态的单帧快照直发            test_events_running_batch_single_frame
-    725        live 断点过滤命中终态事件                   test_terminal_event_filtered_by_resume
+    725        live 断点过滤命中终态事件(终态豁免)       test_terminal_event_replayed_to_avoid_zero_frame_loop
     734        live 断点放行终态事件                       test_terminal_event_forwarded_sets_saw
     755-756    心跳节拍后刷新活动时间                     test_heartbeat_refreshes_last_activity
     763        订阅分支读到终态事件即 break               test_running_batch_breaks_on_terminal
@@ -576,15 +576,24 @@ class TestSseLiveResumeFiltering:
             f"终态事件已放行，不应再补降级快照帧，实际流: {raw[:200]!r}"
         )
 
-    def test_terminal_event_filtered_by_resume(
+    def test_terminal_event_replayed_to_avoid_zero_frame_loop(
         self, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """
-        live 断点过滤命中终态事件（行725）
+        终态事件豁免断点过滤，保证每次重连至少 1 帧（v5 修复 V2-P3-5）
 
-        客户端声明已收到 live:2（即已看过 batch_finished）后重连，
-        两条事件都被跳过，但仍须据"已见过终态"这一事实返回——
-        不能因为本轮没放行任何终态帧就再补一条重复的。
+        回归点: 修复前终态事件与普通事件一样被 `event_id <= resume_live`
+        过滤掉。客户端带着 live:2（已看过 batch_finished）重连时，本轮
+        **一帧都不发**——服务端返回即断流，浏览器按 SSE 规范约 3s 自动
+        重连并携带同一 Last-Event-ID 再来一轮，形成热循环，且客户端
+        永远收不到"批次已结束"的确认。v2 曾把该行为断言为"有意设计"，
+        本条按实际缺陷改正。
+
+        豁免范围是**仅终态帧**: 同一次重连里非终态的 batch_start
+        (live:1) 仍被正常过滤，证明这不是"关掉断点过滤"。
+
+        终态帧是幂等的（重复送达不改变客户端状态），因此重发安全，
+        且 saw_terminal 被置位后不会再补降级快照帧——不会重复。
         """
         from src.core.case_manager import CaseManager
 
@@ -604,11 +613,18 @@ class TestSseLiveResumeFiltering:
         )
         raw = _read_stream(response)
 
-        assert _frame_ids(raw) == [], (
-            f"断点之后无新事件，不应补发任何帧，实际: {_frame_ids(raw)}"
+        # 非终态帧仍按断点过滤：batch_start(live:1) 不在输出里
+        assert "event: batch_start" not in raw, (
+            f"非终态事件必须照常被断点过滤（豁免范围仅限终态帧），实际流: {raw[:200]!r}"
         )
-        assert "event: batch_finished" not in raw, (
-            "客户端已收到过终态帧，重连时绝不能重复补发"
+        # 终态帧豁免重发，保证本轮至少 1 帧，重连热循环自然终止
+        assert _frame_ids(raw) == ["live:2"], (
+            f"终态帧应豁免断点过滤并以 live 体系 id 重发（而非返回零帧），"
+            f"实际: {_frame_ids(raw)}"
+        )
+        # 幂等保证：只重发一次，且不叠加降级快照帧
+        assert raw.count("event: batch_finished") == 1, (
+            f"终态帧只应重发一次，不得叠加降级快照帧，实际流: {raw[:200]!r}"
         )
 
     def test_no_terminal_event_appends_snapshot(

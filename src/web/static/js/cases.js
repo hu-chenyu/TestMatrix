@@ -102,20 +102,21 @@ let deleteModal = null;
  * innerHTML 前必须经此函数转义，防止用例名/描述中夹带的 <script>
  * 等内容被解析执行（存储型 XSS）。
  *
+ * 实现说明（v5 收敛，V2-P3-4）: 本文件原先**自带一份** escapeHtml
+ * 实现，与 main.js:47 的 window.escapeHtml 行为等价（v4 审查逐字符
+ * 比对确认覆盖字符集相同）。两份定义构成同一安全基元的两个事实来源，
+ * 将来只改一处即产生分叉；且本文件的顶层函数声明会覆盖
+ * main.js 挂到 window 上的那份（加载序：base.html 先 main.js→api.js，
+ * cases.html 后 cases.js），使"改 main.js"实际不生效。
+ * 现统一复用 window.escapeHtml，本文件不再持有实现。
+ *
+ * 加载序依赖: cases.html 经 base.html 继承，main.js 先于 cases.js 加载，
+ * 故此处读取 window.escapeHtml 时它必然已就绪。
+ *
  * @param {*} value 任意输入值（非字符串按空串处理）
  * @returns {string} 转义后的安全字符串（null/undefined 返回空串）
  */
-function escapeHtml(value) {
-    if (value === null || value === undefined) {
-        return "";
-    }
-    return String(value)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-}
+const escapeHtml = window.escapeHtml;
 
 /**
  * 生成优先级 badge 的 HTML（枚举固定值，颜色不走转义）
@@ -1003,6 +1004,8 @@ window.casesPage = {
     openEditModal: openEditModal,
     confirmDelete: confirmDelete,
     importCases: importCases,
+    // 保留导出以不改变本模块的公开面：此时 escapeHtml 已指向
+    // window.escapeHtml，该赋值是幂等的
     escapeHtml: escapeHtml,
     buildPageSequence: buildPageSequence,
 };
