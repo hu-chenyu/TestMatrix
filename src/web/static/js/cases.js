@@ -33,6 +33,13 @@ const state = {
     knownModules: [],     // 历次列表累积发现的模块名（跨页填充模块下拉）
 };
 
+// 编辑弹窗详情请求的在途序号（防竞态）：
+// openEditModal 内 await 详情到返回之间存在空窗期，此间用户可点「新增用例」
+// 或点另一行的「编辑」。若无序号校验，旧请求后到会把已打开的新增弹窗改写成
+// 旧用例的编辑态（标题/编号禁用/editingCaseId 全被覆盖），用户保存时走 PUT
+// 分支误改已有用例。序号单调递增，await 回来后与当前值不符即判定过期丢弃。
+let editRequestSeq = 0;
+
 // 模块下拉累积上界：knownModules 跨翻页累积且无自然终点（每翻一页都可能
 // 遇到新模块），长期使用/超大数据集下会无界增长。超过该上限后停止追加，
 // 防止下拉选项与内存占用随会话时长线性膨胀。当前已选模块不计入此上界，
@@ -537,6 +544,8 @@ function resetForm() {
  * @returns {void}
  */
 function openCreateModal() {
+    // 递增在途序号：作废所有尚未返回的 openEditModal 详情请求
+    editRequestSeq += 1;
     state.editingCaseId = null;
     resetForm();
     els.formModalTitle.textContent = "新增用例";
@@ -552,10 +561,16 @@ function openCreateModal() {
  * @returns {Promise<void>} 无返回值；详情拉取失败 toast 提示且不开窗
  */
 async function openEditModal(caseId) {
+    // 取本次请求序号：await 回来后若序号已被后续操作（再次点编辑/点新增）
+    // 推进，说明用户意图已变，本响应必须丢弃
+    const seq = ++editRequestSeq;
     try {
         const detail = await window.api.get(
             "/cases/" + encodeURIComponent(caseId)
         );
+        if (seq !== editRequestSeq) {
+            return; // 过期响应：丢弃，绝不改写当前弹窗
+        }
         state.editingCaseId = caseId;
         resetForm();
         els.formModalTitle.textContent = "编辑用例";

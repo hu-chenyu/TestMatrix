@@ -1678,9 +1678,19 @@ class CaseManager:
                 f"通过率: {summary['pass_rate']:.2%}"
             )
             # Day31: finish_execution汇总落库且批次finished状态更新
-            # 成功后失效报告统计缓存（五类聚合结果已变化；缓存层
-            # 静默兜底，故障不影响执行主流程）
-            cache_client.invalidate_reports()
+            # 成功后失效报告统计缓存（五类聚合结果已变化）
+            # 独立try隔离: 缓存是旁路能力，其异常绝不能被外层
+            # except接盘后当"执行失败"处理——否则一条100%通过的批次
+            # 会被改写成 status="failed"（缓存层已自身兜底，此处为
+            # 纵深防御，契约见 6.1 通知旁路铁律）
+            try:
+                cache_client.invalidate_reports()
+            except Exception as cache_exc:
+                logger.warning(
+                    f"报告统计缓存失效异常已忽略（不影响批次结果） | "
+                    f"批次: {execution_id} | "
+                    f"{type(cache_exc).__name__}: {cache_exc}"
+                )
             # 事件埋点: 批次正常完成 → 发布终态事件并关闭清理通道
             cls._publish_execution_event(
                 execution_id,
@@ -1732,8 +1742,19 @@ class CaseManager:
                 )
             # Day31: 批次终态（failed）收尾处同样失效报告统计缓存，
             # 与finished分支口径一致（部分明细可能已落库，统计聚合
-            # 存在可见性变化；缓存层静默兜底绝不抛异常）
-            cache_client.invalidate_reports()
+            # 存在可见性变化）
+            # 独立try隔离: 本行位于外层except块内部，**此处已无任何
+            # try可接盘**，裸抛会一路冒到线程目标函数外、杀死daemon
+            # 线程，并连带跳过下面的 batch_failed 事件发布、事件通道
+            # 关闭与失败通知——订阅该批次的SSE客户端将永远收不到终态
+            try:
+                cache_client.invalidate_reports()
+            except Exception as cache_exc:
+                logger.warning(
+                    f"报告统计缓存失效异常已忽略（不影响批次收尾） | "
+                    f"批次: {execution_id} | "
+                    f"{type(cache_exc).__name__}: {cache_exc}"
+                )
             # 事件埋点: 批次异常失败 → 发布终态事件并关闭清理通道
             # （置于状态落库之后，即使落库失败也向订阅方发终态事件）
             cls._publish_execution_event(
