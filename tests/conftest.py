@@ -20,6 +20,7 @@ pytest全局配置模块（tests/conftest.py）
     真实被测服务通过.env的TM_BASE_URL配置，由后续阶段用例按需接入。
 """
 
+import os
 import sys
 import threading
 import time
@@ -358,6 +359,7 @@ def pytest_runtest_makereport(item, call):
 
     trace_logger = LogManager.bind_trace_id(item.nodeid)
     if report.failed:
+        _emit_github_failure_annotation(item, report)
         trace_logger.error(
             f"用例执行失败 | 耗时: {report.duration:.3f}s\n"
             f"失败详情:\n{report.longrepr}"
@@ -375,6 +377,48 @@ def pytest_runtest_makereport(item, call):
         trace_logger.warning(f"用例跳过 | {report.longrepr}")
     else:
         trace_logger.debug(f"用例执行通过 | 耗时: {report.duration:.3f}s")
+
+
+def _emit_github_failure_annotation(item, report) -> None:
+    """
+    测试失败时向 GitHub Actions 发出 error 注解（仅CI环境生效）
+
+    背景: CI 日志下载接口需鉴权，未认证环境只能读到 annotation。CI 在
+    Linux runner 上出现"本地全绿、CI 判红"且无法取回失败用例名时，
+    靠注解回传失败证据是唯一可靠手段。
+
+    实现: GitHub workflow command 格式 `::error title=..::message`，
+    消息中的换行编码为 %0A（否则注解被截断在第一行）。
+    必须直写 sys.__stdout__ 绕过 pytest 的输出捕获，否则注解不会出现在
+    runner 日志里。
+
+    非 CI 环境（GITHUB_ACTIONS 未设置）直接返回，无任何副作用。
+
+    参数:
+        item (pytest.Item): 失败用例对象
+        report (pytest.TestReport): 失败报告
+
+    返回:
+        无
+    """
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    try:
+        raw = str(report.longrepr)
+        # 只保留末尾的错误摘要行，去掉冗长的框架堆栈噪声
+        tail_lines = [
+            line.strip()
+            for line in raw.splitlines()
+            if line.strip() and not line.strip().startswith(("self.", "return "))
+        ]
+        summary = " | ".join(tail_lines[-6:])[:900]
+        message = f"{item.nodeid} :: {summary}"
+        message = message.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+        title = f"pytest-failed-{report.when}"
+        sys.__stdout__.write(f"::error title={title}::{message}\n")
+        sys.__stdout__.flush()
+    except Exception:  # noqa: BLE001 注解是诊断辅助，失败不得影响测试结果
+        pass
 
 
 def pytest_sessionfinish(session, exitstatus):
