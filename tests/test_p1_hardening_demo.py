@@ -238,19 +238,32 @@ class TestCacheBackendBuildFailure:
         self, isolated_redis, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """
-        非法Redis URL时 set_json 静默no-op，不抛异常
+        非法 Redis URL 时写路径同样静默降级，且**确实没写进去**
 
         回归点: 修复前 POST /api/cases 已 commit 成功、日志已打"用例已创建"，
         随后失效缓存抛 ValueError → 客户端收500，用户重试得到409
         "用例编号已存在"，数据已写入但用户以为失败。
+
+        **v3 补断言**（原版全函数零断言，只写"不应抛异常即为通过"，
+        注释里声称"再读回确认确实未写入"但代码里并没有读回）:
+        降级有两种可能——静默 no-op，或写了但读不出来。必须断言
+        "写完读回仍是 None"才能证明是前者；只断言"不抛异常"的话，
+        退化成"写成功但读失败"同样会通过。
         """
         # scheme非法: redis.from_url 抛 ValueError
         monkeypatch.setenv("TM_REDIS_URL", "http://127.0.0.1:6379/0")
         cache_client.reset_backend()
 
-        # 不应抛异常即为通过；再读回确认确实未写入
         cache_client.set_json("tm:test:key", {"a": 1})
         cache_client.delete_pattern("tm:test:*")
+
+        assert cache_client.get_json("tm:test:key") is None, (
+            "非法URL时写入应完全降级为 no-op：读回必须仍是 None。"
+            "若能读回内容，说明写入其实成功了，本用例的降级前提不成立"
+        )
+        assert cache_client._backend is None, (
+            "构建失败时 _backend 必须保持 None，不得缓存坏实例"
+        )
 
     def test_backend_build_failure_is_self_healing(
         self, isolated_redis, monkeypatch: pytest.MonkeyPatch
