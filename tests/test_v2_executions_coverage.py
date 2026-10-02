@@ -311,14 +311,90 @@ class TestSseDegradedBranches:
         assert "event: case_finished" not in raw, (
             "明细不可用时不得输出无来源的 case_finished 帧"
         )
+        assert _frame_ids(raw) == [], (
+            "降级帧不占序列位置，必须不输出 id 行，否则会污染断点游标；"
+            f"实际 id 行: {_frame_ids(raw)}"
+        )
+
+    def test_degraded_frame_does_not_break_reconnect(
+        self, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        降级帧之后重连，客户端仍能拿到 batch_start（V2-P2-2 核心回归）
+
+        复现修复前的丢帧场景:
+          请求1: 明细查询瞬时失败 -> 降级帧被标成 db:1
+          请求2: DB 恢复正常，客户端带 Last-Event-ID: db:1 重连
+                 -> 正常路径的 batch_start 也是 db:1，`1 > 1` 为假
+                 -> batch_start 被永久丢弃，客户端再也不知道有多少条用例
+        修复: 降级帧不输出 id 行 -> 客户端游标不被推进 -> 请求2 全量重发。
+        """
+        from src.core.case_manager import CaseManager, CaseManagerError
+
+        execution_id = "RUN-V2-RECONNECT"
+        monkeypatch.setattr(
+            CaseManager,
+            "get_execution_status",
+            staticmethod(lambda _eid: _finished_status(total=4, passed=4)),
+        )
+        detail = {
+            "summary": {"total_cases": 4},
+            "items": [
+                {
+                    "case_id": f"TM-RA-{index}",
+                    "case_name": f"用例{index}",
+                    "result": "passed",
+                    "duration": 0.1,
+                    "error_message": None,
+                }
+                for index in range(2)
+            ],
+        }
+
+        # 请求1: 明细查询失败，走降级路径
+        monkeypatch.setattr(
+            CaseManager,
+            "get_execution_detail",
+            staticmethod(
+                lambda _eid: (_ for _ in ()).throw(
+                    CaseManagerError("模拟明细查询瞬时失败")
+                )
+            ),
+        )
+        first_raw = _read_stream(
+            client.get(f"/api/executions/{execution_id}/events")
+        )
+        assert "event: batch_finished" in first_raw
+        first_ids = _frame_ids(first_raw)
+        assert first_ids == [], "降级帧不得推进客户端游标"
+
+        # 请求2: DB 恢复，客户端带上一轮收到的 id 重连
+        monkeypatch.setattr(
+            CaseManager,
+            "get_execution_detail",
+            staticmethod(lambda _eid: detail),
+        )
+        second_raw = _read_stream(
+            client.get(
+                f"/api/executions/{execution_id}/events",
+                headers={"Last-Event-ID": "live:0"},
+            )
+        )
+
+        assert "event: batch_start" in second_raw, (
+            "重连后必须仍能收到 batch_start——修复前它会被断点过滤永久丢弃；"
+            f"实际流: {second_raw[:200]!r}"
+        )
+        assert '"total_cases": 4' in second_raw
 
     def test_events_failed_batch_single_frame(
         self, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """
-        通道缺失 + 批次 failed 时单帧直发（行694-702）
+        通道缺失 + 批次 failed 时单帧直发（V2-P2-2：不输出 id 行）
 
-        单帧即全量，没有断点过滤意义，故固定 event_id=1。
+        单帧是"当前状态快照"而非序列中的一帧，故不占序号（详见
+        test_degraded_frame_does_not_break_reconnect 的说明）。
         """
         from src.core.case_manager import CaseManager
 
@@ -341,8 +417,8 @@ class TestSseDegradedBranches:
         assert response.mimetype == "text/event-stream"
         assert "event: batch_failed" in raw
         assert "执行体抛异常导致批次失败" in raw
-        assert _frame_ids(raw) == ["db:1"], (
-            f"failed 单帧固定 db:1，实际: {_frame_ids(raw)}"
+        assert _frame_ids(raw) == [], (
+            f"failed 单帧是状态快照，不得输出 id 行，实际: {_frame_ids(raw)}"
         )
 
     def test_events_running_batch_single_frame(
@@ -374,8 +450,9 @@ class TestSseDegradedBranches:
         assert "event: batch_start" in raw
         assert '"total_cases": 7' in raw
         assert '"status": "running"' in raw
-        assert _frame_ids(raw) == ["db:1"], (
-            f"进行中单帧固定 db:1，实际: {_frame_ids(raw)}"
+        assert _frame_ids(raw) == [], (
+            "进行中单帧是状态快照，不得输出 id 行（否则同样会污染"
+            f"断点游标），实际: {_frame_ids(raw)}"
         )
 
 

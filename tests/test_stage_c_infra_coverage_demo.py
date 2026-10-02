@@ -51,6 +51,7 @@ from typing import Any
 import allure
 import pytest
 import requests
+from sqlalchemy.engine.url import make_url
 from src.common.http_client import HttpClient, HttpClientError
 from src.db.db_session import DatabaseSession
 
@@ -111,8 +112,13 @@ class TestDatabaseSessionCoverage:
         MySQL 连接串构建: 密码含 @ / 空格 / 斜杠 / # 时必须 URL 编码。
 
         不编码的后果: p@ss 里的 @ 会让 SQLAlchemy 把 host 段解析成
-        "p"，连接直接连到错误主机且报错信息极具误导性。本条断言
-        锁死 quote_plus 的编码结果，防止有人"简化"这行拼接。
+        "p"，连接直接连到错误主机且报错信息极具误导性。
+
+        编码函数口径（v3 修复 V2-P2-1）: 用 quote 而非 quote_plus。
+        userinfo 段空格的正确转义是 %20；quote_plus 会把空格编成 '+'，
+        而 SQLAlchemy 用 unquote（非 unquote_plus）解 userinfo，于是
+          make_url("...://test+user:pw@...").username == 'test+user'
+        以字面 '+' 去认证，失败且报错完全指不到真因。
         """
         monkeypatch.setenv("TM_DB_TYPE", "mysql")
         monkeypatch.setenv("TM_DB_MYSQL_HOST", "db.internal")
@@ -124,9 +130,20 @@ class TestDatabaseSessionCoverage:
         url = DatabaseSession._build_db_url()
 
         assert url == (
-            "mysql+pymysql://tm_user:p%40ss+w%2Frd%231@db.internal:3307/"
+            "mysql+pymysql://tm_user:p%40ss%20w%2Frd%231@db.internal:3307/"
             "tm_db?charset=utf8mb4"
-        ), "密码中的 @ 空格 / # 必须 URL 编码，端口须为整数、charset 须保留"
+        ), "密码中的 @ 空格 / # 必须正确转义（空格为 %20 而非 +），端口/ charset 须保留"
+        # 更强的断言：用 SQLAlchemy 自己解析回来必须与配置逐字相同。
+        # 只断言 URL 字面量只能证明"长得像某个转义结果"，证明不了
+        # "能被正确解析回来"——而 quote_plus 的 + 陷阱恰恰骗过了前者。
+        parsed = make_url(url)
+        assert parsed.username == "tm_user"
+        assert parsed.password == "p@ss w/rd#1", (
+            f"密码解析回来与配置不符（空格的 + / %20 陷阱）: {parsed.password!r}"
+        )
+        assert parsed.host == "db.internal"
+        assert parsed.port == 3307
+        assert parsed.database == "tm_db"
 
     def test_mysql_username_is_encoded(
         self, monkeypatch: pytest.MonkeyPatch
@@ -150,6 +167,78 @@ class TestDatabaseSessionCoverage:
         assert url.count("@") == 1, (
             f"userinfo 段必须只剩一个 @（分隔 host 的那个），实际: {url}"
         )
+        assert make_url(url).username == "tm@ops", (
+            "用户名应能经 SQLAlchemy 正确解析回原值"
+        )
+
+    def test_mysql_username_with_space_round_trips(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        含空格的用户名/密码经 quote(%20) 编码后能正确解析回来（V2-P2-1 正题）
+
+        修复前用 quote_plus，SQLAlchemy 解出来是字面 'test+user'，
+        以不存在的用户名去认证，报错完全指不到真因。
+        """
+        monkeypatch.setenv("TM_DB_TYPE", "mysql")
+        monkeypatch.setenv("TM_DB_MYSQL_HOST", "127.0.0.1")
+        monkeypatch.setenv("TM_DB_MYSQL_USER", "test user")
+        monkeypatch.setenv("TM_DB_MYSQL_PASSWORD", "p@ss word")
+
+        parsed = make_url(DatabaseSession._build_db_url())
+
+        assert parsed.username == "test user", (
+            f"含空格用户名解析错误: {parsed.username!r}"
+        )
+        assert parsed.password == "p@ss word", (
+            f"含空格密码解析错误: {parsed.password!r}"
+        )
+
+    def test_mysql_ipv6_host_gets_brackets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        IPv6 字面量地址自动补方括号（V2-P3-7）
+
+        不补时 `root:pw@::1:3306` 的端口段被解析成 '::1:3306'，
+        make_url 直接抛 ValueError——配置没错却连不上。
+        """
+        monkeypatch.setenv("TM_DB_TYPE", "mysql")
+        monkeypatch.setenv("TM_DB_MYSQL_HOST", "::1")
+
+        parsed = make_url(DatabaseSession._build_db_url())
+
+        assert parsed.host == "::1", f"IPv6 地址解析错误: {parsed.host!r}"
+        assert parsed.port == 3306
+
+    def test_mysql_already_bracketed_ipv6_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        已是 [::1] 形态的 host 不重复加方括号（幂等守卫）
+        """
+        monkeypatch.setenv("TM_DB_TYPE", "mysql")
+        monkeypatch.setenv("TM_DB_MYSQL_HOST", "[fe80::1]")
+
+        parsed = make_url(DatabaseSession._build_db_url())
+
+        assert parsed.host == "fe80::1", f"IPv6 地址解析错误: {parsed.host!r}"
+
+    def test_mysql_host_with_colon_is_bracketed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        误配的含冒号 host（形如 127.0.0.1:3307）也被括号保护而非崩在解析
+
+        这类配置本质是错的（端口另有配置项），但此刻的行为应是
+        "可解析、可诊断"，而不是整段 ValueError 把配置问题变成启动崩溃。
+        """
+        monkeypatch.setenv("TM_DB_TYPE", "mysql")
+        monkeypatch.setenv("TM_DB_MYSQL_HOST", "127.0.0.1:3307")
+
+        parsed = make_url(DatabaseSession._build_db_url())
+
+        assert parsed.host == "127.0.0.1:3307"
 
     def test_mysql_host_and_database_not_encoded(
         self, monkeypatch: pytest.MonkeyPatch

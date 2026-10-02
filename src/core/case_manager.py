@@ -102,6 +102,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -208,6 +209,64 @@ UPDATABLE_CASE_FIELDS = frozenset(
 
 # 业务编号/主键/创建时间不随更新变化（静默剔除，兼容前端回传完整对象）
 _IMMUTABLE_CASE_FIELDS = ("id", "case_id", "created_at")
+
+# 表 test_cases 上承载"业务编号唯一"语义的列名。
+# SQLite 的唯一约束违例消息形如
+#   UNIQUE constraint failed: test_cases.case_id
+# PostgreSQL 形如 duplicate key value violates unique constraint
+#   "uq_test_cases_case_id"（含列名）；MySQL 形如 Duplicate entry
+#   'TM-0001' for key 'test_cases.case_id'。三者都含列名，据此判定。
+_UNIQUE_CASE_ID_COLUMN = "case_id"
+
+
+def _is_unique_case_id_violation(exc: IntegrityError) -> bool:
+    """
+    判断 IntegrityError 是否为"业务编号唯一约束"违例（v3 修复 V2-P2-4）
+
+    背景: IntegrityError 覆盖全部完整性违例。NOT NULL / CHECK / 外键违例
+    此前被一律翻译成"用例编号已存在"的 409，真因（某个必填字段是 None）
+    被彻底掩盖，排障方向被带偏。
+
+    判定依据: 各方言的唯一约束违例消息都含被约束的列名（test_cases.case_id
+    或约束名 uq_test_cases_case_id）。这里只匹配**列名**这一稳定特征，
+    不去匹配 "UNIQUE"/"duplicate" 等方言相关措辞——那些措辞各库不同
+    且会随版本变化。
+
+    参数:
+        exc (IntegrityError): 捕获到的完整性异常
+
+    返回:
+        bool: True 表示是业务编号唯一约束违例（可翻译为 409）；
+              False 表示是其它完整性违例（应回落通用错误）
+    """
+    message = str(exc.orig) if getattr(exc, "orig", None) else str(exc)
+    return _UNIQUE_CASE_ID_COLUMN in message
+
+
+def _safe_invalidate(operation: str, invalidate: Any) -> None:
+    """
+    缓存失效的统一兜底包装（v3 修复 V2-P3-8）
+
+    为什么需要: 批次收尾路径上的 invalidate_reports 早已各自加了
+    try/except（理由是"在外层 except 内裸抛会被当执行失败"，甚至会杀死
+    daemon 线程），而 4 处 invalidate_cases_list 仍是裸调。口径不一致
+    意味着：缓存层万一抛异常，用例已创建/更新/删除成功却返回 500，
+    批量导入也会整批失败——缓存是旁路能力，绝不能反过来阻断业务。
+
+    参数:
+        operation (str): 操作名，仅用于日志定位（如 create_case）
+        invalidate (Any): 无参可调用对象（通常是 cache_client 的方法）
+
+    返回:
+        None
+    """
+    try:
+        invalidate()
+    except Exception as cache_exc:  # noqa: BLE001 缓存故障不得阻断业务
+        logger.warning(
+            f"缓存失效异常已忽略（不影响{operation}结果） | "
+            f"操作: {operation} | {type(cache_exc).__name__}: {cache_exc}"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -389,9 +448,9 @@ class CaseManager:
             f"case_type: {case_type} | 总数: {result['total']} | "
             f"新增: {inserted} | 更新: {updated}"
         )
-        # Day31: 用例数据变更后失效列表缓存（封装内部兜底，
-        # 缓存故障不影响导入主流程，业务代码无需try/except）
-        cache_client.invalidate_cases_list()
+        # Day31: 用例数据变更后失效列表缓存（统一走_safe_invalidate，
+        # 缓存故障不影响导入主流程）
+        _safe_invalidate("批量导入", cache_client.invalidate_cases_list)
         return result
 
     # ------------------------------------------------------------------
@@ -770,6 +829,32 @@ class CaseManager:
             # 修复前走通用 SQLAlchemyError 分支 → 客户端收 500，且 str(exc)
             # 含完整 INSERT 语句与全部列值（进日志、进 TESTING 响应体）。
             # 识别为唯一性冲突并转成与串行路径相同的业务语义。
+            #
+            # 但 IntegrityError 覆盖**全部**完整性违例，不止唯一约束
+            # （v3 修复 V2-P2-2/P2-4）: 把所有 IntegrityError 一律翻译成
+            # "用例编号已存在"的 409，会掩盖真因（CHECK 违例、外键违例、
+            # 将来加的约束），排障方向被带偏。故此处只对**唯一约束**判定。
+            #
+            # 可达性说明（v3 实测更正审查报告的表述）: 审查报告以
+            # "module 传 None -> NOT NULL 违例"举例，但这条路**当前不可达**
+            # ——test_cases 的每个 nullable=False 列都带 Python 侧 default=，
+            # 实测显式传 module=None 时 SQLAlchemy 会套用 default="default"
+            # 落库，根本不产生 NOT NULL 违例。本收窄的价值因此是
+            # 防御性的（覆盖 CHECK/外键/未来新增约束），而非修一个当前
+            # 可触发的缺陷；判定逻辑本身由
+            # test_v3_robustness_demo.py 直接注入异常验证。
+            if not _is_unique_case_id_violation(exc):
+                logger.error(
+                    f"用例创建完整性违例（非唯一约束）| 用例: {case_id_value} | "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                raise CaseManagerError(
+                    f"用例创建完整性违例（检查字段是否为空/超长）: {exc}",
+                    context={
+                        "operation": "create_case",
+                        "case_id": case_id_value,
+                    },
+                ) from exc
             logger.warning(
                 f"用例创建并发编号冲突（唯一约束拦截）| 用例: {case_id_value}"
             )
@@ -790,8 +875,8 @@ class CaseManager:
             f"用例已创建 | 编号: {case_id_value} | 名称: {name_value} | "
             f"优先级: {payload['priority']}"
         )
-        # Day31: 创建成功后失效用例列表缓存（异常由缓存层静默消化）
-        cache_client.invalidate_cases_list()
+        # Day31: 创建成功后失效用例列表缓存（统一_safe_invalidate兜底）
+        _safe_invalidate("用例创建", cache_client.invalidate_cases_list)
         return result
 
     @classmethod
@@ -876,8 +961,8 @@ class CaseManager:
         logger.info(
             f"用例已更新 | 编号: {case_id} | 更新字段: {sorted(payload.keys())}"
         )
-        # Day31: 更新成功后失效用例列表缓存（异常由缓存层静默消化）
-        cache_client.invalidate_cases_list()
+        # Day31: 更新成功后失效用例列表缓存（统一_safe_invalidate兜底）
+        _safe_invalidate("用例更新", cache_client.invalidate_cases_list)
         return result
 
     @classmethod
@@ -925,8 +1010,8 @@ class CaseManager:
             ) from exc
 
         logger.info(f"用例已删除 | 编号: {case_id}")
-        # Day31: 删除成功后失效用例列表缓存（异常由缓存层静默消化）
-        cache_client.invalidate_cases_list()
+        # Day31: 删除成功后失效用例列表缓存（统一_safe_invalidate兜底）
+        _safe_invalidate("用例删除", cache_client.invalidate_cases_list)
         return True
 
     # ------------------------------------------------------------------
@@ -2281,10 +2366,20 @@ class CaseManager:
             无
         """
         custom_desc = str(case.get("description") or "").strip()
+        tags = case.get("tags") or []
+        tag_line = f"标签: {', '.join(tags)}" if tags else ""
+        # 描述与标签**拼接**而非二选一（v3 修复 V2-P2-3）
+        #
+        # 修复前 custom_desc 非空即 return，tags 分支永不执行——一整行
+        # 用例的标签被静默丢弃，随后按标签筛选恒不命中。而 v1 引入
+        # _normalize_scalar 之后，Excel 里的 description=2024 从"非 str
+        # 被拒"变成合法字符串 "2024"，正好命中该分支，触发面被扩大。
+        # "取描述"与"丢标签"本不该是同一个决定。
+        if custom_desc and tag_line:
+            return f"{custom_desc}\n{tag_line}"
         if custom_desc:
             return custom_desc
-        tags = case.get("tags", [])
-        return f"标签: {', '.join(tags)}" if tags else ""
+        return tag_line
 
     @staticmethod
     def _parse_tags_from_description(description: str | None) -> list:
@@ -2292,9 +2387,9 @@ class CaseManager:
         从description字段解析标签列表（内部方法）
 
         解析规则:
-            description为"标签: xxx,yyy"格式（由_build_description写入）时，
-            提取冒号后内容按逗号分割并strip；其他格式（自定义描述/空值）
-            返回空列表（视为无标签）。
+            description中含"标签: xxx,yyy"行（由_build_description写入，
+            拼接后可能位于自定义描述之后）时，提取该行冒号后内容按逗号分割
+            并strip；不含该行（纯自定义描述/空值）返回空列表（视为无标签）。
 
         参数:
             description (str | None): 用例描述文本
@@ -2307,11 +2402,15 @@ class CaseManager:
         """
         if not description:
             return []
-        text = str(description).strip()
-        if not text.startswith(TAGS_PREFIX):
-            return []
-        tag_text = text[len(TAGS_PREFIX):].strip()
-        return [tag.strip() for tag in tag_text.split(",") if tag.strip()]
+        # 逐行查找标签行（v3 修复 V2-P2-3）: 描述与标签拼接后标签行不再
+        # 一定在首位，仍用整串 startswith 会让拼接后的标签永远解析不出来
+        for line in str(description).splitlines():
+            stripped = line.strip()
+            if not stripped.startswith(TAGS_PREFIX):
+                continue
+            tag_text = stripped[len(TAGS_PREFIX):].strip()
+            return [tag.strip() for tag in tag_text.split(",") if tag.strip()]
+        return []
 
     @staticmethod
     def _normalize_values(value: str | list, dim_name: str) -> list:

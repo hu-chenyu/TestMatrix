@@ -134,11 +134,24 @@ def resolve_secret_key(config_class: type[Config]) -> str:
     if configured:
         return configured
 
-    if config_class is ProductionConfig:
+    # 正向判定（v3 修复 V2-P2-6）: 原写法是 `config_class is ProductionConfig`
+    # ——"生产"由配置类**身份**决定，将来新增 StagingConfig 之类的档位会
+    # 静默落到"允许随机密钥"一侧。改为"只要不是明确的开发/测试档就要求
+    # 显式配置"，新增档位默认走严格侧，方向上更安全。
+    #
+    # **残留缺口（未闭合，需产品决策）**: "生产部署漏配 TM_ENV"这条最常见
+    # 的事故路径**仍然覆盖不到**——get_config 对缺失 TM_ENV 缺省为 "dev"，
+    # 于是拿到 DevelopmentConfig，本判定不触发，退回随机密钥，且
+    # DevelopmentConfig.DEBUG=True 还会一并开启 Werkzeug 调试器。要同时
+    # 补上这个缺口又保住"本地零配置即可跑通"（本函数下方明确的设计意图），
+    # 只能引入 TM_ENV 之外的第二个生产判据（如显式 TM_DEPLOY_TARGET，
+    # 或检测到非 loopback 的部署形态），那属于新增配置契约，不在本轮范围。
+    if config_class not in (DevelopmentConfig, TestingConfig):
         raise ValueError(
-            "生产环境必须显式配置 TM_SECRET_KEY：缺失时框架会退化为进程级"
-            "随机密钥，服务每次重启即失效，且多 worker 部署下各进程密钥"
-            "互不相同，session 必然随机失效。请在 .env 中设置该变量后重启。"
+            "非开发/测试环境必须显式配置 TM_SECRET_KEY：缺失时框架会退化为"
+            "进程级随机密钥，服务每次重启即失效，且多 worker 部署下各进程"
+            "密钥互不相同，session 必然随机失效。请在 .env 中设置该变量后重启。"
+            f"（当前生效配置类: {config_class.__name__}）"
         )
 
     return secrets.token_hex(32)
