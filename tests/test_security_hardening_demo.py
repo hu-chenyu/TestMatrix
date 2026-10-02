@@ -436,23 +436,30 @@ class TestHttpExceptionNotSwallowed:
         的处理器查找按 状态码 -> 类MRO 回退，未注册 413 时会命中 Exception
         兜底，把"客户端上传超限"错误地报成 500 "服务器内部错误"。后果是
         监控无法区分正常拦截与服务端真故障。
+
+        构造方式: 用**结构完整**的 multipart 请求体（而非畸形 body），
+        确保唯一触发 413 的原因是体积超限，不掺杂 multipart 解析差异——
+        畸形 body 的解析行为在不同平台/werkzeug 版本间可能不同，会让本
+        测试变成平台相关的不稳定用例。
         """
         app = create_app("test")
         # 上限临时调到 1KB（生产为 32MB，单测不宜真传 32MB）
         app.config["MAX_CONTENT_LENGTH"] = 1024
         client = app.test_client()
 
+        # 构造一个 >1KB 的合法 xlsx 上传
+        oversized = _build_minimal_xlsx() + b"\x00" * 4096
         response = client.post(
             "/api/cases/import",
-            data=b"x" * 4096,
-            content_type="multipart/form-data; boundary=----x",
+            data={"file": (io.BytesIO(oversized), "big.xlsx")},
+            content_type="multipart/form-data",
         )
         assert response.status_code == 413, (
             f"超限上传应返回413，实际 {response.status_code}"
             "（被 Exception 兜底吞成了 500？）"
         )
-        body = response.get_data(as_text=True)
-        assert '"code": 413' in body, "响应体业务码应同步为 413"
+        payload = response.get_json()
+        assert payload["code"] == 413, "响应体业务码应同步为 413"
 
     def test_404_still_uses_its_own_handler(self) -> None:
         """
@@ -1037,24 +1044,38 @@ class TestLoggerChannelHardening:
         return "\n".join(chunks)
 
     @pytest.fixture
-    def clean_loguru(self):
+    def isolated_loguru(self):
         """
-        隔离 loguru 全局状态：测试结束后恢复默认 handler
+        完整快照并恢复 loguru 与 LogManager 的全局状态
 
-        LogManager.setup 是进程级单例且只能生效一次（_initialized 标志），
-        本类多个测试需反复重配，必须手动重置该标志并清空 handler。
+        为什么必须完整恢复而不是简单 logger.remove():
+        conftest.py 的 pytest_configure 已通过 LogManager.setup() 安装了
+        三个 sink。若本测试直接 logger.remove()，conftest 的 handler 会被
+        永久摘除——本文件之后执行的所有用例都失去日志通道；且
+        _initialized 被重置为 False 后状态自相矛盾（标志说"未初始化"，
+        handler 却已清空），属跨用例污染，在 Linux 上会因执行顺序不同
+        放大成难以定位的偶发失败。
+
+        实现: 快照 LogManager 三个类属性 + loguru 全部 handler，
+        测试结束后原样写回。
         """
         from loguru import logger as loguru_logger
         from src.common.logger import LogManager
 
+        saved_handlers = dict(loguru_logger._core.handlers)
+        saved_dir = LogManager._log_dir
+        saved_level = LogManager._level
+        saved_initialized = LogManager._initialized
         try:
             yield
         finally:
-            loguru_logger.remove()
-            LogManager._initialized = False
+            loguru_logger.configure(handlers=list(saved_handlers.values()))
+            LogManager._log_dir = saved_dir
+            LogManager._level = saved_level
+            LogManager._initialized = saved_initialized
 
     def test_local_variables_not_leaked_into_log_file(
-        self, tmp_path: Path, clean_loguru
+        self, tmp_path: Path, isolated_loguru
     ) -> None:
         """
         异常日志不得包含局部变量的值（diagnose 必须关闭）
@@ -1095,7 +1116,7 @@ class TestLoggerChannelHardening:
         )
 
     def test_file_sink_level_follows_configured_level(
-        self, tmp_path: Path, clean_loguru
+        self, tmp_path: Path, isolated_loguru
     ) -> None:
         """
         主日志文件级别必须跟随 log_level，不得硬编码 DEBUG
