@@ -644,14 +644,22 @@ def stop_worker() -> None:
         try:
             thread.join(timeout=WORKER_JOIN_TIMEOUT_SECONDS)
             if thread.is_alive():
-                # join超时（在途长任务未跑完）: daemon不阻退出，
-                # 仅记warning；测试fixture场景下批次都是秒级模拟执行
+                # join超时（在途长任务未跑完）: daemon不阻退出，仅记warning。
+                # **保留模块级引用不置空**——置空会让 start_worker 的
+                # 存活检查失效、下次调用再起一个 worker，两个 worker 并发
+                # 消费同一队列，破坏"单worker串行"不变量。
+                # 引用保留后，start_worker 靠 is_alive() 判定会返回本线程
+                # （幂等），调用方可稍后重试 stop。
                 logger.warning(
                     f"worker在{WORKER_JOIN_TIMEOUT_SECONDS}s内未结束，"
-                    "daemon线程将随进程退出"
+                    "daemon线程将随进程退出；模块级引用保留，"
+                    "start_worker的存活检查据此不会重复起worker"
                 )
+                return
         except RuntimeError as exc:
             logger.debug(f"worker join异常已忽略 | {exc}")
+            return
+    # 线程已结束（或本就没有存活worker）: 清空引用，允许后续start重建
     with _state_lock:
         _worker_thread = None
         _stop_event = None

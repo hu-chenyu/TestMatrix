@@ -306,11 +306,23 @@ class TestSerialClientMockedPaths:
             client.close()
 
     def test_物理端口不在枚举时open抛串口异常(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """E：comports 枚举为空时 open 物理端口，抛带设备列表提示的 SerialClientError。"""
+        """
+        E：comports 枚举为空时 open 物理端口，抛带设备列表提示的 SerialClientError。
+
+        注: Day43 起不再做 comports 前置硬拦截（macOS 不枚举 /dev/cu.*，
+        硬拦截会让板卡测试在该平台完全不可用），改为"先尝试打开、失败时
+        用 comports 补充提示"。断言口径随之从"设备不存在"改为
+        "打开失败且附可用设备列表"。
+        """
         monkeypatch.setattr(serial.tools.list_ports, "comports", lambda: [])
         client = SerialClient(port="COM_NOT_EXIST")
-        with pytest.raises(SerialClientError, match="不存在"):
+        with pytest.raises(SerialClientError) as exc_info:
             client.open()
+        message = str(exc_info.value)
+        assert "串口打开失败" in message, f"应报告打开失败 | 实际: {message}"
+        assert "可用串口" in message, (
+            f"失败信息应附带可用串口列表供排障 | 实际: {message}"
+        )
         assert client._serial is None
 
     def test_串口构造serial异常包装为串口异常(self, monkeypatch: pytest.MonkeyPatch) -> None:

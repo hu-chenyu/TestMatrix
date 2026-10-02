@@ -24,6 +24,7 @@
 """
 
 import html
+import math
 import random
 import re
 import smtplib
@@ -99,6 +100,10 @@ DEFAULT_BASE_DELAY = 1.0
 
 # 死信fail_reason落库截断长度（字符）
 REASON_MAX_LEN = 1000
+
+# 死信列表接口的正文预览长度（字符）。死信正文是整封含全部失败明细的
+# HTML 报告，单条可达百KB级，列表场景不截断会把上万份报告读进内存
+DEAD_LETTER_CONTENT_PREVIEW = 2000
 
 
 @dataclass
@@ -1402,7 +1407,24 @@ class NotificationRouter:
             base_delay = env_manager.get_float(
                 "TM_NOTIFY_RETRY_BASE_DELAY", DEFAULT_BASE_DELAY
             )
-        self.base_delay = float(base_delay)
+        # 退避基数下限校验: 负值/NaN 会让 time.sleep(负数) 抛 ValueError，
+        # 该异常从 _send_with_retry 逃到 notify 的兜底 except，results
+        # 记为失败但**不写死信也不写历史**——通知静默丢失且无任何留痕。
+        # 与 max_retries 同样的非法值告警降级口径
+        try:
+            parsed_base_delay = float(base_delay)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"重试退避基数非法: {base_delay!r}，按默认值 {DEFAULT_BASE_DELAY}处理"
+            )
+            parsed_base_delay = DEFAULT_BASE_DELAY
+        if not math.isfinite(parsed_base_delay) or parsed_base_delay <= 0:
+            logger.warning(
+                f"重试退避基数非法: {base_delay!r}，按默认值 "
+                f"{DEFAULT_BASE_DELAY}处理"
+            )
+            parsed_base_delay = DEFAULT_BASE_DELAY
+        self.base_delay = parsed_base_delay
 
         if use_jitter is None:
             use_jitter = env_manager.get_bool(
@@ -1956,13 +1978,19 @@ class NotificationDeadLetterRepository:
     @staticmethod
     def list_all(limit: int = 100) -> list[dict[str, Any]]:
         """
-        查询全部死信（最近N条）
+        查询死信列表（**最新N条**，id降序）
+
+        取序口径变更: 原实现 `order_by(id).limit(N)` 取的是**最旧**N条
+        （docstring 写"最近N条"但行为相反）。死信是持续累积的，一旦总量
+        超过上限，新产生的死信将永远取不到——而新死信恰恰是排查时最需要
+        看的。改为先按 id 倒序取最新N条，再反转为 id 升序返回，
+        保证"拿到的是最新N条"且"返回顺序仍是 id 升序"（前端展示友好）。
 
         参数:
             limit (int): 返回条数上限，默认100
 
         返回:
-            List[Dict[str, Any]]: 死信字典列表（id升序）
+            List[Dict[str, Any]]: 死信字典列表（取最新limit条，id升序）
 
         异常:
             无
@@ -1975,13 +2003,13 @@ class NotificationDeadLetterRepository:
         try:
             records = (
                 session.query(NotificationDeadLetter)
-                .order_by(NotificationDeadLetter.id)
+                .order_by(NotificationDeadLetter.id.desc())
                 .limit(limit)
                 .all()
             )
             return [
                 NotificationDeadLetterRepository._to_dict(record)
-                for record in records
+                for record in reversed(records)
             ]
         finally:
             session.close()
@@ -2015,6 +2043,13 @@ class NotificationDeadLetterRepository:
         """
         死信模型行转字典（内部方法）
 
+        content 截断: 死信正文是一整封含全部失败明细的 HTML 报告，单条可达
+        百KB级。列表接口一次取最多1万条并整体返回，不截断会把上万份完整
+        报告一次性读进内存。列表场景下截断到 DEAD_LETTER_CONTENT_PREVIEW
+        字符并标记截断位；需要全文的排查场景走 save/单条查询路径。
+        另将查询窗口从"最旧N条"改为"最新N条"——旧实现取最旧1万条，
+        死信量超过上限后新死信将永远取不到。
+
         参数:
             record (NotificationDeadLetter): 数据库模型实例
 
@@ -2024,12 +2059,17 @@ class NotificationDeadLetterRepository:
         异常:
             无
         """
+        content = record.content or ""
+        content_truncated = len(content) > DEAD_LETTER_CONTENT_PREVIEW
+        if content_truncated:
+            content = content[:DEAD_LETTER_CONTENT_PREVIEW] + "...[已截断]"
         return {
             "id": record.id,
             "channel": record.channel,
             "execution_id": record.execution_id,
             "title": record.title,
-            "content": record.content,
+            "content": content,
+            "content_truncated": content_truncated,
             "level": record.level,
             "fail_reason": record.fail_reason,
             "attempts": record.attempts,

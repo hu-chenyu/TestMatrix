@@ -139,17 +139,12 @@ class SerialClient:
         port_value = str(self.port)
         is_protocol_url = "://" in port_value
 
-        if not is_protocol_url:
-            # 前置校验: 设备标识是否在系统可用串口列表中，给出更友好的错误提示
-            available_ports = [info.device for info in serial.tools.list_ports.comports()]
-            if self.port not in available_ports:
-                logger.error(
-                    f"串口设备不存在 | 请求: {self.port} | 系统可用: {available_ports or '无'}"
-                )
-                raise SerialClientError(
-                    f"串口设备 {self.port} 不存在，当前系统可用串口: {available_ports or '无'}",
-                    port=self.port,
-                )
+        # 原先此处有 comports() 前置硬校验，端口不在枚举列表中直接拒绝打开。
+        # 该校验在 macOS 上是错的: pyserial 的 comports() 不枚举 /dev/cu.*，
+        # 而 serial.Serial 本身能正常打开这些设备——结果是 macOS 上板卡测试
+        # 完全不可用（socat 虚拟端口、未在 /sys/class/tty 暴露的 chardev 同理）。
+        # 改为"先尝试打开、失败时用 comports 补充提示信息"：既保留可读的错误
+        # 提示，又不再误拒有效端口。
 
         try:
             if is_protocol_url:
@@ -161,9 +156,17 @@ class SerialClient:
                     parity=self._parity,
                     stopbits=self._stopbits,
                     timeout=self.timeout,
+                    write_timeout=self.timeout,
                 )
             else:
                 # 普通 COM/设备路径走物理串口
+                # write_timeout 必设: pyserial 的 timeout 只作用于**读**，
+                # 写路径默认永久阻塞。板卡进入复位死循环/USB转串口桥固件卡死/
+                # 流控未释放时，write() 会无限期挂住整条AT指令序列，
+                # 且因为阻塞发生在 with 块内部 __exit__ 永不执行、串口句柄
+                # 一直不释放——这是硬件在环测试最典型的挂死形态。
+                # 超时抛 SerialTimeoutException（SerialException 子类），
+                # 由下面的 except 统一包装成 SerialClientError。
                 self._serial = serial.Serial(
                     port=self.port,
                     baudrate=self.baudrate,
@@ -171,12 +174,23 @@ class SerialClient:
                     parity=self._parity,
                     stopbits=self._stopbits,
                     timeout=self.timeout,
+                    write_timeout=self.timeout,
                 )
             logger.info(f"串口打开成功 | {self.port} @ {self.baudrate}bps")
-        except serial.SerialException as exc:
+        except (serial.SerialException, ValueError) as exc:
+            # serial_for_url 对未知协议抛 ValueError（不是 SerialException
+            # 子类），修复前会裸逃出 open()，调用方按文档写
+            # `except SerialClientError` 接不住
             self._serial = None
+            available_ports = [
+                info.device for info in serial.tools.list_ports.comports()
+            ]
             logger.error(f"串口打开失败 | {self.port} | {exc}")
-            raise SerialClientError(f"串口打开失败: {exc}", port=self.port) from exc
+            raise SerialClientError(
+                f"串口打开失败: {exc}"
+                f"（当前系统可用串口: {available_ports or '无'}）",
+                port=self.port,
+            ) from exc
 
     def close(self) -> None:
         """
@@ -284,7 +298,12 @@ class SerialClient:
         if not self.is_open:
             raise SerialClientError("串口未打开，无法读取", port=self.port)
 
-        deadline = time.monotonic() + (timeout or self.timeout)
+        # 只把 None 当"未指定"，显式传 0（falsy）必须原样生效。
+        # 原写法 `timeout or self.timeout` 是典型反模式: 调用方传 0 表达
+        # "零等待/立即返回"时被静默改写成默认 3.0s，批量探测可用端口的
+        # 轮询逻辑每轮多等3秒，N轮放大N倍。
+        effective_timeout = self.timeout if timeout is None else timeout
+        deadline = time.monotonic() + effective_timeout
         expect_bytes = expect.encode(encoding)
         buffer = bytearray()
 
