@@ -54,16 +54,35 @@ def _bracket_ipv6_host(host: str) -> str:
     本身就含多个 ':'。不补方括号时 `mysql+pymysql://root:pw@::1:3306/db`
     解析端口会得到 '::1:3306' 并抛
     `ValueError: invalid literal for int() with base 10`。
-    已经是 [::1] 形态（含方括号）或不含冒号的普通主机名/IP 原样返回。
+
+    **必须按冒号数量区分两种形态**（v5 修正 Hy4-P2）:
+        - `count(":") > 1`  -> IPv6 字面量，补方括号
+        - `count(":") == 1` -> host:port **误配**（端口另有
+          TM_DB_MYSQL_PORT 配置项）。原判定只看"含冒号"，会把
+          `127.0.0.1:3307` 误当 IPv6 补成 `[127.0.0.1:3307]`，把
+          一条**响亮的配置错误**（解析即 ValueError）变成静默连不上。
 
     参数:
         host (str): 原始 host 配置值
 
     返回:
         str: 可安全嵌入 DSN 的 host 表示
+
+    异常:
+        ValueError: host 形如 "主机:端口" 时抛出，提示改用
+                    TM_DB_MYSQL_PORT 配置端口
     """
-    if ":" in host and not host.startswith("["):
+    if host.startswith("["):
+        # 已是 [::1] 形态，含方括号即视为 IPv6 字面量，原样返回
+        return host
+    colon_count = host.count(":")
+    if colon_count > 1:
         return f"[{host}]"
+    if colon_count == 1:
+        raise ValueError(
+            f"MySQL host 含端口号 {host!r}，但端口请使用 TM_DB_MYSQL_PORT "
+            f"环境变量配置，TM_DB_MYSQL_HOST 只接受纯主机名或 IP"
+        )
     return host
 
 

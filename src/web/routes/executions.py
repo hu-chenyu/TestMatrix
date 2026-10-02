@@ -727,9 +727,16 @@ def stream_execution_events(execution_id: str):
             for event in channel.snapshot():
                 # 按 live 体系断点过滤：客户端已收到过的序号不重复补发
                 # （修复前本分支完全不过滤，重连时整段积压事件重复追加）
-                if event.event_id <= resume_live:
-                    if event.event_type in TERMINAL_EVENT_TYPES:
-                        saw_terminal = True
+                #
+                # **终态事件豁免过滤**（v5 修复 V2-P3-5）: 若终态事件也被
+                # 断点过滤掉，本轮就一帧都不发 —— 服务端返回即断流，浏览器
+                # 按 SSE 规范约 3s 自动重连，携带同一 Last-Event-ID 再来一轮，
+                # 形成热循环，且客户端永远收不到"批次已结束"的确认。
+                # 终态帧是幂等的（重复送达不改变客户端状态），豁免它
+                # 保证每次重连至少 1 帧，重连循环自然终止。
+                is_terminal = event.event_type in TERMINAL_EVENT_TYPES
+                already_seen = event.event_id <= resume_live
+                if already_seen and not is_terminal:
                     continue
                 yield _format_sse_frame(
                     event.event_type,
@@ -737,8 +744,7 @@ def stream_execution_events(execution_id: str):
                     event_id=event.event_id,
                     namespace=EVENT_ID_NAMESPACE_LIVE,
                 )
-                if event.event_type in TERMINAL_EVENT_TYPES:
-                    saw_terminal = True
+                saw_terminal = saw_terminal or is_terminal
             # 积压无终态事件时补一条终态快照帧（防御性兜底，降级帧无id行）
             if not saw_terminal:
                 yield _terminal_snapshot_frame(status_data)
