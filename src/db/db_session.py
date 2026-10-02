@@ -100,15 +100,20 @@ class DatabaseSession:
             return url
 
         if db_type == "mysql":
-            # MySQL: 密码含特殊字符时需URL编码，防止连接串解析错乱
+            # MySQL: userinfo 段（user:password）与 host 段的分隔符都是
+            # 结构字符，两侧任一含 @ 或 : 都会让连接串解析错乱
+            #（密码里出现 @ 时 host 会被截成 "p"）。故 user 与 password
+            # 都要 URL 编码。host / database 刻意**不**编码：host 是主机名
+            # 或 IP（编码后反解析失败），database 是路径段名，MySQL 方言
+            # 下本就按字面量解析。
             host = env_manager.get("TM_DB_MYSQL_HOST", "127.0.0.1")
             port = env_manager.get_int("TM_DB_MYSQL_PORT", 3306)
             user = env_manager.get("TM_DB_MYSQL_USER", "root")
             password = env_manager.get("TM_DB_MYSQL_PASSWORD", "")
             database = env_manager.get("TM_DB_MYSQL_DATABASE", "testmatrix")
             url = (
-                f"mysql+pymysql://{user}:{quote_plus(password)}@{host}:{port}/"
-                f"{database}?charset=utf8mb4"
+                f"mysql+pymysql://{quote_plus(user)}:{quote_plus(password)}@"
+                f"{host}:{port}/{database}?charset=utf8mb4"
             )
             logger.debug(f"数据库URL构建完成[MySQL] | 目标: {host}:{port}/{database}")
             return url

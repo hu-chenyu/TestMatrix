@@ -128,6 +128,49 @@ class TestDatabaseSessionCoverage:
             "tm_db?charset=utf8mb4"
         ), "密码中的 @ 空格 / # 必须 URL 编码，端口须为整数、charset 须保留"
 
+    def test_mysql_username_is_encoded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        MySQL 用户名同样需 URL 编码: userinfo 段（user:password@）与
+        host 段的分隔符都是结构字符。之前只编码了 password 而漏了
+        user，用户名含 @ 时会多切出一个"主机名"，症状是连向一个不存在
+        的地址，报错完全指不到真因。
+        """
+        monkeypatch.setenv("TM_DB_TYPE", "mysql")
+        monkeypatch.setenv("TM_DB_MYSQL_HOST", "db.internal")
+        monkeypatch.setenv("TM_DB_MYSQL_USER", "tm@ops")
+        monkeypatch.setenv("TM_DB_MYSQL_PASSWORD", "")
+
+        url = DatabaseSession._build_db_url()
+
+        assert url == (
+            "mysql+pymysql://tm%40ops:@db.internal:3306/testmatrix?charset=utf8mb4"
+        )
+        assert url.count("@") == 1, (
+            f"userinfo 段必须只剩一个 @（分隔 host 的那个），实际: {url}"
+        )
+
+    def test_mysql_host_and_database_not_encoded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        host 与 database 刻意**不**编码（纠正审查报告的旧结论）
+
+        host 是主机名/IP、database 是路径段名，两者按字面量解析；
+        编码后反解析会失败。审查报告曾把二者也列入"未编码"，若照做
+        反而会引入 bug——此处用测试锁死"不该编码"这个决策。
+        """
+        monkeypatch.setenv("TM_DB_TYPE", "mysql")
+        monkeypatch.setenv("TM_DB_MYSQL_HOST", "10.0.0.5")
+        monkeypatch.setenv("TM_DB_MYSQL_DATABASE", "test matrix")
+
+        url = DatabaseSession._build_db_url()
+
+        assert "@10.0.0.5:3306/test matrix?charset=utf8mb4" in url, (
+            f"host/database 必须原样出现在连接串中，实际: {url}"
+        )
+
     def test_mysql_url_falls_back_to_defaults(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

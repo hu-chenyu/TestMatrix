@@ -312,8 +312,6 @@ class EmailNotifier(BaseNotifier):
         message = self._build_message(notification)
 
         # 4. 连接发送（异常全捕获）
-        import time
-
         start_time = time.perf_counter()
         client = None
         try:

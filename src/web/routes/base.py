@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from flask import Blueprint
 from sqlalchemy import text
 
+from src import __version__
 from src.common.env_manager import env_manager
 from src.common.logger import LogManager
 from src.db.db_session import DatabaseSession
@@ -105,7 +106,7 @@ def index():
         统一响应: code=200，data含版本与运行状态
     """
     return success(
-        data={"version": "1.0.0", "status": "running"},
+        data={"version": __version__, "status": "running"},
         message="TestMatrix API",
     )
 
@@ -169,6 +170,6 @@ def api_version():
         统一响应: code=200，data含平台版本与API版本号
     """
     return success(
-        data={"version": "1.0.0", "api_version": "v1"},
+        data={"version": __version__, "api_version": "v1"},
         message="version info",
     )

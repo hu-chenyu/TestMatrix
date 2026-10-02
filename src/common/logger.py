@@ -23,7 +23,7 @@ from typing import Any
 
 from loguru import logger
 
-# 项目根目录: env.py位于 src/common/ 下，向上两级即为项目根
+# 项目根目录: 本文件 logger.py 位于 src/common/ 下，向上两级即为项目根
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
