@@ -1,19 +1,260 @@
-{# 用例管理页面（Day35 骨架占位，Day42 上线列表/筛选/表单/导入/删除） #}
+{# 用例管理页面（Day35 骨架 → Day42 完整上线）
+   区块：页头操作行 / 筛选栏 / 列表表格 / 分页栏 / 新增编辑弹窗 /
+        删除确认弹窗 / 隐藏的批量导入文件输入。
+   数据全部由 cases.js 异步调 /api/cases/* 获取，本模板不含任何业务数据。 #}
 {% extends "base.html" %}
 
 {% block title %}用例管理 - TestMatrix{% endblock %}
 
 {% block content %}
-<!-- 骨架阶段占位卡片：仅渲染静态结构，数据由 Day42+ 前端 JS 异步调 /api/cases 获取 -->
-<div class="card placeholder-card">
-    <div class="card-body py-5">
-        <div class="placeholder-icon mb-3">
-            <i class="bi bi-list-check"></i>
-        </div>
-        <h2 class="h4 mb-3">用例管理建设中（Day42 上线）</h2>
-        <p class="text-secondary mb-0">
-            将提供用例列表、筛选搜索、新增编辑与批量导入能力。
-        </p>
+<!-- ====== 1. 页头行：标题 + 批量导入 + 新增用例 ====== -->
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">
+        <i class="bi bi-list-check me-2 text-primary"></i>用例管理
+    </h1>
+    <div class="d-flex gap-2">
+        <!-- 批量导入：触发隐藏的 file input，仅支持 yaml/yml/xlsx -->
+        <button id="importBtn" type="button"
+                class="btn btn-outline-secondary btn-sm">
+            <i class="bi bi-upload me-1"></i>批量导入
+        </button>
+        <!-- 新增用例：打开 caseFormModal（新增模式） -->
+        <button id="createBtn" type="button" class="btn btn-primary btn-sm">
+            <i class="bi bi-plus-lg me-1"></i>新增用例
+        </button>
     </div>
 </div>
+
+<!-- ====== 2. 筛选栏：四维下拉 + 关键字，任一变化重置页码并重查 ====== -->
+<div class="card mb-3">
+    <div class="card-body">
+        <div class="row g-2 align-items-end">
+            <!-- 模块下拉：“全部模块”为静态首项，其余选项由 JS 从列表数据去重填充 -->
+            <div class="col-sm-6 col-lg-2">
+                <label for="filterModule" class="form-label small mb-1">模块</label>
+                <select id="filterModule" class="form-select form-select-sm">
+                    <option value="">全部模块</option>
+                </select>
+            </div>
+            <!-- 优先级：固定枚举 P0-P3 -->
+            <div class="col-sm-6 col-lg-2">
+                <label for="filterPriority" class="form-label small mb-1">优先级</label>
+                <select id="filterPriority" class="form-select form-select-sm">
+                    <option value="">全部优先级</option>
+                    <option value="P0">P0</option>
+                    <option value="P1">P1</option>
+                    <option value="P2">P2</option>
+                    <option value="P3">P3</option>
+                </select>
+            </div>
+            <!-- 类型：固定枚举 api/chip -->
+            <div class="col-sm-6 col-lg-1">
+                <label for="filterType" class="form-label small mb-1">类型</label>
+                <select id="filterType" class="form-select form-select-sm">
+                    <option value="">全部类型</option>
+                    <option value="api">api</option>
+                    <option value="chip">chip</option>
+                </select>
+            </div>
+            <!-- 状态：默认 active（与后端列表接口缺省口径一致） -->
+            <div class="col-sm-6 col-lg-2">
+                <label for="filterStatus" class="form-label small mb-1">状态</label>
+                <select id="filterStatus" class="form-select form-select-sm">
+                    <option value="active">active</option>
+                    <option value="disabled">disabled</option>
+                    <option value="all">全部</option>
+                </select>
+            </div>
+            <!-- 关键字：回车或点“搜索”才查询，避免逐键请求 -->
+            <div class="col-lg-3">
+                <label for="filterKeyword" class="form-label small mb-1">关键字</label>
+                <input id="filterKeyword" type="search" class="form-control form-control-sm"
+                       placeholder="搜索编号/名称/描述">
+            </div>
+            <div class="col-lg-2 d-flex gap-2">
+                <button id="searchBtn" type="button"
+                        class="btn btn-primary btn-sm flex-grow-1">搜索</button>
+                <button id="resetBtn" type="button"
+                        class="btn btn-outline-secondary btn-sm flex-grow-1">重置</button>
+            </div>
+        </div>
+        <!-- 列表加载失败提示条（默认隐藏，由 cases.js 切换） -->
+        <div class="alert alert-danger d-none py-2 mt-3 mb-0" id="listErrorAlert"
+             role="alert">
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+            <span id="listErrorText">用例列表加载失败，请稍后重试。</span>
+        </div>
+    </div>
+</div>
+
+<!-- ====== 3. 列表表格：9 列，tbody 三态（loading/empty/data）由 JS 渲染 ====== -->
+<div class="card">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0" id="casesTable">
+            <thead>
+                <tr>
+                    <th>用例编号</th>
+                    <th>用例名称</th>
+                    <th>模块</th>
+                    <th>优先级</th>
+                    <th>类型</th>
+                    <th>状态</th>
+                    <th>创建人</th>
+                    <th>创建时间</th>
+                    <th class="text-end text-nowrap">操作</th>
+                </tr>
+            </thead>
+            <!-- 初始 loading 态；data-case-id 由 JS 渲染到操作按钮上供事件委托读取 -->
+            <tbody id="casesTableBody">
+                <tr id="casesLoadingRow">
+                    <td colspan="9" class="text-center text-muted py-4">
+                        <span class="spinner-border spinner-border-sm me-1"
+                              aria-hidden="true"></span>加载中...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- ====== 4. 分页栏：总数+每页条数 | 页码导航 ====== -->
+    <div class="card-footer bg-white d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <div class="d-flex align-items-center gap-2 small">
+            <span>共 <span id="totalCount">0</span> 条</span>
+            <select id="pageSizeSelect" class="form-select form-select-sm d-inline-block w-auto">
+                <option value="10">10 条/页</option>
+                <option value="20" selected>20 条/页</option>
+                <option value="50">50 条/页</option>
+                <option value="100">100 条/页</option>
+            </select>
+        </div>
+        <!-- 页码按钮由 JS 渲染；事件委托在容器上处理翻页 -->
+        <nav aria-label="用例列表分页">
+            <ul class="pagination pagination-sm mb-0" id="pagination"></ul>
+        </nav>
+    </div>
+</div>
+
+<!-- ====== 5. 新增/编辑弹窗：同一表单按 editingCaseId 区分模式 ====== -->
+<div class="modal fade" id="caseFormModal" tabindex="-1"
+     aria-labelledby="caseFormModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="caseFormModalTitle">新增用例</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                        aria-label="关闭"></button>
+            </div>
+            <!-- 表单提交由 cases.js 拦截（preventDefault），不触发原生页面跳转 -->
+            <form id="caseForm" novalidate>
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <!-- case_id：编辑模式整体 disabled（PUT 接口也会忽略该字段） -->
+                        <div class="col-md-6">
+                            <label for="fCaseId" class="form-label">
+                                用例编号 <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" class="form-control" id="fCaseId"
+                                   maxlength="64" required>
+                            <!-- 编辑模式才显示的“不可修改”说明 -->
+                            <div class="form-text d-none" id="fCaseIdHint">
+                                用例编号不可修改
+                            </div>
+                            <div class="invalid-feedback" id="fCaseIdError"></div>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="fName" class="form-label">
+                                用例名称 <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" class="form-control" id="fName"
+                                   maxlength="200" required>
+                            <div class="invalid-feedback" id="fNameError"></div>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="fModule" class="form-label">模块</label>
+                            <input type="text" class="form-control" id="fModule"
+                                   maxlength="64" placeholder="default">
+                            <div class="invalid-feedback" id="fModuleError"></div>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="fCreator" class="form-label">创建人</label>
+                            <input type="text" class="form-control" id="fCreator"
+                                   maxlength="64" placeholder="admin">
+                            <div class="invalid-feedback" id="fCreatorError"></div>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="fPriority" class="form-label">优先级</label>
+                            <select id="fPriority" class="form-select">
+                                <option value="P0">P0</option>
+                                <option value="P1">P1</option>
+                                <option value="P2" selected>P2</option>
+                                <option value="P3">P3</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="fCaseType" class="form-label">类型</label>
+                            <select id="fCaseType" class="form-select">
+                                <option value="api" selected>api</option>
+                                <option value="chip">chip</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="fStatus" class="form-label">状态</label>
+                            <select id="fStatus" class="form-select">
+                                <option value="active" selected>active</option>
+                                <option value="disabled">disabled</option>
+                            </select>
+                        </div>
+                        <div class="col-12">
+                            <label for="fDescription" class="form-label">用例描述</label>
+                            <textarea class="form-control" id="fDescription"
+                                      rows="3"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary"
+                            data-bs-dismiss="modal">取消</button>
+                    <!-- 保存：提交时禁用并显示 spinner，防重复提交 -->
+                    <button type="submit" class="btn btn-primary" id="caseSaveBtn">
+                        <span class="spinner-border spinner-border-sm d-none me-1"
+                              id="caseSaveSpinner" aria-hidden="true"></span>保存
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- ====== 6. 删除确认弹窗：case_id 由 JS 动态填充 ====== -->
+<div class="modal fade" id="deleteConfirmModal" tabindex="-1"
+     aria-labelledby="deleteConfirmTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="deleteConfirmTitle">确认删除</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                        aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                确定要删除用例「<span id="deleteCaseIdText"
+                                       class="fw-semibold text-danger"></span>」吗？
+                此操作不可恢复。
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary"
+                        data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger"
+                        id="confirmDeleteBtn">确认删除</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ====== 7. 批量导入隐藏文件输入：按钮 click 触发，change 后上传 ====== -->
+<input type="file" id="importFileInput" accept=".yaml,.yml,.xlsx" class="d-none">
+{% endblock %}
+
+{% block extra_js %}
+<!-- 用例页业务脚本（无图表，不加载 ECharts） -->
+<script src="{{ url_for('static', filename='js/cases.js') }}"></script>
 {% endblock %}
