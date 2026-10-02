@@ -25,6 +25,7 @@
 """
 
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -482,6 +483,42 @@ def delete_case(case_id: str):
     return no_content()
 
 
+# 导入错误消息中的绝对路径特征：Windows 盘符路径 / Unix 常见根目录
+_WIN_ABS_PATH = re.compile(r"[A-Za-z]:\\[^\s\]\)'\"，、]+\\([^\s\]\)'\"，、]+)")
+_UNIX_ABS_PATH = re.compile(
+    r"/(?:tmp|home|Users|var|opt|usr|root|private|Applications)"
+    r"[^\s\]\)'\"，、]*/([^\s\]\)'\"，、]+)"
+)
+
+
+def _sanitize_error_message(raw: str) -> str:
+    """
+    对错误消息中的服务端绝对路径做脱敏，仅保留文件名（basename）
+
+    背景: 导入失败时 CaseManager 抛出的错误消息含临时目录绝对路径，
+        形如 "C:\\Users\\<账户名>\\AppData\\Local\\Temp\\tm_case_import_xxx\\a.yaml"，
+        该消息经前端 toast 直接展示给终端用户，会泄露服务端目录结构与
+        操作系统账户名。本函数把绝对路径整体替换为其末段文件名。
+
+    保留信息（脱敏不得丢失诊断价值）:
+        - 错误类型描述（如 "YAML语法解析失败"）
+        - 文件名（basename）
+        - 行列号等定位信息（位于路径之外，原样保留）
+
+    参数:
+        raw (str): 原始错误消息
+
+    返回:
+        str: 脱敏后的错误消息；无可脱敏内容时原样返回
+    """
+    if not raw:
+        return raw
+    # 先处理 Windows 盘符路径（C:\...），再处理 Unix 绝对路径
+    sanitized = _WIN_ABS_PATH.sub(r"\1", raw)
+    sanitized = _UNIX_ABS_PATH.sub(r"\1", sanitized)
+    return sanitized
+
+
 @cases_bp.route("/import", methods=["POST"])
 def import_cases():
     """
@@ -524,8 +561,11 @@ def import_cases():
     # 2. 后缀白名单校验（空后缀时用文件名定位问题）
     suffix = Path(original_name).suffix.lower()
     if suffix not in IMPORT_SUFFIXES:
+        # 仅取 basename：original_name 是用户可控的原始上传名，可能含路径
+        # 分隔符（如 "../../secret.yaml"），直接回显会泄露客户端路径信息
+        safe_name = Path(original_name).name or original_name
         raise ValidationError(
-            f"不支持的文件格式: {suffix or original_name}，"
+            f"不支持的文件格式: {suffix or safe_name}，"
             f"仅支持 {'/'.join(IMPORT_SUFFIXES)}"
         )
 
@@ -546,7 +586,10 @@ def import_cases():
             )
         except CaseManagerError as exc:
             if "数据加载失败" in str(exc):
-                raise ValidationError(str(exc)) from exc
+                # 路径脱敏: str(exc) 含服务端临时目录绝对路径与操作系统账户名，
+                # 该消息会经前端 toast 展示给终端用户；脱敏后仅保留文件名、
+                # 错误类型与行列号等定位信息（见 _sanitize_error_message）
+                raise ValidationError(_sanitize_error_message(str(exc))) from exc
             raise
     finally:
         # 临时文件与临时目录必须清理（ignore_errors防Windows句柄残留导致的报错）
