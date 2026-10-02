@@ -588,6 +588,7 @@ let _dashboardLoading = false;
  *
  * 在途保护：加载期间禁用刷新按钮，避免连续点击触发并发请求；
  * 四个图表加载器各自独立 try/catch，任一失败不阻塞其余。
+ * allSettled 而非 all：图表全部失败也应让本次刷新正常收尾。
  *
  * @returns {Promise<void>} 无返回值
  */
@@ -605,10 +606,19 @@ async function loadAllDashboardData() {
     }
     try {
         await loadSummary();
-        loadTrendChart();
-        loadModulePieChart();
-        loadPriorityBarChart();
-        loadFailedTopTable();
+        // 四个图表请求必须在释放 _dashboardLoading **之前**完成。
+        // 修复前是 fire-and-forget（不 await）：finally 立刻执行、标志释放，
+        // 此时 4 个图表请求仍在途——用户再点一次刷新就是 8 个请求，
+        // 且同一图表可能出现后发先至、用旧数据覆盖新数据，看板与实际
+        // 统计不一致且无任何提示。
+        // 各加载器内部已有独立 try/catch，这里用 allSettled 而不是 all：
+        // 任一图表失败不应阻断其余，也不应让本次刷新整体 reject。
+        await Promise.allSettled([
+            loadTrendChart(),
+            loadModulePieChart(),
+            loadPriorityBarChart(),
+            loadFailedTopTable(),
+        ]);
     } finally {
         // 无论成功失败都释放在途标志并恢复按钮
         _dashboardLoading = false;

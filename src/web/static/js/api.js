@@ -67,6 +67,20 @@ async function request(path, options) {
         );
     }
 
+    // 业务码校验: HTTP 200 + {code:500} 这类"传输成功但业务失败"的响应，
+    // 修复前被静默解包成 data=null。后果: 用例列表把 null 渲染成"暂无数据"
+    // （用户误判为库是空的），看板统计卡片则抛 Cannot read properties of
+    // null，把真实的后端 message 覆盖掉——排查方向被彻底带偏。
+    // 与 cases.js 的 importCases 保持同一口径。
+    if (payload && payload.code !== undefined && payload.code !== null) {
+        const code = Number(payload.code);
+        if (code !== 0 && code !== 200) {
+            throw new Error(
+                payload.message || ("业务处理失败，业务码：" + payload.code)
+            );
+        }
+    }
+
     // 正常响应：解包 data 字段返回，业务层无需再关心统一外层结构
     return payload ? payload.data : null;
 }

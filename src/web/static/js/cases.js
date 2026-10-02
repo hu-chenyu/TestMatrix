@@ -30,6 +30,8 @@ const state = {
     editingCaseId: null,  // 编辑中的用例编号；null=新增模式
     pendingDeleteId: null,// 删除确认弹窗暂存的待删用例编号
     loading: false,       // 列表加载互斥锁（防并发重复请求）
+    pendingRefresh: false,// 锁释放后需补刷一次的标志（保存/删除/导入后
+                          // 的刷新撞上在途请求时登记，避免刷新被丢弃）
     knownModules: [],     // 历次列表累积发现的模块名（跨页填充模块下拉）
 };
 
@@ -396,10 +398,16 @@ function renderModuleOptions(items) {
  */
 async function loadCases() {
     // 防并发：快速连点页码/筛选时只允许一个在途请求（验收 4.26）
+    // 但"有在途请求"不等于"不需要再刷一次"：保存/删除/导入成功后的
+    // await loadCases() 若撞上锁会被静默丢弃，用户看到的是 toast 说
+    // "保存成功"、列表却还是旧数据。修复前只能手动刷新页面才发现。
+    // 改为登记待刷新标志，锁释放时自动补刷一次。
     if (state.loading) {
+        state.pendingRefresh = true;
         return;
     }
     state.loading = true;
+    state.pendingRefresh = false;
     setListError(false);
     renderLoadingRow();
     renderPagination();
@@ -428,6 +436,10 @@ async function loadCases() {
         renderPagination();
     } catch (error) {
         // 错误态：页内 alert 明示原因 + 表格空态占位，不白屏（验收 4.21）
+        // 同时重置分页计数：否则页脚仍显示上一次的"共 137 条"+ 空表格，
+        // 用户看到自相矛盾的画面，易误判为数据丢失
+        state.total = 0;
+        state.totalPages = 0;
         setListError(true, "用例列表加载失败：" + error.message);
         renderEmptyRow();
         renderPagination();
@@ -435,6 +447,11 @@ async function loadCases() {
         state.loading = false;
         // 二次刷新分页按钮禁用态（成功/失败都要解锁）
         renderPagination();
+        // 锁释放后补刷被登记的刷新请求
+        if (state.pendingRefresh) {
+            state.pendingRefresh = false;
+            loadCases();
+        }
     }
 }
 
