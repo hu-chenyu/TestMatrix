@@ -181,6 +181,34 @@ class CaseManagerError(Exception):
 # 同时把常驻内存钉死在约1MB量级
 MAX_TRACKED_EXECUTION_IDS = 10_000
 
+# --------------------------------------------------------------------------
+# 用例可更新字段白名单（update_case 纵深防御）
+# --------------------------------------------------------------------------
+# 为什么需要: update_case 原先对 payload 逐字段裸 setattr。HTTP 路径上
+# CaseUpdateSchema 配 unknown=EXCLUDE 已把未知字段剥掉，所以今天从接口
+# 传不进来；但 update_case 是公开类方法，任何内部调用方（CLI、脚本、
+# 后续新代码）传错字段名时，setattr 只会在 ORM 实例上挂一个不落库的
+# 临时属性，调用方拿到 200 + 原样数据，毫无察觉地丢掉这次更新。
+# 白名单让"传了个不存在的字段"从静默丢弃变成一条可检索的 warning。
+#
+# 与不可变字段的分工: id/case_id/created_at 走 _IMMUTABLE_CASE_FIELDS
+# 静默剔除（前端编辑表单会回传 case_id，属兼容而非错误）；不在白名单
+# 里的其它字段记 warning——"没这个字段"和"这个字段不能改"是两回事。
+UPDATABLE_CASE_FIELDS = frozenset(
+    {
+        "name",
+        "module",
+        "priority",
+        "case_type",
+        "status",
+        "description",
+        "creator",
+    }
+)
+
+# 业务编号/主键/创建时间不随更新变化（静默剔除，兼容前端回传完整对象）
+_IMMUTABLE_CASE_FIELDS = ("id", "case_id", "created_at")
+
 
 # --------------------------------------------------------------------------
 # 业务语义异常子类（路由层异常翻译的类型锚点）
@@ -775,6 +803,10 @@ class CaseManager:
             - 未传字段保持原值不变（逐字段setattr，不做全量覆盖）
             - case_id业务编号不可变（id/case_id/created_at防御性剔除，
               路由层UpdateSchema同样不含case_id，两层保障）
+            - 仅接受 UPDATABLE_CASE_FIELDS 白名单内的字段；白名单外
+              的字段记 warning 后忽略（不落库、不报错），详见该常量
+              处的说明。HTTP 路径上路由层已用 unknown=EXCLUDE 先剥掉，
+              这里是给内部调用方的第二道闸
             - priority若传入则统一转大写（与查询口径对齐）
             - updated_at由模型onupdate=func.now()自动刷新，
               无需手动设置
@@ -800,8 +832,19 @@ class CaseManager:
 
         # 防御性剔除不可变字段（业务编号/主键/创建时间不随更新变化）
         payload = dict(data)
-        for immutable_field in ("id", "case_id", "created_at"):
+        for immutable_field in _IMMUTABLE_CASE_FIELDS:
             payload.pop(immutable_field, None)
+        # 白名单外的字段不落库。HTTP 路径上 CaseUpdateSchema 已用
+        # unknown=EXCLUDE 剥掉它们，此处是给内部调用方的第二道闸：
+        # 没有它，未知字段会被 setattr 静默丢弃且无任何痕迹
+        unknown_fields = sorted(set(payload) - UPDATABLE_CASE_FIELDS)
+        if unknown_fields:
+            logger.warning(
+                f"用例更新含未知字段，已忽略（该字段不是TestCase列）| "
+                f"用例: {case_id} | 字段: {unknown_fields}"
+            )
+            for unknown_field in unknown_fields:
+                payload.pop(unknown_field, None)
         # priority统一大写（与list_cases/list_cases_paged查询口径对齐）
         if "priority" in payload:
             payload["priority"] = str(payload["priority"]).strip().upper()
