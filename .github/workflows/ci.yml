@@ -158,26 +158,12 @@ jobs:
           echo "::warning::TestMatrix mypy 全量存量错误 ${baseline_count} 个（趋势基线，只减不增；增量步骤已硬阻断变更文件自身新增错误）"
           echo "全量基线错误数=${baseline_count}（豁免不阻断），mypy 退出码=${baseline_code}"
 
-      # ==== 临时诊断改动（定位 Linux-only 失败后必须还原）====
-      # 原因: 连续多次 run 的 pytest 步骤判红，但 job 日志下载需鉴权，
-      # 未认证环境只能读到 annotation，无法取回完整失败堆栈。
-      # 本步骤改为 -v + --tb=long + tee，把完整输出落盘并以 artifact 上传。
-      # tee 会吞掉 pytest 退出码，必须用 PIPESTATUS[0] 取回，否则红绿判定失真。
       - name: pytest 全量回归 + 覆盖率门禁（--cov-fail-under=85，测试数以实际输出为准）
         id: pytest-run
         # 覆盖率不足/测试失败退出码 1 判红；退出码 5（无测试被收集）同样判红——
         # testpaths 固定为 tests/，0 收集只可能是配置/路径损坏，不设容忍以防静默通过
         run: |
-          python -m pytest -v --tb=long --cov=src --cov-report=term-missing --cov-fail-under=85 2>&1 | tee pytest_output.txt
-          exit ${PIPESTATUS[0]}
-
-      - name: 上传 pytest 完整输出（临时诊断，失败时才上传）
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-failure-logs-${{ matrix.python-version }}
-          path: pytest_output.txt
-          retention-days: 7
+          python -m pytest -q --cov=src --cov-report=term-missing --cov-fail-under=85
 
       - name: pip-audit 完整报告（仅展示用，是否阻断由下一步分级门禁裁定）
         # 显式 -r requirements.txt：审计项目依赖闭包，不把 ruff/mypy/pip-audit 工具链自身算进来
