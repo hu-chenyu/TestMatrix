@@ -286,7 +286,7 @@ def _disable_real_notification_channels(monkeypatch):
 # ===========================================================================
 def pytest_configure(config):
     """
-    会话初始化钩子: 完成Loguru全局配置
+    会话初始化钩子: 完成Loguru全局配置 + 旁路捕获终态摘要（仅CI生效）
 
     参数:
         config (pytest.Config): pytest配置对象
@@ -304,6 +304,7 @@ def pytest_configure(config):
         f"TestMatrix测试会话启动 | 环境: {env_manager.current_env} | "
         f"日志级别: {env_manager.log_level}"
     )
+    _install_summary_capture(config)
 
 
 def pytest_sessionstart(session):
@@ -353,13 +354,17 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
 
+    # 注解回传覆盖 setup/call/teardown 三个阶段：setup/teardown 的 ERROR
+    # 同样会让 pytest exit 1，但不会走到下面的 call 阶段采集分支
+    if report.failed:
+        _emit_github_failure_annotation(item, report)
+
     # setup/teardown阶段失败由error报表体现，此处仅采集call阶段
     if report.when != "call":
         return
 
     trace_logger = LogManager.bind_trace_id(item.nodeid)
     if report.failed:
-        _emit_github_failure_annotation(item, report)
         trace_logger.error(
             f"用例执行失败 | 耗时: {report.duration:.3f}s\n"
             f"失败详情:\n{report.longrepr}"
@@ -413,10 +418,126 @@ def _emit_github_failure_annotation(item, report) -> None:
         ]
         summary = " | ".join(tail_lines[-6:])[:900]
         message = f"{item.nodeid} :: {summary}"
-        message = message.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
-        title = f"pytest-failed-{report.when}"
-        sys.__stdout__.write(f"::error title={title}::{message}\n")
-        sys.__stdout__.flush()
+        _write_github_annotation("error", f"pytest-failed-{report.when}", message)
+    except Exception:  # noqa: BLE001 注解是诊断辅助，失败不得影响测试结果
+        pass
+
+
+def _install_summary_capture(config) -> None:
+    """
+    旁路捕获 pytest 终态摘要输出（仅CI环境生效）
+
+    存在性: pytest 的失败出口不止"用例失败"一种——
+      1) 用例/夹具失败 -> makereport 失败事件（_emit_github_failure_annotation 覆盖）
+      2) --cov-fail-under 未达标 -> 全部用例通过但 exit 1（无任何失败事件）
+      3) collection 阶段导入失败 -> 直接 exit，无 makereport
+    后两类逐用例钩子完全捕获不到。因此改为旁路 reporter.write_line，
+    把终态摘要里与失败/覆盖率相关的行统一回传。
+
+    参数:
+        config (pytest.Config): pytest配置对象
+
+    返回:
+        无
+    """
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:
+        return
+    original_write_line = reporter.write_line
+    captured: list = []
+
+    def _tee_write_line(line, **markup) -> None:
+        """原始写行不变，同时把关键行收进缓冲区"""
+        captured.append(line)
+        original_write_line(line, **markup)
+
+    reporter.write_line = _tee_write_line
+    config._tm_captured_summary_lines = captured
+
+
+def _flush_summary_annotations(config) -> None:
+    """
+    把捕获的终态摘要关键行回传为注解（仅CI环境生效）
+
+    参数:
+        config (pytest.Config): pytest配置对象
+
+    返回:
+        无
+    """
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    lines = getattr(config, "_tm_captured_summary_lines", None)
+    if not lines:
+        return
+    keywords = (
+        "FAILED", "ERROR ", "Required test coverage", "TOTAL",
+        "passed", "failed", "coverage",
+    )
+    interesting = [
+        line.strip()
+        for line in lines
+        if any(keyword in line for keyword in keywords)
+    ]
+    # 去重并限流，避免注解过多被 GitHub 丢弃
+    seen: list = []
+    for line in interesting:
+        if line not in seen:
+            seen.append(line)
+    for line in seen[-15:]:
+        _write_github_annotation("error", "pytest-summary", line[:900])
+
+
+def _write_github_annotation(level: str, title: str, message: str) -> None:
+    """
+    输出一条 GitHub Actions workflow command 注解（仅CI环境生效）
+
+    参数:
+        level (str): 注解级别，error/warning/notice
+        title (str): 注解标题
+        message (str): 注解正文（内部完成转义）
+
+    返回:
+        无
+    """
+    safe = (
+        message.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+    )
+    sys.__stdout__.write(f"::{level} title={title}::{safe}\n")
+    sys.__stdout__.flush()
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
+    """
+    会话结束: 把最终统计与覆盖率结果回传为注解（仅CI环境生效）
+
+    存在性: pytest 的失败出口不止"用例失败"一种。--cov-fail-under 未达标
+    时全部用例都通过，但 pytest 同样 exit 1，此时不会有任何 makereport 失败
+    事件，注解回传会完全落空。回传终态统计即可区分这两类失败。
+
+    参数:
+        terminalreporter: pytest 终端报告器
+        exitstatus (int): pytest 退出码
+        config: pytest 配置对象
+
+    返回:
+        无
+    """
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    try:
+        stats = getattr(terminalreporter, "stats", {})
+        parts = [
+            f"{key}={len(stats.get(key, []))}"
+            for key in ("passed", "failed", "error", "skipped", "rerun")
+        ]
+        message = (
+            f"exitstatus={exitstatus} " + " ".join(parts)
+        )
+        _write_github_annotation("error", "pytest-session-summary", message)
+        _flush_summary_annotations(config)
     except Exception:  # noqa: BLE001 注解是诊断辅助，失败不得影响测试结果
         pass
 

@@ -39,7 +39,9 @@ from unittest.mock import patch
 import pytest
 import requests
 from flask.testing import FlaskClient
+from src.common.env_manager import env_manager
 from src.common.http_client import HttpClient
+from src.common.logger import LogManager
 from src.core.notification import (
     EmailReportTemplate,
     Notification,
@@ -1046,33 +1048,33 @@ class TestLoggerChannelHardening:
     @pytest.fixture
     def isolated_loguru(self):
         """
-        完整快照并恢复 loguru 与 LogManager 的全局状态
+        测试结束后把全局日志配置还原为会话初始状态
 
-        为什么必须完整恢复而不是简单 logger.remove():
-        conftest.py 的 pytest_configure 已通过 LogManager.setup() 安装了
-        三个 sink。若本测试直接 logger.remove()，conftest 的 handler 会被
-        永久摘除——本文件之后执行的所有用例都失去日志通道；且
-        _initialized 被重置为 False 后状态自相矛盾（标志说"未初始化"，
-        handler 却已清空），属跨用例污染，在 Linux 上会因执行顺序不同
-        放大成难以定位的偶发失败。
+        为什么必须还原: conftest.py 的 pytest_configure 已通过
+        LogManager.setup() 安装了三个 sink；本类的用例会再次调用
+        LogManager.setup()（它的内部先 logger.remove() 摘除全部 handler），
+        若不还原，本文件之后执行的所有用例都失去日志通道。
 
-        实现: 快照 LogManager 三个类属性 + loguru 全部 handler，
-        测试结束后原样写回。
+        为什么不能用 loguru 的 configure(handlers=...):
+        该 API 内部执行 self.add(**params)，只接受**参数字典**，
+        传入 Handler 对象会抛
+        `TypeError: Logger.add() argument after ** must be a mapping, not Handler`，
+        表现为 teardown 阶段 ERROR、被 pytest 判为用例失败。
+        这里改为调用与 conftest 同一个公开入口 LogManager.setup()，
+        用相同参数重新构建，既不依赖 loguru 私有属性，也不产生上述异常。
+
+        参数:
+            无
+
+        返回:
+            None（yield 型 fixture）
         """
-        from loguru import logger as loguru_logger
-        from src.common.logger import LogManager
-
-        saved_handlers = dict(loguru_logger._core.handlers)
-        saved_dir = LogManager._log_dir
-        saved_level = LogManager._level
-        saved_initialized = LogManager._initialized
-        try:
-            yield
-        finally:
-            loguru_logger.configure(handlers=list(saved_handlers.values()))
-            LogManager._log_dir = saved_dir
-            LogManager._level = saved_level
-            LogManager._initialized = saved_initialized
+        yield
+        # 用 conftest 的同一入口、同一参数还原会话初始日志配置
+        LogManager._initialized = False
+        LogManager.setup(
+            log_level=env_manager.log_level, log_dir=env_manager.log_dir
+        )
 
     def test_local_variables_not_leaked_into_log_file(
         self, tmp_path: Path, isolated_loguru
