@@ -108,20 +108,25 @@ class LogManager:
                 enqueue=True,
                 # 与下方两个文件通道保持一致：关闭诊断渲染与回溯打印。
                 #
-                # 口径更正（2026-10-02 v3 实测 loguru 0.7.2）: 此前注释称
-                # "diagnose=True 会把局部变量值（含密码/token）追加到异常
-                # 日志尾部"——实测不成立。0.7.2 的 diagnose 只在 traceback
-                # 帧上渲染**源码行与被调用的表达式求值结果**（形如
-                # `-> <function boom at 0x...>`），不输出 f_locals 里的
-                # 变量值。8 种 diagnose/backtrace/格式 组合实测，敏感局部
-                # 变量值一次都没出现在输出里。
+                # diagnose 到底泄露什么（2026-10-02 v5 定向实测，loguru 0.7.2）:
+                #   diagnose=True 会对**异常发生那一行源码上的表达式求值**
+                #   并渲染 `|   -> 值`。敏感变量只要作为实参出现在该行
+                #   （如 `connect(db_password)`），其值就会被打进日志：
+                #       |       -> 'Sup3rSecretDbPass'
+                #   变量赋值与 raise 分行放置时则不泄露（该行无引用可求值）。
                 #
-                # 保留 diagnose=False 的理由随之改为防御性: 它挡住的是
-                # "源码行 + 表达式求值"这一类信息（异常时可能带出文件
-                # 绝对路径、调用链细节，且控制台输出常被 CI 日志采集器
-                # 原样收走）。真正的"变量值不进日志"由两处共同保证：
-                # ①本项目的 log_format 不含 {exception}；②diagnose=False。
-                # 两者任一被改动都可能扩大泄露面，故都需测试锁定。
+                # traceback 本身：只要 log_format 含 {exception} 就一定会
+                # 渲染（文件路径 + 行号 + 异常消息），与 diagnose 无关——
+                # 那是既有暴露面；diagnose=False 额外挡住的正是上面那类
+                # 变量值。
+                #
+                # 结论: diagnose=False 是当前**唯一**挡住敏感变量值打印的
+                # 屏障，不得放开。控制台输出常被 CI 日志采集器原样收走，
+                # 泄露面会被进一步放大。回归测试见
+                # tests/test_security_hardening_demo.py::
+                # test_local_variables_not_leaked_into_console
+                # （该用例必须采用"变量作为异常行实参"的形态，否则对
+                #   diagnose=True 变异不敏感、变成空转）。
                 diagnose=False,
                 backtrace=False,
             )
