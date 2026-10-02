@@ -34,7 +34,23 @@ MAX_LOG_BODY_LENGTH = 2048
 # 需要脱敏的请求头字段（小写匹配）
 SENSITIVE_HEADERS = ("authorization", "token", "cookie", "set-cookie", "api-key")
 # 请求体中需要脱敏的字段名（小写匹配）
-SENSITIVE_BODY_FIELDS = ("password", "passwd", "secret", "token", "access_key")
+# 口径对齐 SENSITIVE_QUERY_FIELDS 的凭据类字段：历史上本元组漏收
+# access_token / api_key / apikey，而查询串侧已收录——同一份凭据放在
+# JSON body 里（OAuth 风格接口的标准做法）就会原样进日志，与阶段2
+# 修复的 P1 凭据泄露同属一类缺口。
+# 刻意不收裸 "key"：查询串侧的 key 是为 ?key=xxx 这类回调凭据而设，
+# 而请求体里名为 key 的字段通常是业务数据（如字典键、分片键），
+# 误打码会显著削弱排障能力，收益与风险不成正比。
+SENSITIVE_BODY_FIELDS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "access_token",
+    "api_key",
+    "apikey",
+    "access_key",
+)
 # URL 查询串中需要脱敏的参数名（小写匹配）。常见于 token 走 query 的 OAuth
 # 风格接口、以及 webhook key 这类把凭据放在 ?key= 的回调地址。
 SENSITIVE_QUERY_FIELDS = (
