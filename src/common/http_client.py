@@ -53,6 +53,15 @@ SENSITIVE_BODY_FIELDS = (
 )
 # URL 查询串中需要脱敏的参数名（小写匹配）。常见于 token 走 query 的 OAuth
 # 风格接口、以及 webhook key 这类把凭据放在 ?key= 的回调地址。
+#
+# 与 SENSITIVE_BODY_FIELDS 的口径关系（v3 修复）:
+#   本元组 ⊇ SENSITIVE_BODY_FIELDS。两张表各自独立维护时曾出现双向缺口：
+#     - access_token 只在 query 侧 -> 放 JSON body 里明文进日志（v1 已修）
+#     - access_key    只在 body 侧 -> 放 ?access_key= 里明文进日志（v3 修）
+#   现把"请求体凭据集合 ⊆ 查询串凭据集合"写成测试里的结构不变量，
+#   今后新增任一凭据名只改一侧，CI 立刻变红。
+#   两表允许的差异只有"裸 key"：查询串侧的 ?key=xxx 是回调凭据（企微
+#   webhook 形态），请求体里名为 key 的字段通常是业务数据，故只进 query 表。
 SENSITIVE_QUERY_FIELDS = (
     "password",
     "passwd",
@@ -62,6 +71,7 @@ SENSITIVE_QUERY_FIELDS = (
     "key",
     "apikey",
     "api_key",
+    "access_key",
 )
 # 查询串脱敏后的占位值
 QUERY_MASK = "***"
@@ -305,9 +315,12 @@ class HttpClient:
         kwargs.setdefault("timeout", self.timeout)
 
         # 请求前置日志（脱敏）
+        # params 必须走查询串字段表：params 字典语义上就是查询串，
+        # 若沿用请求体字段表（不含裸 key），同一份凭据写进 URL 会被
+        # _safe_url 打码、走 params 却是明文——两条并行的泄露路径。
         logger.debug(
             f"HTTP请求 >>> {method} {safe_url} | "
-            f"params: {self._mask_data(kwargs.get('params'))} | "
+            f"params: {self._mask_data(kwargs.get('params'), SENSITIVE_QUERY_FIELDS)} | "
             f"headers: {self._mask_headers(kwargs.get('headers'))} | "
             f"body: {self._truncate(self._mask_data(kwargs.get('json') or kwargs.get('data')))}"
         )
@@ -401,12 +414,16 @@ class HttpClient:
         return masked
 
     @staticmethod
-    def _mask_data(data: Any) -> Any:
+    def _mask_data(
+        data: Any, fields: tuple[str, ...] = SENSITIVE_BODY_FIELDS
+    ) -> Any:
         """
         请求数据脱敏（password/token等字段值替换为***）
 
         参数:
             data (Any): 原始数据（dict/list/其他类型）
+            fields (tuple[str, ...]): 该数据位置的敏感字段名集合。
+                默认按请求体口径；查询串位置须传 SENSITIVE_QUERY_FIELDS。
 
         返回:
             Any: 脱敏后的数据副本；入参为None时返回'-'
@@ -418,11 +435,11 @@ class HttpClient:
             return "-"
         if isinstance(data, dict):
             return {
-                key: ("***" if str(key).lower() in SENSITIVE_BODY_FIELDS else value)
+                key: ("***" if str(key).lower() in fields else value)
                 for key, value in data.items()
             }
         if isinstance(data, list):
-            return [HttpClient._mask_data(item) for item in data]
+            return [HttpClient._mask_data(item, fields) for item in data]
         return data
 
     @staticmethod

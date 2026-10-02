@@ -106,9 +106,22 @@ class LogManager:
                 format=log_format,
                 filter=lambda record: record["extra"].setdefault("trace_id", "-") or True,
                 enqueue=True,
-                # 与下方两个文件通道保持一致：关闭变量值展开与回溯打印。
-                # 控制台输出常被 CI 日志采集器原样收走，diagnose 泄露的局部
-                # 变量值（含密码/token）会随构建日志长期留存
+                # 与下方两个文件通道保持一致：关闭诊断渲染与回溯打印。
+                #
+                # 口径更正（2026-10-02 v3 实测 loguru 0.7.2）: 此前注释称
+                # "diagnose=True 会把局部变量值（含密码/token）追加到异常
+                # 日志尾部"——实测不成立。0.7.2 的 diagnose 只在 traceback
+                # 帧上渲染**源码行与被调用的表达式求值结果**（形如
+                # `-> <function boom at 0x...>`），不输出 f_locals 里的
+                # 变量值。8 种 diagnose/backtrace/格式 组合实测，敏感局部
+                # 变量值一次都没出现在输出里。
+                #
+                # 保留 diagnose=False 的理由随之改为防御性: 它挡住的是
+                # "源码行 + 表达式求值"这一类信息（异常时可能带出文件
+                # 绝对路径、调用链细节，且控制台输出常被 CI 日志采集器
+                # 原样收走）。真正的"变量值不进日志"由两处共同保证：
+                # ①本项目的 log_format 不含 {exception}；②diagnose=False。
+                # 两者任一被改动都可能扩大泄露面，故都需测试锁定。
                 diagnose=False,
                 backtrace=False,
             )

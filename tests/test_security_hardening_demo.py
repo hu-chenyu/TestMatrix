@@ -1253,27 +1253,45 @@ class TestLoggerChannelHardening:
             log_level=env_manager.log_level, log_dir=env_manager.log_dir
         )
 
-    def test_local_variables_not_leaked_into_log_file(
-        self, tmp_path: Path, isolated_loguru
+    def test_local_variables_not_leaked_into_console(
+        self, tmp_path: Path, isolated_loguru, monkeypatch
     ) -> None:
         """
-        异常日志不得包含局部变量的值（diagnose 必须关闭）
+        局部变量值不得出现在控制台输出（v2 审查 V2-P0-1 重写）
 
-        回归点: 修复前控制台 sink 未设 diagnose=False（两个文件 sink 都设了），
-        属明确的安全不对称。loguru 的 diagnose=True 会在异常日志尾部追加
-        "    file.py:行号 in 函数名" + "        行号: 变量名 = 变量值"，
-        异常局部变量（常含密码/token）因此进入日志；控制台输出又常被 CI
-        日志采集器原样收走，泄露面进一步放大。
+        旧版是**假通过**: 它传 console_output=False，而 logger.py 的控制台
+        sink 被 `if console_output:` 守卫——该 sink 根本没被创建；断言又只读
+        落盘日志文件，而文件 sink 在修复前就已经是 diagnose=False。于是把
+        控制台 sink 的 diagnose 改回 True，测试照样全绿。
 
-        验证方式: 抛一个带敏感局部变量的异常，检查落盘日志里是否出现该值。
-        这比反射 loguru 内部 sink 配置更贴近真实泄露路径。
+        现改为 console_output=True + 捕获 sys.stderr，走真实的
+        "控制台输出 → 局部变量值" 泄露路径。
+
+        阳性对照: 同时断言异常消息本身出现在捕获流里。若控制台 sink 压根
+        没把内容写进来，"敏感值不出现" 会因为捕获到空串而空转通过——
+        这正是旧版假通过的同类风险，故必须显式排除。
+
+        **实测口径更正（v3 复核）**: 本用例验证的是"敏感局部变量值不出
+        现在任何控制台输出"这一端到端安全属性。它**不会**因单独把
+        logger.py 的 diagnose 改回 True 而变红——实测 loguru 0.7.2 的
+        diagnose 只渲染源码行与表达式求值结果（形如
+        `-> <function boom at 0x...>`），不输出 f_locals 的变量值；
+        8 种 diagnose/backtrace/格式组合实测敏感变量值一次都没出现。
+        能对 diagnose 变异敏感的是
+        test_console_sink_declares_diagnose_disabled（源码级守卫）。
+        两条测试分工：一条守行为、一条守配置，不互相冒充。
         """
+        import io
+
         from loguru import logger as loguru_logger
         from src.common.logger import LogManager
 
+        captured = io.StringIO()
+        monkeypatch.setattr("sys.stderr", captured)
+
         LogManager._initialized = False
         LogManager.setup(
-            log_level="INFO", log_dir=tmp_path, console_output=False
+            log_level="INFO", log_dir=tmp_path, console_output=True
         )
 
         def _raise_with_secret() -> None:
@@ -1287,12 +1305,98 @@ class TestLoggerChannelHardening:
             loguru_logger.exception("捕获到数据库异常")
 
         self._drain_loguru_queue()
-        content = self._read_log_files(tmp_path)
+        console_text = captured.getvalue()
 
-        assert "数据库认证失败" in content, "异常消息本身应落盘（业务需要）"
-        assert "Sup3rSecretDbPass" not in content, (
-            "局部变量值泄露到日志文件：diagnose 未正确关闭"
+        # 阳性对照: 控制台 sink 确实捕获到了内容
+        assert "捕获到数据库异常" in console_text, (
+            "控制台 sink 未捕获到任何内容，本用例的脱敏断言会空转通过:\n"
+            f"{console_text!r}"
         )
+        assert "数据库认证失败" in console_text, (
+            f"异常消息本身应出现在控制台输出（业务需要）:\n{console_text!r}"
+        )
+        # 真正的断言: 局部变量值不得出现在控制台输出
+        assert "Sup3rSecretDbPass" not in console_text, (
+            "局部变量值泄露到控制台输出：diagnose 未正确关闭"
+        )
+
+    def test_log_format_does_not_render_exception(self, tmp_path: Path) -> None:
+        """
+        统一日志格式**不渲染 {exception}**——这是当前真正生效的那道屏障
+
+        v2 审查 V2-P0-1 指出"控制台 sink 的 diagnose 未被验证"。复核后
+        发现更深一层：loguru 的 logger.exception() 只是把异常挂到 record 上，
+        **格式串必须引用 {exception} 才会渲染 traceback**。而本项目的
+        log_format 里没有 {exception}，因此：
+
+            - 任何 sink 上都不会输出 traceback
+            - diagnose 的取值在当前格式下**没有可观测影响**
+              （只翻转 diagnose=True 不会让任何用例变红）
+            - 局部变量值（密码/token）也就不会进日志
+
+        即"控制台 sink 设 diagnose=False"是一道**防御性**屏障：当前
+        格式下即使去掉它也不会泄露，但它保证的是"将来有人为了排查方便
+        把 {exception} 加进格式时，不会同时打开变量值打印"。
+
+        本用例把当前这道实际屏障钉死：有人删掉格式里的这条约束（或
+        直接加回 {exception}）时立刻变红，逼迫同时检查 diagnose。
+        """
+        from loguru import logger as loguru_logger
+        from src.common.logger import LogManager
+
+        LogManager._initialized = False
+        LogManager.setup(
+            log_level="INFO", log_dir=tmp_path, console_output=False
+        )
+        try:
+            for handler in loguru_logger._core.handlers.values():
+                fmt = "".join(getattr(handler, "_precolorized_formats", []))
+                assert "{exception}" not in fmt, (
+                    "统一日志格式渲染了 {exception}：traceback（含局部变量值）"
+                    "会进日志，必须同时确认 diagnose=False 仍然生效"
+                )
+        finally:
+            LogManager._initialized = False
+
+    def test_console_sink_declares_diagnose_disabled(self) -> None:
+        """
+        控制台 sink 源码显式声明 diagnose=False（源码级守卫）
+
+        为什么用源码断言而不是运行时反射: loguru 0.7.2 的 Handler 不暴露
+        diagnose 属性（诊断渲染在 C 层 writer 内，Python 侧不可达），
+        实测 `handler.diagnose` 与 `handler._exception_formatter.diagnose`
+        均为 None。反射断言只能得到一个恒真的 None，无法承担守卫职责。
+
+        它守的也不是"变量值不进日志"（那条由 log_format 不含
+        {exception} 与 diagnose=False 共同保证，且 v3 实测 0.7.2 的
+        diagnose 并不输出变量值，见
+        test_local_variables_not_leaked_into_console 的口径更正），
+        它守的是"控制台 sink 这道诊断屏障没有被删掉或反向打开"。
+        """
+        import inspect
+
+        from src.common.logger import LogManager
+
+        source = inspect.getsource(LogManager.setup)
+        # 用注释锚点切出控制台 sink 段：不能用 split(")")，filter lambda
+        # 里的 setdefault("trace_id", "-") 会把区间提前截断
+        console_block = source.split("if console_output:")[1].split(
+            "# 文件输出通道"
+        )[0]
+        # 断言前剥离注释行：否则本文件（及 logger.py）里任何提到这两个
+        # 开关的说明性注释都会让断言读到散文而非真实配置
+        code_lines = [
+            line
+            for line in console_block.splitlines()
+            if not line.lstrip().startswith("#")
+        ]
+        code = "\n".join(code_lines)
+
+        assert "diagnose=False" in code, (
+            "控制台 sink 必须显式设置 diagnose=False——"
+            "格式一旦加入 {exception}，诊断渲染会带出源码行与表达式求值"
+        )
+        assert "diagnose=True" not in code
 
     def test_file_sink_level_follows_configured_level(
         self, tmp_path: Path, isolated_loguru
