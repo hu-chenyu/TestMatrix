@@ -118,8 +118,24 @@ class TestParamsMasking:
 
     @pytest.mark.parametrize(
         "param_name",
-        ["key", "token", "access_token", "api_key", "apikey", "password"],
-        ids=["key", "token", "access_token", "api_key", "apikey", "password"],
+        [
+            "key",
+            "token",
+            "access_token",
+            "api_key",
+            "apikey",
+            "access_key",
+            "password",
+        ],
+        ids=[
+            "key",
+            "token",
+            "access_token",
+            "api_key",
+            "apikey",
+            "access_key",
+            "password",
+        ],
     )
     def test_params_credential_is_masked(
         self, stub_client: HttpClient, param_name: str
@@ -128,12 +144,21 @@ class TestParamsMasking:
         params 中的凭据字段必须打码
 
         修复前这些字段走请求体字段表，`key` 因不在表中而原样进日志。
+        `access_key` 是 v3 补进 SENSITIVE_QUERY_FIELDS 的字段，此前
+        只有结构不变量间接锁住表成员关系、无直接行为断言。
+
+        阳性对照（v5 补）: 原断言只有"敏感值不出现"，若请求前置日志
+        被删除或被级别过滤，capture 为空 → 整条测试空转通过。故补
+        "日志里确实有请求行"这一条，把测试锚在真实日志上。
         """
         capture = _LogCapture()
         with capture:
             stub_client.get("/cgi-bin/webhook/send", params={param_name: PLACEHOLDER_KEY})
 
         joined = "\n".join(capture.messages)
+        assert "HTTP请求 >>>" in joined, (
+            f"请求前置日志未被捕获，本用例的脱敏断言会空转通过:\n{joined!r}"
+        )
         assert PLACEHOLDER_KEY not in joined, (
             f"params.{param_name} 的值泄露进了日志:\n{joined}"
         )
@@ -174,6 +199,9 @@ class TestParamsMasking:
             )
 
         joined = "\n".join(capture.messages)
+        assert "HTTP请求 >>>" in joined, (
+            f"请求前置日志未被捕获，本用例的脱敏断言会空转通过:\n{joined!r}"
+        )
         assert PLACEHOLDER_KEY not in joined, (
             f"URL 或 params 任一侧泄露了凭据:\n{joined}"
         )
@@ -192,6 +220,9 @@ class TestParamsMasking:
             )
 
         joined = "\n".join(capture.messages)
+        assert "HTTP请求 >>>" in joined, (
+            f"请求前置日志未被捕获，本用例的脱敏断言会空转通过:\n{joined!r}"
+        )
         assert PLACEHOLDER_KEY not in joined, (
             f"list 型 params 的嵌套凭据泄露:\n{joined}"
         )
