@@ -104,7 +104,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import case, func, or_
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from src.common.logger import LogManager
 from src.core.cache import cache_client
@@ -174,6 +174,34 @@ class CaseManagerError(Exception):
         """
         self.context = context or {}
         super().__init__(message)
+
+
+# --------------------------------------------------------------------------
+# 业务语义异常子类（路由层异常翻译的类型锚点）
+# --------------------------------------------------------------------------
+# 为什么需要: 路由层原先靠 `if "不存在" not in str(exc)` 这类**子串匹配**决定
+# 转 404 还是原样抛 500。子串匹配是脆的——任何 DB 异常消息里恰好含"不存在"
+# （例如"表 test_cases 不存在"、"database does not exist"）都会被误判成
+# 业务 404，真实故障被静默吞掉。改为按异常类型分流后，判定依据是代码里
+# 显式 raise 的语义，与错误文案彻底解耦。
+#
+# 向后兼容: 三个子类都继承 CaseManagerError，任何 `except CaseManagerError`
+# 的既有捕获点行为不变；核心层保持 HTTP 无关（不引入 404/409 等 HTTP 概念），
+# 异常翻译仍集中在路由层，只是锚点从"文案"换成"类型"。
+class CaseNotFoundError(CaseManagerError):
+    """资源不存在语义（用例/批次查不到）→ 路由层转 NotFoundError(404)"""
+
+
+class CaseConflictError(CaseManagerError):
+    """唯一性冲突语义（编号已存在）→ 路由层转 ConflictError(409)"""
+
+
+class CaseDataLoadError(CaseManagerError):
+    """数据文件加载/解析失败语义 → 路由层转 ValidationError(400)"""
+
+
+class NoCasesSelectedError(CaseManagerError):
+    """筛选无命中语义（无可执行用例）→ 路由层转 ValidationError(400)"""
 
 
 def generate_execution_id() -> str:
@@ -263,7 +291,7 @@ class CaseManager:
             cases = DataDriver.load_cases(file_path, sheet_name=sheet_name)
         except DataDriverError as exc:
             logger.error(f"用例数据加载失败 | 文件: {file_path} | {exc}")
-            raise CaseManagerError(
+            raise CaseDataLoadError(
                 f"用例数据加载失败: {exc}",
                 context={"operation": "load_cases", "file_path": str(file_path)},
             ) from exc
@@ -668,7 +696,7 @@ class CaseManager:
                     .first()
                 )
                 if existing is not None:
-                    raise CaseManagerError(
+                    raise CaseConflictError(
                         "用例编号已存在",
                         context={
                             "operation": "create_case",
@@ -692,6 +720,19 @@ class CaseManager:
                 session.flush()
                 session.refresh(case)
                 result = cls._to_dict(case)
+        except IntegrityError as exc:
+            # 并发窗口: 上面的"先查重再插入"是 check-then-act，两个并发
+            # POST 同编号时双方查重都未命中，由DB唯一约束在flush阶段拦截。
+            # 修复前走通用 SQLAlchemyError 分支 → 客户端收 500，且 str(exc)
+            # 含完整 INSERT 语句与全部列值（进日志、进 TESTING 响应体）。
+            # 识别为唯一性冲突并转成与串行路径相同的业务语义。
+            logger.warning(
+                f"用例创建并发编号冲突（唯一约束拦截）| 用例: {case_id_value}"
+            )
+            raise CaseConflictError(
+                "用例编号已存在",
+                context={"operation": "create_case", "case_id": case_id_value},
+            ) from exc
         except SQLAlchemyError as exc:
             logger.error(
                 f"用例创建数据库异常 | 用例: {case_id_value} | {exc}"
@@ -755,7 +796,7 @@ class CaseManager:
                     session.query(TestCase).filter_by(case_id=case_id).first()
                 )
                 if row is None:
-                    raise CaseManagerError(
+                    raise CaseNotFoundError(
                         "用例不存在",
                         context={"operation": "update_case", "case_id": case_id},
                     )
@@ -812,7 +853,7 @@ class CaseManager:
                     session.query(TestCase).filter_by(case_id=case_id).first()
                 )
                 if row is None:
-                    raise CaseManagerError(
+                    raise CaseNotFoundError(
                         "用例不存在",
                         context={"operation": "delete_case", "case_id": case_id},
                     )
@@ -1071,7 +1112,7 @@ class CaseManager:
                     .all()
                 )
                 if not records:
-                    raise CaseManagerError(
+                    raise CaseNotFoundError(
                         f"执行批次不存在或无任何执行记录: {execution_id}",
                         context={
                             "operation": "finish_execution",
@@ -1426,7 +1467,7 @@ class CaseManager:
             module=module, priority=priority, tags=tags, case_type=case_type
         )
         if not cases:
-            raise CaseManagerError(
+            raise NoCasesSelectedError(
                 "无符合条件的用例可执行",
                 context={
                     "operation": "start_execution",

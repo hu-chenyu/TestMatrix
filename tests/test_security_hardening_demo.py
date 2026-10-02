@@ -269,9 +269,24 @@ class TestHealthEndpointLeak:
     """P2: 未鉴权健康检查接口不得回传数据库内部细节"""
 
     @pytest.fixture
+    def prod_client(self) -> FlaskClient:
+        """
+        **生产模式**测试客户端（TESTING=False）
+
+        /health 的脱敏门控按 app.config["TESTING"] 判定，验证"生产不泄露"
+        必须在非测试模式下进行，否则测的是 TESTING 分支的详情回显。
+
+        返回:
+            FlaskClient: 生产模式 Flask 测试客户端
+        """
+        app = create_app("dev")
+        app.config["TESTING"] = False
+        return app.test_client()
+
+    @pytest.fixture
     def client(self) -> FlaskClient:
         """
-        创建测试客户端
+        创建测试客户端（TESTING=True）
 
         返回:
             FlaskClient: test 环境客户端
@@ -279,14 +294,18 @@ class TestHealthEndpointLeak:
         return create_app("test").test_client()
 
     def test_health_error_does_not_expose_credentials(
-        self, client: FlaskClient
+        self, prod_client: FlaskClient
     ) -> None:
         """
-        数据库异常时 /health 响应不得包含连接URL与SQL
+        生产模式下数据库异常不得回显连接URL与SQL
 
-        回归点: 修复前 `return False, str(exc)` 无条件回传异常原文，
-        SQLAlchemy 的 str(exc) 含完整连接URL（MySQL 下带用户名/库名）与
-        SQL 片段，而 /health 无鉴权且常被监控高频轮询。
+        回归点: 修复前 /health 无条件回显 str(exc)，SQLAlchemy 异常文本含
+        完整连接URL（MySQL 模式下含用户名/库名）与SQL片段，而 /health
+        无鉴权且常被监控高频轮询。
+
+        注意: 断言必须在 **生产模式** 下做——修复后按项目 6.7 的
+        TESTING/生产双模式约定，TESTING 模式会回显详情供联调定位
+        （与 exceptions.py 全局处理器同口径），只有非 TESTING 才脱敏。
         """
         leaked = (
             "(sqlite3.OperationalError) unable to open database file\n"
@@ -298,15 +317,38 @@ class TestHealthEndpointLeak:
             "src.web.routes.base._probe_database",
             side_effect=RuntimeError(leaked),
         ):
-            response = client.get("/health")
+            response = prod_client.get("/health")
 
         assert response.status_code == 503, "数据库不可用时 /health 应返回503"
         body = response.get_data(as_text=True)
         assert "degraded" in body, "降级响应体应仍标识 degraded 状态"
+        # 敏感内容不得出现
         assert "Sup3rSecret" not in body, "数据库密码泄露到 /health 响应"
         assert "mysql+pymysql://" not in body, "数据库连接URL泄露到 /health 响应"
         assert "SELECT 1" not in body, "SQL 语句泄露到 /health 响应"
+        # 异常类型名保留供排障
         assert "RuntimeError" in body, "应回传异常类型名而非原文"
+
+    def test_health_error_detail_only_in_testing_mode(self) -> None:
+        """
+        TESTING 模式才回显完整详情（6.7 双模式约定，不回归）
+
+        修复后 /health 拆成「对外摘要」与「内部详情」两段，TESTING=True
+        时回显详情供联调定位，非 TESTING 时只回显脱敏摘要。
+        """
+        leaked = "诊断细节: mysql+pymysql://root:Sup3rSecret@host/db"
+        client = create_app("test").test_client()
+        with patch(
+            "src.web.routes.base._probe_database",
+            side_effect=RuntimeError(leaked),
+        ):
+            response = client.get("/health")
+
+        body = response.get_data(as_text=True)
+        assert response.status_code == 503
+        assert "Sup3rSecret" in body, (
+            "TESTING 模式应回显完整详情供联调定位（口径同 exceptions.py）"
+        )
 
     def test_health_probe_failure_is_logged_with_full_detail(
         self, client: FlaskClient
@@ -563,27 +605,43 @@ class TestConfigHardening:
             "应用必须使用工厂阶段解析出的密钥"
         )
 
-    def test_production_without_secret_key_warns(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    def test_production_without_secret_key_fails_fast(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """
-        生产环境未配置 TM_SECRET_KEY 必须告警
+        生产环境缺 TM_SECRET_KEY 必须 fail-fast 拒绝启动
 
-        回归点: ProductionConfig 的 docstring 声称"要求 SECRET_KEY 必须从
-        环境变量设置"，但代码从不校验，静默降级为随机 key。
+        回归点: 修复前只 print 警告并降级为进程级随机密钥。那是"配置错了
+        却在运行中悄悄降级"的最坏形态——服务看着是好的，登录态却随机失效
+        （每次重启即变 + 多 worker 各不相同）。启动即失败把问题暴露在部署时刻。
         """
         monkeypatch.delenv("TM_SECRET_KEY", raising=False)
-        capsys.readouterr()  # 丢弃前序输出
 
-        resolve_secret_key(ProductionConfig)
+        with pytest.raises(ValueError, match="TM_SECRET_KEY") as exc_info:
+            resolve_secret_key(ProductionConfig)
 
-        captured = capsys.readouterr()
-        assert "TM_SECRET_KEY" in captured.out, (
-            "生产环境缺密钥必须显式告警，不能静默降级"
-        )
-        assert "session" in captured.out.lower(), (
-            "告警文案应说明 session 会失效的实际后果"
-        )
+        message = str(exc_info.value)
+        assert "生产环境" in message, "异常信息应说明这是生产环境的强制要求"
+        assert "重启" in message, "异常信息应说明随机密钥的实际后果"
+
+    def test_production_with_secret_key_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        生产环境配置了 TM_SECRET_KEY 时正常返回（不回归）
+        """
+        monkeypatch.setenv("TM_SECRET_KEY", "prod-explicit-key")
+        assert resolve_secret_key(ProductionConfig) == "prod-explicit-key"
+
+    def test_dev_without_secret_key_uses_random(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        dev/test 环境缺密钥仍降级为随机 key（本地零配置体验不回归）
+        """
+        monkeypatch.delenv("TM_SECRET_KEY", raising=False)
+        generated = resolve_secret_key(DevelopmentConfig)
+        assert len(generated) == 64, "随机密钥应为 32 字节 hex"
 
     def test_max_content_length_is_enforced(self) -> None:
         """

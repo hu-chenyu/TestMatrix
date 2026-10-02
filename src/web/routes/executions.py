@@ -60,7 +60,13 @@ from datetime import datetime
 from flask import Blueprint, Response, request, stream_with_context
 
 from src.common.logger import LogManager
-from src.core.case_manager import MAX_PAGE_SIZE, CaseManager, CaseManagerError
+from src.core.case_manager import (
+    MAX_PAGE_SIZE,
+    CaseManager,
+    CaseManagerError,
+    CaseNotFoundError,
+    NoCasesSelectedError,
+)
 from src.core.event_bus import get_channel
 from src.core.executors import VALID_EXECUTORS
 from src.core.task_queue import STATUS_PENDING, task_queue_client
@@ -176,11 +182,12 @@ def get_execution_detail(execution_id: str):
         CaseManagerError: 其他核心层异常原样上抛（兜底500）
     """
     # 核心层查询（数据库异常原样上抛兜底500）
+    # 纯类型判定，无子串兜底：子串匹配会把恰好含"不存在"的数据库错误
+    # （"表 test_execution_batches 不存在"、"database does not exist"）
+    # 误判成业务404，真实故障被静默吞掉
     try:
         detail = CaseManager.get_execution_detail(execution_id)
-    except CaseManagerError as exc:
-        if "不存在" not in str(exc):
-            raise
+    except CaseNotFoundError as exc:
         raise NotFoundError(
             "执行批次不存在", detail={"execution_id": execution_id}
         ) from exc
@@ -303,11 +310,9 @@ def trigger_execution():
             tags=tags_filter,
             case_type=case_type,
         )
-    except CaseManagerError as exc:
-        # 关键字分流（口径同6.9/6.10）: 无符合条件的用例转400，
-        # 其余（数据库异常等）原样上抛兜底500
-        if "无符合条件的用例" not in str(exc):
-            raise
+    except NoCasesSelectedError as exc:
+        # 类型分流：无符合条件的用例是业务语义，转400（子串匹配会把
+        # 恰好含该措辞的数据库错误误判成400）
         raise ValidationError(str(exc)) from exc
 
     # 后台执行调度（Day32）: 队列启用时优先LPUSH投递任务由

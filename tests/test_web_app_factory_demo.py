@@ -39,14 +39,24 @@ class TestWebAppFactory:
         assert app.config["TESTING"] is True, "测试环境TESTING应为True"
         assert app.config["DEBUG"] is True, "测试环境DEBUG应为True"
 
-    def test_create_app_production(self) -> None:
+    def test_create_app_production(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """
         测试传入config_name="prod": 确认DEBUG=False，TESTING=False
+
+        注: 生产环境现已 fail-fast 要求 TM_SECRET_KEY（缺失即拒绝启动，
+        避免随机密钥导致 session 重启即失效/多worker互不一致），故本用例
+        需先注入密钥。缺密钥时的 fail-fast 行为由
+        tests/test_p2_hardening_demo.py::TestSecretKeyFailFast 专项覆盖。
         """
+        monkeypatch.setenv("TM_SECRET_KEY", "test-only-prod-key")
+
         app = create_app("prod")
 
         assert app.config["DEBUG"] is False, "生产环境DEBUG应为False"
         assert app.config["TESTING"] is False, "生产环境TESTING应为False"
+        assert app.config["SECRET_KEY"] == "test-only-prod-key", (
+            "生产环境应采用显式配置的密钥"
+        )
 
     def test_config_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """

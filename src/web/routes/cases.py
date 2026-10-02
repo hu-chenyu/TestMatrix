@@ -37,7 +37,13 @@ from werkzeug.utils import secure_filename
 
 from src.common.logger import LogManager
 from src.core.cache import cache_client, cases_list_key
-from src.core.case_manager import MAX_PAGE_SIZE, CaseManager, CaseManagerError
+from src.core.case_manager import (
+    MAX_PAGE_SIZE,
+    CaseConflictError,
+    CaseDataLoadError,
+    CaseManager,
+    CaseNotFoundError,
+)
 from src.web.exceptions import (
     ConflictError,
     NotFoundError,
@@ -376,14 +382,16 @@ def create_case():
     data = _load_case_payload(CaseCreateSchema(), body)
 
     # 2. 调用核心层创建（编号重复转409，数据库异常原样上抛兜底500）
+    #    异常翻译按**类型**判定（CaseConflictError），不再依赖错误文案子串。
+    #    子串匹配会把恰好含"已存在"的数据库错误（如"表已存在"）误判成409，
+    #    真实故障被静默转成业务错误。核心层 6 个相关抛出点已全部类型化，
+    #    泛型 CaseManagerError 一律原样上抛走500，不再做任何文案匹配。
     try:
         case = CaseManager.create_case(data)
-    except CaseManagerError as exc:
-        if "已存在" in str(exc):
-            raise ConflictError(
-                "用例编号已存在", detail={"case_id": data.get("case_id")}
-            ) from exc
-        raise
+    except CaseConflictError as exc:
+        raise ConflictError(
+            "用例编号已存在", detail={"case_id": data.get("case_id")}
+        ) from exc
 
     # 创建成功业务埋点（Day29）: 业务编号/模块/优先级落日志，
     # 便于按用例维度检索创建轨迹；仅记日志不改响应结构
@@ -444,11 +452,10 @@ def update_case(case_id: str):
         raise ValidationError("至少提供一个待更新字段")
 
     # 3. 调用核心层更新（用例不存在转404，数据库异常原样上抛兜底500）
+    #    纯类型判定，无子串兜底（理由同 create_case）
     try:
         case = CaseManager.update_case(case_id, data)
-    except CaseManagerError as exc:
-        if "不存在" not in str(exc):
-            raise
+    except CaseNotFoundError as exc:
         raise NotFoundError(
             "用例不存在", detail={"case_id": case_id}
         ) from exc
@@ -473,9 +480,7 @@ def delete_case(case_id: str):
     # 核心层删除（用例不存在转404，数据库异常原样上抛兜底500）
     try:
         CaseManager.delete_case(case_id)
-    except CaseManagerError as exc:
-        if "不存在" not in str(exc):
-            raise
+    except CaseNotFoundError as exc:
         raise NotFoundError(
             "用例不存在", detail={"case_id": case_id}
         ) from exc
@@ -616,13 +621,11 @@ def import_cases():
             stats = CaseManager.sync_cases_from_file(
                 tmp_file, sheet_name=sheet_name, creator=creator
             )
-        except CaseManagerError as exc:
-            if "数据加载失败" in str(exc):
-                # 路径脱敏: str(exc) 含服务端临时目录绝对路径与操作系统账户名，
-                # 该消息会经前端 toast 展示给终端用户；脱敏后仅保留文件名、
-                # 错误类型与行列号等定位信息（见 _sanitize_error_message）
-                raise ValidationError(_sanitize_error_message(str(exc))) from exc
-            raise
+        except CaseDataLoadError as exc:
+            # 路径脱敏: str(exc) 含服务端临时目录绝对路径与操作系统账户名，
+            # 该消息会经前端 toast 展示给终端用户；脱敏后仅保留文件名、
+            # 错误类型与行列号等定位信息（见 _sanitize_error_message）
+            raise ValidationError(_sanitize_error_message(str(exc))) from exc
     finally:
         # 临时文件与临时目录必须清理（ignore_errors防Windows句柄残留导致的报错）
         if tmp_file.exists():

@@ -1544,16 +1544,31 @@ class NotificationRouter:
         results: dict[str, bool] = {}
         for notifier in self.notifiers:
             channel = notifier.channel_name
+            # 消息模板缺失时显式判失败并告警，而不是让 notifications[channel]
+            # 抛 KeyError 后被下面的 except 吞掉——那样该渠道会永久静默
+            # 不发送、也不写死信，排查时看不出任何痕迹。
+            # 扩展渠道（继承 BaseNotifier 自定义 channel_name）若未同步在
+            # _build_channel_notifications 里补模板，就会命中此处。
+            # 变量名避开 notification：函数前段的 extra 注入循环已用同名变量
+            # 绑定为 Notification，mypy 按整个函数作用域推断类型会冲突
+            channel_message = notifications.get(channel)
+            if channel_message is None:
+                logger.error(
+                    f"渠道缺少消息模板，已跳过（该渠道不会发送任何通知） | "
+                    f"渠道: {channel} | 批次: {execution_id}"
+                )
+                results[channel] = False
+                continue
             try:
                 # 重试由路由层统一管理（BaseNotifier.send保持单次尝试语义）
                 success, attempts, fail_reason = self._send_with_retry(
-                    notifier, notifications[channel]
+                    notifier, channel_message
                 )
                 results[channel] = success
                 if success:
                     # 成功发送写历史（success），供发送记录列表回溯
                     self._save_history(
-                        notifications[channel], channel,
+                        channel_message, channel,
                         status="success", attempts=attempts,
                     )
                     logger.debug(
@@ -1568,12 +1583,11 @@ class NotificationRouter:
                         f"批次: {execution_id}"
                     )
                     self._save_dead_letter(
-                        notifications[channel], channel,
-                        fail_reason, attempts,
+                        channel_message, channel, fail_reason, attempts,
                     )
                     # 重试耗尽进死信，同步写一条 dead_letter 历史
                     self._save_history(
-                        notifications[channel], channel,
+                        channel_message, channel,
                         status="dead_letter", attempts=attempts,
                         error_message=fail_reason,
                     )
