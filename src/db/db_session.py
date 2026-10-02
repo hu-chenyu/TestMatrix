@@ -30,7 +30,7 @@ import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -44,6 +44,27 @@ logger = LogManager.get_logger()
 
 # 项目根目录: 本模块位于 src/db/ 下，向上两级即为项目根
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _bracket_ipv6_host(host: str) -> str:
+    """
+    IPv6 字面量地址补方括号（DSN 组装用）
+
+    背景: MySQL DSN 的 host 段以 ':' 分隔主机与端口，而 IPv6 字面量地址
+    本身就含多个 ':'。不补方括号时 `mysql+pymysql://root:pw@::1:3306/db`
+    解析端口会得到 '::1:3306' 并抛
+    `ValueError: invalid literal for int() with base 10`。
+    已经是 [::1] 形态（含方括号）或不含冒号的普通主机名/IP 原样返回。
+
+    参数:
+        host (str): 原始 host 配置值
+
+    返回:
+        str: 可安全嵌入 DSN 的 host 表示
+    """
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
 
 
 class DatabaseSession:
@@ -106,14 +127,25 @@ class DatabaseSession:
             # 都要 URL 编码。host / database 刻意**不**编码：host 是主机名
             # 或 IP（编码后反解析失败），database 是路径段名，MySQL 方言
             # 下本就按字面量解析。
+            #
+            # 编码函数必须是 quote 而非 quote_plus（v3 修复 V2-P2-1）:
+            # quote_plus 把空格编码成 '+'，而 '+' 只在
+            # application/x-www-form-urlencoded 语境下代表空格；SQLAlchemy
+            # 解析 userinfo 用的是 unquote（非 unquote_plus），于是
+            #   make_url("mysql+pymysql://test+user:pw@...").username
+            #     == 'test+user'   <- 以字面 "+" 认证，必然失败
+            #   make_url("mysql+pymysql://test%20user:pw@...").username
+            #     == 'test user'   <- 正确
+            # userinfo 段空格的正确转义是 %20，即 quote(..., safe="")。
             host = env_manager.get("TM_DB_MYSQL_HOST", "127.0.0.1")
             port = env_manager.get_int("TM_DB_MYSQL_PORT", 3306)
             user = env_manager.get("TM_DB_MYSQL_USER", "root")
             password = env_manager.get("TM_DB_MYSQL_PASSWORD", "")
             database = env_manager.get("TM_DB_MYSQL_DATABASE", "testmatrix")
             url = (
-                f"mysql+pymysql://{quote_plus(user)}:{quote_plus(password)}@"
-                f"{host}:{port}/{database}?charset=utf8mb4"
+                f"mysql+pymysql://{quote(user, safe='')}:"
+                f"{quote(password, safe='')}@"
+                f"{_bracket_ipv6_host(host)}:{port}/{database}?charset=utf8mb4"
             )
             logger.debug(f"数据库URL构建完成[MySQL] | 目标: {host}:{port}/{database}")
             return url

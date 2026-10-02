@@ -650,33 +650,48 @@ def stream_execution_events(execution_id: str):
                 # db: 前缀，与通道 event_id（live:）彻底区分；断点过滤
                 # 只认同为 db 体系的序号，跨体系一律全量重发
                 next_frame_id = 1
-                if detail is not None:
+                if detail is None:
+                    # 明细查询异常 -> 降级为单条终态帧，且**不输出 id 行**。
+                    #
+                    # 为什么降级帧不能占用 db:1（v3 修复 V2-P2-2）:
+                    # 降级帧不对应真实序列中的任何位置。若给它 db:1，
+                    # 客户端 lastEventId 被推进到 1；重连时带
+                    # Last-Event-ID: db:1，而此时 DB 已恢复正常，正常
+                    # 重建路径的 batch_start 同样是 db:1，`1 > 1` 为假
+                    # 被断点过滤**永久丢弃**——客户端再也不知道本批
+                    # 次有多少条用例。不输出 id 行即不推进游标，
+                    # 下次连接全量重发。降级帧本就是"当前状态快照"，
+                    # 重复送达幂等无害。
+                    yield _terminal_snapshot_frame(
+                        status_data, namespace=EVENT_ID_NAMESPACE_DB
+                    )
+                    return
+                if next_frame_id > resume_db:
+                    yield _format_sse_frame(
+                        "batch_start",
+                        {
+                            "total_cases": detail["summary"]["total_cases"],
+                            "executor_kind": None,
+                        },
+                        event_id=next_frame_id,
+                        namespace=EVENT_ID_NAMESPACE_DB,
+                    )
+                next_frame_id += 1
+                for item in detail["items"]:
                     if next_frame_id > resume_db:
                         yield _format_sse_frame(
-                            "batch_start",
+                            "case_finished",
                             {
-                                "total_cases": detail["summary"]["total_cases"],
-                                "executor_kind": None,
+                                "case_id": item["case_id"],
+                                "case_name": item["case_name"],
+                                "result": item["result"],
+                                "duration": item["duration"],
+                                "error_message": item["error_message"],
                             },
                             event_id=next_frame_id,
                             namespace=EVENT_ID_NAMESPACE_DB,
                         )
                     next_frame_id += 1
-                    for item in detail["items"]:
-                        if next_frame_id > resume_db:
-                            yield _format_sse_frame(
-                                "case_finished",
-                                {
-                                    "case_id": item["case_id"],
-                                    "case_name": item["case_name"],
-                                    "result": item["result"],
-                                    "duration": item["duration"],
-                                    "error_message": item["error_message"],
-                                },
-                                event_id=next_frame_id,
-                                namespace=EVENT_ID_NAMESPACE_DB,
-                            )
-                        next_frame_id += 1
                 # 终态帧同样按断点过滤: 客户端已收到过该id则不重复补发
                 if next_frame_id > resume_db:
                     yield _terminal_snapshot_frame(
@@ -686,23 +701,21 @@ def stream_execution_events(execution_id: str):
                     )
                 return
             if status_data["status"] == "failed":
-                # 失败批次: 无defect_statistics汇总行，单帧终态直发
-                # （固定event_id=1: 单帧即全量，无断点过滤意义）
+                # 失败批次: 无defect_statistics汇总行，单帧终态直发。
+                # 不输出 id 行（同上：单帧是状态快照，不占序列位置）
                 yield _terminal_snapshot_frame(
-                    status_data,
-                    event_id=1,
-                    namespace=EVENT_ID_NAMESPACE_DB,
+                    status_data, namespace=EVENT_ID_NAMESPACE_DB
                 )
                 return
             # pending极早期/CLI运行中批次: 单帧进行中快照直发
             # （不挂死等待——CLI批次在Web进程内永远等不到publish）
+            # 同样不输出 id 行：它不是序列中的一帧，只是当前状态
             yield _format_sse_frame(
                 "batch_start",
                 {
                     "total_cases": status_data["total_cases"],
                     "status": status_data["status"],
                 },
-                event_id=1,
                 namespace=EVENT_ID_NAMESPACE_DB,
             )
             return

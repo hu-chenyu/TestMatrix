@@ -618,6 +618,11 @@ class TestConfigHardening:
         回归点: 修复前只 print 警告并降级为进程级随机密钥。那是"配置错了
         却在运行中悄悄降级"的最坏形态——服务看着是好的，登录态却随机失效
         （每次重启即变 + 多 worker 各不相同）。启动即失败把问题暴露在部署时刻。
+
+        v3 变更: 判定口径由"配置类身份是 ProductionConfig"改为"不在
+        （开发, 测试）白名单内即要求显式配置"，错误文案随之改为
+        "非开发/测试环境"。生产档位的行为不变（仍 fail-fast），
+        变的是新增档位默认走严格侧。
         """
         monkeypatch.delenv("TM_SECRET_KEY", raising=False)
 
@@ -625,8 +630,13 @@ class TestConfigHardening:
             resolve_secret_key(ProductionConfig)
 
         message = str(exc_info.value)
-        assert "生产环境" in message, "异常信息应说明这是生产环境的强制要求"
+        assert "非开发/测试环境" in message, (
+            f"异常信息应说明这是非开发/测试环境的强制要求: {message}"
+        )
         assert "重启" in message, "异常信息应说明随机密钥的实际后果"
+        assert "ProductionConfig" in message, (
+            "异常信息应指出当前生效的配置类，便于判断是不是环境配错了"
+        )
 
     def test_production_with_secret_key_succeeds(
         self, monkeypatch: pytest.MonkeyPatch

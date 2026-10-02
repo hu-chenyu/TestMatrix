@@ -660,7 +660,16 @@ def stop_worker() -> None:
             logger.debug(f"worker join异常已忽略 | {exc}")
             return
     # 线程已结束（或本就没有存活worker）: 清空引用，允许后续start重建
+    #
+    # 必须条件清空（v3 修复 V2-P1-3）: 上面取 thread 后已释放 _state_lock，
+    # join 期间（join 释放 GIL、可能长达 WORKER_JOIN_TIMEOUT_SECONDS）另一
+    # 线程可调 start_worker——若原 worker 此时已退出，is_alive() 为 False，
+    # start_worker 会建新 worker 并把 _worker_thread 指向它。无条件置 None
+    # 会把**新 worker 的引用一并抹掉**，后果是: 它仍在跑却无人能停，且
+    # 下次 start_worker 见 None 又会起一个，两个 worker 并发 BRPOP 同一
+    # 队列，"单 worker 串行"不变量被破坏。
     with _state_lock:
-        _worker_thread = None
-        _stop_event = None
-    logger.debug("任务队列worker引用已清空")
+        if _worker_thread is thread:
+            _worker_thread = None
+            _stop_event = None
+            logger.debug("任务队列worker引用已清空")

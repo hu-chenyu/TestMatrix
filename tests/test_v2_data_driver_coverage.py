@@ -167,32 +167,31 @@ class TestDataDriverYamlErrors:
 
         monkeypatch.setattr(builtins, "open", real_open)
 
-    def test_non_utf8_yaml_escapes_as_unicode_decode_error(
+    def test_non_utf8_yaml_is_wrapped_with_encoding_hint(
         self, tmp_path: Path
     ) -> None:
         """
-        **已知缺陷**（大扫除 v2 审查发现，待修）: 非 UTF-8 的 YAML 文件
-        让 UnicodeDecodeError 原样逃逸，未被包装为 DataDriverError。
+        非 UTF-8 的 YAML 被包装为 DataDriverError，文案指向编码（v3 已修）
 
-        实测根因: _load_yaml 只 catch (yaml.YAMLError, OSError)，而
-        UnicodeDecodeError 继承自 UnicodeError -> ValueError，既不是
-        YAMLError 也不是 OSError，两条 except 都接不住。而解码错误是在
-        safe_load(file_handle) 读取句柄时才发生的，不在 open() 阶段，
-        因此也不可能被前一处的 open 失败路径覆盖。
+        v2 记录过的缺陷: _load_yaml 只 catch (yaml.YAMLError, OSError)，而
+        UnicodeDecodeError 继承自 UnicodeError -> ValueError，两条都接不住；
+        且解码发生在 safe_load(file_handle) **读取句柄**阶段，不在 open()
+        阶段，前一处也覆盖不到。修复前异常裸逃，导入接口返回 500 且响应体
+        是裸的 codec 错误文本。
 
-        影响: 用例导入接口遇到 GBK 编码的 YAML 时会返回 500 且响应体是
-        裸的 codec 错误文本，而不是 400 + "文件编码错误，请用 UTF-8"。
-
-        本条**如实断言当前实际行为**而非期望行为：任务一只允许新建测试
-        文件、不改业务源码。修复时把本条改为断言 DataDriverError 即可，
-        该缺陷已记入 docs/bug_audit_report_v2_20261002.md。
+        本用例在 v2 时断言的是**缺陷本身**（DID NOT RAISE UnicodeDecodeError
+        即通过），v3 修复后改为断言正确的对外契约。
         """
         binary_file = tmp_path / "cases.yaml"
         # 0xFF 不是合法 UTF-8 起始字节，读取时必抛解码错误
         binary_file.write_bytes(b"\xff\xfe\x00binary")
 
-        with pytest.raises(UnicodeDecodeError):
+        with pytest.raises(DataDriverError) as excinfo:
             DataDriver.load_cases(binary_file)
+
+        message = str(excinfo.value)
+        assert "编码" in message, f"错误文案应指向编码问题: {message}"
+        assert "UTF-8" in message, f"错误文案应给出可执行的修复动作: {message}"
 
     def test_yaml_syntax_error_wrapped(self, tmp_path: Path) -> None:
         """

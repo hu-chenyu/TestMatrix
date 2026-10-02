@@ -264,6 +264,19 @@ class DataDriver:
         except yaml.YAMLError as exc:
             logger.error(f"YAML语法解析失败 | {path} | {exc}")
             raise DataDriverError(f"YAML语法解析失败: {exc}", file_path=path) from exc
+        except UnicodeError as exc:
+            # 文件不是 UTF-8 文本（如 GBK 编码的用例文件）。
+            # UnicodeDecodeError 继承自 UnicodeError -> ValueError，既不是
+            # YAMLError 也不是 OSError，前两条 except 都接不住；且解码发生在
+            # safe_load(file_handle) **读取句柄**阶段、不在 open() 阶段，
+            # 因此接在 open 的 OSError 分支之后也覆盖不到。修复前该异常
+            # 原样逃逸，导入接口返回 500 且响应体是裸的 codec 错误文本。
+            # 错误文案明确指向编码，给出可执行的修复动作。
+            logger.error(f"YAML文件编码错误（非UTF-8） | {path} | {exc}")
+            raise DataDriverError(
+                f"文件编码错误: 请将文件另存为 UTF-8 编码后重试（{exc}）",
+                file_path=path,
+            ) from exc
         except OSError as exc:
             logger.error(f"YAML文件读取失败 | {path} | {exc}")
             raise DataDriverError(f"文件读取失败: {exc}", file_path=path) from exc
