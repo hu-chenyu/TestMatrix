@@ -374,10 +374,22 @@ class TestSseDegradedBranches:
             "get_execution_detail",
             staticmethod(lambda _eid: detail),
         )
+        # 请求2 的 Last-Event-ID 必须来自请求1 **实际收到的 id**。
+        # v5 修正（Hy4 指出）: 原先硬编码 "live:0"，那与"降级帧是否带
+        # id"毫无关系——无论降级帧带不带 db:1，请求2 带的都是 live:0，
+        # 撤销修复后本用例照样全绿（空转）。
+        #
+        # 关键: 降级帧**不带 id**，客户端就没有可回传的游标，真实行为是
+        # **根本不发 Last-Event-ID 头**。此处若人为补一个 "db:1"，
+        # 反而会亲手制造出"batch_start 被过滤"的假象（那是下面对照组
+        # 专门验证的场景），与本用例要验证的"全量重发"背道而驰。
+        second_headers = (
+            {"Last-Event-ID": first_ids[-1]} if first_ids else {}
+        )
         second_raw = _read_stream(
             client.get(
                 f"/api/executions/{execution_id}/events",
-                headers={"Last-Event-ID": "live:0"},
+                headers=second_headers,
             )
         )
 
@@ -386,6 +398,60 @@ class TestSseDegradedBranches:
             f"实际流: {second_raw[:200]!r}"
         )
         assert '"total_cases": 4' in second_raw
+
+    def test_batch_start_would_be_filtered_by_db_id(
+        self, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        对照组: 带 `db:1` 重连时 batch_start **确实**会被断点过滤
+
+        证明上一条的断言语义: 若降级帧当初带的是 db:1，客户端带着它
+        重连，正常路径的 batch_start（同为 db:1）就会因 `1 > 1` 为假
+        而被丢弃——即原 bug 的真实形态。本条把这个事实显式钉住，避免
+        上一条在"降级帧是否带 id"这个维度上退化��空转。
+        """
+        from src.core.case_manager import CaseManager
+
+        execution_id = "RUN-V2-DBFILTER"
+        monkeypatch.setattr(
+            CaseManager,
+            "get_execution_status",
+            staticmethod(lambda _eid: _finished_status(total=4, passed=4)),
+        )
+        monkeypatch.setattr(
+            CaseManager,
+            "get_execution_detail",
+            staticmethod(
+                lambda _eid: {
+                    "summary": {"total_cases": 4},
+                    "items": [
+                        {
+                            "case_id": "TM-RA-1",
+                            "case_name": "用例1",
+                            "result": "passed",
+                            "duration": 0.1,
+                            "error_message": None,
+                        }
+                    ],
+                }
+            ),
+        )
+
+        raw = _read_stream(
+            client.get(
+                f"/api/executions/{execution_id}/events",
+                headers={"Last-Event-ID": "db:1"},
+            )
+        )
+
+        assert "event: batch_start" not in raw, (
+            f"带 db:1 重连时 batch_start 应被断点过滤（这正是原 bug 的成因），"
+            f"实际流: {raw[:200]!r}"
+        )
+        # 1 个明细 -> batch_start=db:1(被过滤) / case_finished=db:2 / 终态=db:3
+        assert _frame_ids(raw) == ["db:2", "db:3"], (
+            f"应只重发 db:1 之后的帧，实际: {_frame_ids(raw)}"
+        )
 
     def test_events_failed_batch_single_frame(
         self, client: FlaskClient, monkeypatch: pytest.MonkeyPatch

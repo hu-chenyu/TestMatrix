@@ -682,12 +682,37 @@ class TestCacheInvalidateIsolation:
 
     def test_safe_invalidate_swallows_and_logs(self) -> None:
         """
-        _safe_invalidate 吞掉异常（不向上抛）
+        _safe_invalidate 吞掉异常**并留下可定位的 warning**（v5 补断言）
+
+        v3 版本是零断言的"不抛异常即为通过"（v4 审查 V3-P2-2）：函数名
+        承诺 `and_logs` 却对 logger.warning 零断言。删掉那条 warning
+        测试仍全绿，而运维判断"是创建还是更新出的缓存故障"的唯一线索
+        正是 warning 里的 operation 名。
+
+        断言同时覆盖两个要素：操作名（定位用）与异常类型名（诊断用），
+        避免"只记了句空话"的假修复。
         """
+        from loguru import logger as loguru_logger
         from src.core.case_manager import _safe_invalidate
 
         def _boom() -> None:
             """必然抛错的失效动作"""
             raise RuntimeError("缓存炸了")
 
-        _safe_invalidate("测试操作", _boom)  # 不抛异常即为通过
+        captured: list[str] = []
+        sink_id = loguru_logger.add(captured.append, level="WARNING")
+        try:
+            _safe_invalidate("测试操作", _boom)  # 不抛异常即为通过
+        finally:
+            loguru_logger.remove(sink_id)
+
+        joined = "\n".join(captured)
+        assert "缓存失效异常已忽略" in joined, (
+            f"缓存故障必须记 warning 留痕，实际日志: {joined!r}"
+        )
+        assert "测试操作" in joined, (
+            f"warning 须带 operation 以定位是哪条写路径出的故障: {joined!r}"
+        )
+        assert "RuntimeError" in joined, (
+            f"warning 须保留异常类型名供诊断: {joined!r}"
+        )
