@@ -28,6 +28,64 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _extract_function_body(source: str, func_name: str) -> str:
+    """
+    截取指定 JS 函数的函数体文本（花括号配对，跳过字符串与注释）
+
+    为什么需要（v3 修复 V2-P2-8）: cases.js 里有 5 处 `catch (error)`
+    与 5 处 `finally`。直接对全文做 `catch...finally` 正则，取到的是
+    **全文件第一个** catch 到最近 finally 之间的整段；一旦更靠前的函数
+    新增一个 catch，捕获区会跨越函数边界膨胀，只要任意位置存在目标
+    赋值就通过——"代码存在但逻辑仍错"会漏报。限定到函数体内匹配即可
+    消除这种误报。
+
+    花括号必须配对而非"到下一个 } 为止": 函数体内的对象字面量、
+    模板字符串、嵌套块都会让朴素的截断提前结束。字符串/注释里的
+    花括号与引号同样需要跳过，否则 `"}"` 这类字面量会破坏配对。
+
+    参数:
+        source (str): 整个 JS 文件文本
+        func_name (str): 函数名（如 loadCases）
+
+    返回:
+        str: 函数体大括号内部的文本（不含最外层花括号）
+
+    异常:
+        AssertionError: 找不到该函数或花括号不配平时抛出
+    """
+    match = re.search(
+        r"(?:async\s+)?function\s+" + re.escape(func_name) + r"\s*\([^)]*\)\s*\{",
+        source,
+    )
+    assert match is not None, f"未找到函数定义: {func_name}"
+
+    index = match.end() - 1  # 指向函数体的开括号
+    depth = 0
+    quote: str | None = None
+    position = index
+    while position < len(source):
+        char = source[position]
+        if quote is not None:
+            # 字符串内部：处理转义，等闭合引号
+            if char == "\\":
+                position += 2
+                continue
+            if char == quote:
+                quote = None
+            position += 1
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[index + 1: position]
+        position += 1
+    raise AssertionError(f"函数 {func_name} 的花括号不配对，无法确定函数体范围")
 JS_DIR = PROJECT_ROOT / "src" / "web" / "static" / "js"
 
 
@@ -186,16 +244,26 @@ class TestCasesListRefreshCompensation:
         回归点: 修复前失败分支只渲染错误条与空态行，页脚仍显示上一次的
         "共 137 条"+ 空表格，用户看到自相矛盾的画面，易误判为数据丢失
         并触发重复操作。
+
+        **v3 修正匹配范围**（原版未按函数作用域锚定）: cases.js 里有 5 处
+        `catch (error)` 与 5 处 `finally`，`re.search` 取的是**全文件第一个**
+        catch 到最近 finally 之间的整段。一旦更靠前的函数新增一个
+        catch，捕获区会跨越函数边界膨胀，只要任意位置存在
+        `state.total = 0` 就通过——"代码存在但逻辑仍错"会漏报。
+        现先切出 loadCases 函数体，再在切片内匹配 catch。
         """
+        catch_body = _extract_function_body(cases_js, "loadCases")
         match = re.search(
-            r"catch\s*\(error\)\s*\{([\s\S]*?)finally\s*\{", cases_js
+            r"catch\s*\(error\)\s*\{([\s\S]*?)finally\s*\{", catch_body
         )
-        assert match is not None, "loadCases 必须有 catch 失败分支"
-        catch_body = match.group(1)
-        assert re.search(r"state\.total\s*=\s*0", catch_body), (
+        assert match is not None, (
+            "loadCases 必须有 catch 失败分支（匹配范围已限定在该函数体内）"
+        )
+        body = match.group(1)
+        assert re.search(r"state\.total\s*=\s*0", body), (
             "失败分支必须重置 state.total，否则页脚残留旧总数"
         )
-        assert re.search(r"state\.totalPages\s*=\s*0", catch_body), (
+        assert re.search(r"state\.totalPages\s*=\s*0", body), (
             "失败分支必须重置 state.totalPages，否则分页条残留旧值"
         )
 

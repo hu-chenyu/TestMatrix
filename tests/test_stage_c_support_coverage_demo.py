@@ -60,6 +60,7 @@ from typing import Any
 import allure
 import pytest
 import redis
+from loguru import logger as loguru_logger
 from src.common.env_manager import EnvManager
 from src.core import executors as executors_mod
 from src.core.cache import CacheClient
@@ -110,6 +111,40 @@ def _exception_app(config_name: str) -> Any:
         raise ForbiddenError("缺少 delete:case 权限")
 
     return app
+
+
+class _LogCapture:
+    """
+    loguru 日志捕获器（context manager，PROJECT_CONTEXT 7.17 标准做法）
+
+    为什么不用 pytest 的 caplog: loguru 不经过 stdlib logging 的 handler
+    体系，caplog 抓不到任何记录，会得到一个永远为空的列表并据此误判
+    "没有记日志"。
+    """
+
+    def __init__(self, level: str = "WARNING") -> None:
+        """
+        初始化捕获缓冲
+
+        参数:
+            level (str): 捕获级别，默认 WARNING
+        """
+        self.messages: list[str] = []
+        self._level = level
+        self._sink_id: int | None = None
+
+    def __enter__(self) -> "_LogCapture":
+        """注册 loguru sink 开始收集"""
+        self._sink_id = loguru_logger.add(
+            self.messages.append, level=self._level
+        )
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        """移除 sink（不吞异常）"""
+        if self._sink_id is not None:
+            loguru_logger.remove(self._sink_id)
+            self._sink_id = None
 
 
 def _after_request_failing_app(config_name: str) -> Any:
@@ -494,22 +529,45 @@ class TestCacheCoverage:
         """
         批量失效遇 Redis 异常跳过: 用例写操作成功后的缓存失效是
         旁路动作，失败只记 warning，绝不能让业务请求跟着失败。
+
+        **v3 补断言**（原版只有一句"不抛异常即为通过"，零断言）:
+        只断言"不抛"区分不了"异常被正确吞掉"与"压根没走到异常分支"。
+        本条补两条可观测证据——①降级确实发生过（warning 里出现该前缀与
+        前缀参数）；②后端调用确实被触发了（桩里记录 scan_iter 被调用），
+        排除"因为参数拼错/分支没进"导致的空转通过。
         """
+        scan_calls: list[str] = []
 
         class _ScanRaisesBackend:
             """模拟 SCAN 抛连接异常的后端"""
 
             def scan_iter(self, match: str) -> Any:
-                """扫描即抛连接异常"""
+                """记录调用并抛连接异常"""
+                scan_calls.append(match)
                 raise redis.ConnectionError("模拟宕机: scan失败")
 
         monkeypatch.setenv("TM_REDIS_ENABLED", "true")
         monkeypatch.setenv("TM_REDIS_URL", "fake://0")
         client = CacheClient()
         client._backend = _ScanRaisesBackend()
+        capture = _LogCapture(level="WARNING")
 
-        client.delete_pattern("tm:cache:cases:")  # 不抛异常即为通过
-        client.reset_backend()
+        try:
+            with capture:
+                client.delete_pattern("tm:cache:cases:")
+        finally:
+            client.reset_backend()
+
+        assert scan_calls == ["tm:cache:cases:*"], (
+            f"必须真的走到 SCAN 才能验证异常降级，实际调用: {scan_calls}"
+        )
+        joined = "\n".join(capture.messages)
+        assert "缓存批量失效异常" in joined, (
+            f"SCAN 异常必须记 warning 留痕，实际日志: {joined}"
+        )
+        assert "tm:cache:cases:" in joined, (
+            f"warning 应带上前缀参数便于定位，实际日志: {joined}"
+        )
 
 
 # ===========================================================================
@@ -564,28 +622,53 @@ class TestEventBusFaultTolerance:
         """
         publish 内部故障被吞掉: 日志通道故障绝不能搞挂真实执行主流程
         ——此处用会抛异常的历史环替换内部状态制造故障（该 except 分支
-        无公开 API 可触达），断言只校验对外契约：不抛异常。
+        无公开 API 可触达）。
+
+        **v3 补断言**（原版只有一句"不抛异常即为通过"，零断言）:
+        补两条可观测证据——①吞掉确实发生过（error 日志里出现兜底铁律
+        那句）；②故障点确实被走到（桩被调用过），排除"因为事件类型非法
+        等原因提前 return"导致的空转通过。
         """
+        append_calls: list[Any] = []
 
         class _RaisingHistory:
             """模拟历史环写入失败（内存故障场景）"""
 
-            def append(self, _event: Any) -> None:
-                """追加时抛错"""
+            def append(self, event: Any) -> None:
+                """记录调用并抛错"""
+                append_calls.append(event)
                 raise MemoryError("历史环写入失败")
 
         channel = EventChannel()
         channel._history = _RaisingHistory()
+        capture = _LogCapture(level="ERROR")
 
-        # 不抛异常即为通过（发布异常必须被内部消化）
-        channel.publish(
-            ExecutionEvent(event_type="batch_start", data={"total_cases": 1})
+        with capture:
+            channel.publish(
+                ExecutionEvent(
+                    event_type="batch_start", data={"total_cases": 1}
+                )
+            )
+
+        assert len(append_calls) == 1, (
+            f"必须真的走到历史环写入才能验证兜底，实际调用 {len(append_calls)} 次"
+        )
+        joined = "\n".join(capture.messages)
+        assert "事件发布异常" in joined, (
+            f"发布异常必须被吞掉并记 error，实际日志: {joined}"
+        )
+        assert "已吞掉，不影响执行主流程" in joined, (
+            f"error 日志应体现旁路铁律的处置，实际日志: {joined}"
         )
 
     def test_close_internal_fault_is_swallowed(self) -> None:
         """
         close 内部故障被吞掉: 批次终态清理不能因日志通道故障失败，
         否则整条批次收尾流程（置终态/通知/缓存失效）会被打断。
+
+        断言"未谎报已关闭"即可：加锁失败时 _closed 根本没被置位，
+        若代码谎报 is_closed=True，批次收尾会以为通道已关闭而跳过
+        后续事件投递。
         """
 
         class _RaisingCondition:
