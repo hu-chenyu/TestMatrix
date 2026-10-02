@@ -19,6 +19,7 @@ Loguru日志统一封装模块
 
 import sys
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -151,9 +152,17 @@ class LogManager:
         )
 
     @classmethod
-    def get_logger(cls):
+    def get_logger(cls) -> Any:
         """
         获取全局logger对象
+
+        返回类型标注为 Any 而非 loguru 的具体类型：loguru 0.7 未导出
+        公开的 Logger 类型（实际类是私有的 loguru._logger.Logger），标注
+        私有类会在调用方再次触发类型错误。Any 在此是准确的——loguru 本身
+        就是动态调度对象。
+
+        该标注同时消除了全仓 11 处 `logger = LogManager.get_logger()` 的
+        mypy strict 报错（Call to untyped function ... in typed context）。
 
         参数:
             无
@@ -167,9 +176,11 @@ class LogManager:
         return logger
 
     @classmethod
-    def bind_trace_id(cls, trace_id: str):
+    def bind_trace_id(cls, trace_id: str) -> Any:
         """
         绑定链路追踪ID，用于用例级日志追踪
+
+        返回类型标注为 Any，理由同 get_logger（loguru 未导出公开 Logger 类型）
 
         参数:
             trace_id (str): 追踪ID，建议格式: 用例编号或批次号，如 TM-API-0001
