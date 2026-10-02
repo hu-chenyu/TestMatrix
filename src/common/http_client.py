@@ -52,6 +52,12 @@ QUERY_MASK = "***"
 # 日志中展示 URL 的最大长度（字符），超出部分截断，防止长签名串刷爆日志
 MAX_LOG_URL_LENGTH = 512
 
+# 允许自动重试的 HTTP 方法（幂等且无副作用的只读语义）。
+# POST/PUT/PATCH/DELETE 一律不自动重试：本项目是测试平台，重试打到被测
+# 系统的写请求会重复产生副作用（重复建资源/重复提交），令测试结论失真。
+# 需要重试写操作的调用方可在单次请求上显式配置重试策略
+IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
 
 class HttpClientError(Exception):
     """
@@ -128,8 +134,11 @@ class HttpClient:
             backoff_factor=0.5,
             # 仅对5xx服务端错误与连接错误重试，4xx客户端错误不重试
             status_forcelist=(500, 502, 503, 504),
-            # None表示所有HTTP方法均允许重试（默认POST等不安全方法不重试）
-            allowed_methods=None,
+            # 只重试幂等方法。默认 allowed_methods=None 会让 POST/PUT/PATCH/
+            # DELETE 也重试，而本项目是**测试平台**：请求打到的是被测系统，
+            # 重试一个已部分成功的 POST（创建类接口）会重复建资源，测试结果
+            # 直接失真。需要重试非幂等方法的调用方可在单次请求上显式配置。
+            allowed_methods=IDEMPOTENT_METHODS,
             raise_on_status=False,
         )
         adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)

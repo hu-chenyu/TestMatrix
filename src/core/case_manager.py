@@ -176,6 +176,12 @@ class CaseManagerError(Exception):
         super().__init__(message)
 
 
+# 批次号去重集合的容量上限（超限即清空，理由见 generate_execution_id）
+# 取1万：按每天1000批次计可覆盖约10天，远超同秒碰撞的时间窗，
+# 同时把常驻内存钉死在约1MB量级
+MAX_TRACKED_EXECUTION_IDS = 10_000
+
+
 # --------------------------------------------------------------------------
 # 业务语义异常子类（路由层异常翻译的类型锚点）
 # --------------------------------------------------------------------------
@@ -229,6 +235,16 @@ def generate_execution_id() -> str:
         execution_id = f"RUN-{timestamp}-{short_uuid}"
         if execution_id not in _generated_execution_ids:
             _generated_execution_ids.add(execution_id)
+            # 有界化: 集合只增不减会让长跑进程的内存单调增长（按每天1000
+            # 批次计，一年36万条）。超上限时清空——批次号自带时间戳前缀，
+            # 距今超过一天的编号不可能再被生成，清空导致的碰撞概率
+            # 等同于"同秒+uuid前4位撞车"，本就是极小概率事件
+            if len(_generated_execution_ids) > MAX_TRACKED_EXECUTION_IDS:
+                _generated_execution_ids.clear()
+                _generated_execution_ids.add(execution_id)
+                logger.debug(
+                    f"批次号去重集合超上限已重置 | 上限: {MAX_TRACKED_EXECUTION_IDS}"
+                )
             logger.debug(f"执行批次号已生成 | {execution_id}")
             return execution_id
         # 极小概率事件: 同秒+uuid前4位撞车，重新生成
@@ -2176,8 +2192,15 @@ class CaseManager:
         """
         按文件路径推断用例类型（内部方法）
 
-        规则: 路径（统一小写、反斜杠归一为斜杠）包含chip/serial/telnet
-        任意关键词即判定为chip（芯片板卡），否则为api（HTTP接口）。
+        规则: **只对文件名**（统一小写、反斜杠归一为斜杠）包含
+        chip/serial/telnet 任意关键词即判定为chip（芯片板卡），
+        否则为api（HTTP接口）。
+
+        为什么只看文件名: 原实现对**整条绝对路径**做子串匹配，而路径里
+        包含操作系统账户名与所有父目录。部署机账户名一旦含关键词
+        （如 telnet_lab、serial.wang），该用户上传的**所有**文件都会被
+        误判为 chip，连纯 API 用例也会被标成板卡类型——进而
+        case_type="api" 的执行批次永远筛不到它们。
 
         参数:
             file_path (str | Path): 数据文件路径
@@ -2188,8 +2211,14 @@ class CaseManager:
         异常:
             无
         """
-        path_text = str(file_path).lower().replace("\\", "/")
-        return "chip" if any(keyword in path_text for keyword in CHIP_PATH_KEYWORDS) else "api"
+        # 同时覆盖正斜杠文件名与反斜杠文件名
+        normalized = str(file_path).lower().replace("\\", "/")
+        file_name = normalized.rsplit("/", 1)[-1]
+        return (
+            "chip"
+            if any(keyword in file_name for keyword in CHIP_PATH_KEYWORDS)
+            else "api"
+        )
 
     @staticmethod
     def _build_description(case: dict) -> str:
@@ -2355,8 +2384,13 @@ def run_batch(
     execution_id = CaseManager.create_execution(trigger=trigger, executor="cli")
 
     # 3. 筛选待执行用例
+    #    case_type 必须与上一步 sync_cases_from_file 的推断口径一致,
+    #    否则 chip 数据文件刚被标成 chip、这里却按默认值 api 筛,
+    #    结果必然命中0条, 并抛出误导性的"批次不存在"
+    inferred_case_type = CaseManager._infer_case_type(file_path)
     selected_cases = CaseManager.select_cases_for_execution(
-        module=module, priority=priority, tags=tags
+        module=module, priority=priority, tags=tags,
+        case_type=inferred_case_type,
     )
 
     # 4. dry_run: 只打印待执行列表即返回

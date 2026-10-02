@@ -323,10 +323,20 @@ def _parse_sse_frame(frame_text: str) -> tuple[str, dict, int | None]:
     assert lines[0].startswith("event: "), f"帧首行应为event:前缀 | 实际: {lines[0]!r}"
     event_type = lines[0][len("event: "):]
     # id行可选: 次行以"id: "开头则提取事件id，data行顺延一位
+    # 帧id格式为 "{namespace}:{seq}"（live=实时流通道序号，
+    # db=DB重建合成序号）。此处只取体系内序号供断言比较；命名空间
+    # 由各用例按需自行从帧文本校验（Day43 引入编号体系标识，
+    # 见 _format_sse_frame）
     event_id: int | None = None
     data_line_index = 1
     if lines[1].startswith("id: "):
-        event_id = int(lines[1][len("id: "):])
+        raw_id = lines[1][len("id: "):]
+        if ":" in raw_id:
+            _, _, seq_text = raw_id.partition(":")
+            event_id = int(seq_text)
+        else:
+            # 旧格式裸整数（降级帧），直接取序号
+            event_id = int(raw_id)
         data_line_index = 2
     assert lines[data_line_index].startswith("data: "), (
         f"帧data行应为data:前缀 | 实际: {lines[data_line_index]!r}"
@@ -794,20 +804,36 @@ class TestExecutionSseApi:
     def test_format_sse_frame_id_line_optional(self) -> None:
         """
         帧格式id行可选: _format_sse_frame带event_id时输出
-        "id: {n}"行且位于event行后data行前；不带时不输出id行
-        （降级帧向后兼容Day25三要素格式）
+        "id: {namespace}:{n}"行且位于event行后data行前；
+        不带时不输出id行（降级帧向后兼容Day25三要素格式）
+
+        注: Day43 起帧id带编号体系前缀（live/db），用于让重连方判断
+        自己身处哪套编号体系，避免跨体系错误比较导致终态事件永久丢失。
         """
-        # 带event_id: 三行结构 event → id → data
+        # 带event_id: 三行结构 event → id → data（默认 live 体系）
         frame_with_id = _format_sse_frame(
             "case_finished", {"case_id": "TM-UC-0001"}, event_id=7
         )
         assert frame_with_id == (
-            'event: case_finished\nid: 7\ndata: {"case_id": "TM-UC-0001"}\n\n'
-        ), "带id帧应为event→id→data三行结构"
+            'event: case_finished\nid: live:7\n'
+            'data: {"case_id": "TM-UC-0001"}\n\n'
+        ), "带id帧应为event→id→data三行结构，id带live:前缀"
         lines = frame_with_id.strip("\n").split("\n")
-        assert lines.index("event: case_finished") < lines.index("id: 7") < (
+        assert lines.index("event: case_finished") < lines.index(
+            "id: live:7"
+        ) < (
             lines.index('data: {"case_id": "TM-UC-0001"}')
         ), "id行应位于event行后data行前"
+
+        # 显式指定 db 体系: DB重建分支的合成序号
+        frame_db = _format_sse_frame(
+            "case_finished",
+            {"case_id": "TM-UC-0001"},
+            event_id=7,
+            namespace="db",
+        )
+        assert "id: db:7" in frame_db, "db体系帧id应为db:前缀"
+        assert "id: live:7" not in frame_db, "两套体系必须可区分"
 
         # 不带event_id: 降级为Day25两行结构（无id行）
         frame_without_id = _format_sse_frame(
@@ -824,10 +850,13 @@ class TestExecutionSseApi:
     ) -> None:
         """
         Last-Event-ID断点续传: 同步跑完批次（桩执行器4条全过，
-        通道已清理走DB重建分支）后带Last-Event-ID=2请求events，
+        通道已清理走DB重建分支）后带Last-Event-ID=db:2请求events，
         只回断点后帧——合成id 3/4/5/6的case_finished×3 +
         batch_finished，id≤2的帧（batch_start与首条case_finished）
         被过滤不重发
+
+        注: Day43 起帧id带编号体系前缀，本分支产出的是 db: 合成序号，
+        断点回传必须同为 db: 体系才会被识别为"同体系断点"。
         """
         result = CaseManager.start_execution(
             trigger="web", executor_name="web", case_type="api"
@@ -843,14 +872,14 @@ class TestExecutionSseApi:
 
         response = sse_client.get(
             f"/api/executions/{execution_id}/events",
-            headers={"Last-Event-ID": "2"},
+            headers={"Last-Event-ID": "db:2"},
         )
         assert response.status_code == 200
         body = response.get_data(as_text=True)
 
         frames = [f for f in body.split("\n\n") if f.strip()]
         assert len(frames) == 4, (
-            f"断点2之后应只剩4帧 | 实际: {len(frames)}"
+            f"断点db:2之后应只剩4帧 | 实际: {len(frames)}"
         )
         parsed = [_parse_sse_frame(f) for f in frames]
         frame_ids = [p[2] for p in parsed]
@@ -864,6 +893,11 @@ class TestExecutionSseApi:
         assert event_types == ["case_finished"] * 3 + ["batch_finished"], (
             f"断点后事件序列不符 | 实际: {event_types}"
         )
+        # 全部帧必须带 db: 前缀（客户端据此判断下次重连该回传什么）
+        for frame in frames:
+            assert "\nid: db:" in frame, (
+                f"DB重建分支的帧id必须带db:前缀 | 实际帧: {frame[:80]!r}"
+            )
 
     def test_events_heartbeat_comment_frame(
         self,
@@ -1047,8 +1081,8 @@ class TestExecutionSseApi:
     ) -> None:
         """
         终态帧断点守卫（Day26遗留顺手项）: 同步跑完4条全过批次
-        （通道已清理→DB重建分支，6帧合成id 1-6），带Last-Event-ID=6
-        （已等于终态帧id）请求events——终态帧id6不大于resume_after=6
+        （通道已清理→DB重建分支，6帧合成id 1-6），带Last-Event-ID=db:6
+        （已等于终态帧id）请求events——终态帧id6不大于同体系断点db:6
         被过滤，响应有效帧数为0且不含batch_finished事件（重连不
         重复收终态帧）
         """
@@ -1066,15 +1100,15 @@ class TestExecutionSseApi:
 
         response = sse_client.get(
             f"/api/executions/{execution_id}/events",
-            headers={"Last-Event-ID": "6"},
+            headers={"Last-Event-ID": "db:6"},
         )
         assert response.status_code == 200
         body = response.get_data(as_text=True)
 
-        # 有效帧数为0: 终态帧id6不大于resume_after=6，被断点守卫过滤
+        # 有效帧数为0: 终态帧id6不大于同体系断点6，被断点守卫过滤
         frames = [f for f in body.split("\n\n") if f.strip()]
         assert len(frames) == 0, (
-            f"Last-Event-ID已含终态帧时应零帧输出 | 实际: {len(frames)}帧"
+            f"Last-Event-ID=db:6已含终态帧时应零帧输出 | 实际: {len(frames)}帧"
         )
         assert "batch_finished" not in body, (
             "终态帧不应在断点之后重复补发"

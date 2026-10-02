@@ -56,6 +56,7 @@ import threading
 import time
 from collections.abc import Iterator
 from datetime import datetime
+from typing import Any
 
 from flask import Blueprint, Response, request, stream_with_context
 
@@ -86,6 +87,14 @@ DEFAULT_PAGE_SIZE = 20
 
 # 批次终态事件类型（流式接口收到后立即关闭流的信号）
 TERMINAL_EVENT_TYPES = ("batch_finished", "batch_failed")
+
+# SSE 帧id的编号体系标识（防跨体系错误比较，详见 _format_sse_frame）
+#   live: 实时流分支，用通道内单调递增的 event_id
+#   db:   DB重建分支，用"从1起重新分配"的合成序号
+# 两者互不相关，客户端重连时按前缀判断自己身处哪套体系
+EVENT_ID_NAMESPACE_LIVE = "live"
+EVENT_ID_NAMESPACE_DB = "db"
+EVENT_ID_NAMESPACES = (EVENT_ID_NAMESPACE_LIVE, EVENT_ID_NAMESPACE_DB)
 
 # 相邻SSE帧之间的短暂让出间隔（秒）: 开发服务器下让出GIL，
 # 保证流式响应不被缓冲、生产方线程得以持续publish
@@ -408,27 +417,39 @@ def get_execution_status(execution_id: str):
 
 
 def _format_sse_frame(
-    event_type: str, data: dict, event_id: int | None = None
+    event_type: str,
+    data: dict[str, Any],
+    event_id: int | None = None,
+    namespace: str = EVENT_ID_NAMESPACE_LIVE,
 ) -> str:
     """
     格式化单条SSE帧（内部方法）
 
     帧格式按SSE规范（id行可选）:
         event: {事件类型}\\n
-        id: {事件序号}\\n（可选，event行后data行前；
+        id: {命名空间}:{事件序号}\\n（可选，event行后data行前；
              客户端EventSource收到后自动记录为Last-Event-ID，
              断线重连时回传实现断点续传）
         data: {JSON字符串}\\n
         \\n（空行结束一帧）
+
+    为什么id要带命名空间前缀: 实时流用通道内单调递增的 event_id，
+    DB重建分支用"从1起重新分配"的合成序号——**两套互不相关的编号体系**。
+    修复前二者都是裸整数，客户端从实时流收到 id=50 后重连、此时通道已
+    清理而走DB重建分支，服务端拿 50 去和合成序号 1..N 比较，结果一帧
+    都不发，终态事件永久丢失、EventSource 无限重连。带前缀后重连方能
+    明确自己身处哪套体系，跨体系时按"全量重发"处理而非错误比较。
 
     参数:
         event_type (str): 事件类型（合法取值见
                           event_bus.VALID_EVENT_TYPES）
         data (dict): 事件载荷，序列化为JSON字符串
                      （ensure_ascii=False，中文原样输出）
-        event_id (int | None): 事件序号（Last-Event-ID断点回放
-                              依据），None时不输出id行（降级帧
-                              向后兼容Day25三要素格式）
+        event_id (int | None): 事件序号（命名空间内的序号），
+                              None时不输出id行（降级帧向后兼容
+                              Day25三要素格式）
+        namespace (str): 编号体系标识，live=实时流通道序号，
+                         db=DB重建合成序号
 
     返回:
         str: 单条完整SSE帧文本（以空行结尾）
@@ -439,22 +460,29 @@ def _format_sse_frame(
     payload = json.dumps(data, ensure_ascii=False)
     if event_id is None:
         return f"event: {event_type}\ndata: {payload}\n\n"
-    return f"event: {event_type}\nid: {event_id}\ndata: {payload}\n\n"
+    return (
+        f"event: {event_type}\nid: {namespace}:{event_id}\ndata: {payload}\n\n"
+    )
 
 
-def _parse_last_event_id_header() -> int | None:
+def _parse_last_event_id_header() -> tuple[str, int] | None:
     """
     解析Last-Event-ID请求头（内部方法，断线回放锚点）
 
-    SSE客户端（EventSource）断线重连时自动回传最后收到的事件id；
-    能转int就转，非法或缺失时静默当None（全量回放，绝不因畸形
-    头拒掉重连请求）。
+    SSE客户端（EventSource）断线重连时自动回传最后收到的事件id。
+    支持两种格式:
+        - 新格式 `{namespace}:{seq}`，如 "live:42" / "db:7"
+        - 旧格式裸整数 "42"（Day26 历史客户端）：按 live 体系解释，
+          保证升级不破坏既有在途连接
+    非法或缺失时返回 None（调用方按"全量回放"处理，绝不因畸形头
+    拒掉重连请求）。
 
     参数:
         无（从request.headers读取）
 
     返回:
-        int | None: 断点事件id；请求头缺失/非合法整数时返回None
+        tuple[str, int] | None: (编号体系, 体系内序号)；
+        请求头缺失/非合法时返回 None
 
     异常:
         无
@@ -462,14 +490,31 @@ def _parse_last_event_id_header() -> int | None:
     raw_value = request.headers.get("Last-Event-ID")
     if raw_value is None:
         return None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    # 新格式：命名空间前缀
+    if ":" in text:
+        namespace, _, seq_text = text.partition(":")
+        namespace = namespace.strip()
+        if namespace in EVENT_ID_NAMESPACES:
+            try:
+                return namespace, int(seq_text)
+            except (TypeError, ValueError):
+                return None
+        # 未知命名空间：退化为全量重放，不猜测语义
+        return None
+    # 旧格式：裸整数按 live 体系解释
     try:
-        return int(raw_value)
+        return EVENT_ID_NAMESPACE_LIVE, int(text)
     except (TypeError, ValueError):
         return None
 
 
 def _terminal_snapshot_frame(
-    status_data: dict, event_id: int | None = None
+    status_data: dict[str, Any],
+    event_id: int | None = None,
+    namespace: str = EVENT_ID_NAMESPACE_LIVE,
 ) -> str:
     """
     构造批次终态快照帧（内部方法，降级补发专用）
@@ -482,8 +527,10 @@ def _terminal_snapshot_frame(
 
     参数:
         status_data (dict): get_execution_status返回的批次状态字典
-        event_id (int | None): 帧id（DB重建分支的合成id或固定1），
-                              None时不输出id行（降级帧）
+        event_id (int | None): 帧id（体系内序号），None时不输出id行
+                              （降级帧）
+        namespace (str): 编号体系标识，live=实时流通道序号，
+                         db=DB重建合成序号
 
     返回:
         str: 终态快照SSE帧文本
@@ -496,6 +543,7 @@ def _terminal_snapshot_frame(
             "batch_failed",
             {"error_message": status_data.get("error_message")},
             event_id=event_id,
+            namespace=namespace,
         )
     return _format_sse_frame(
         "batch_finished",
@@ -508,6 +556,7 @@ def _terminal_snapshot_frame(
             "pass_rate": status_data["pass_rate"],
         },
         event_id=event_id,
+        namespace=namespace,
     )
 
 
@@ -577,9 +626,15 @@ def stream_execution_events(execution_id: str):
             "执行批次不存在", detail={"execution_id": execution_id}
         )
 
-    # 3. 断点回放锚点: Last-Event-ID请求头（能转int就转，
-    #    非法或缺失静默当None全量回放）
+    # 3. 断点回放锚点: Last-Event-ID 请求头，解析为 (编号体系, 体系内序号)。
+    #    各分支只在**同一体系内**比较序号；体系不匹配时按全量重发处理
+    #    （详见 _format_sse_frame 的注释）
     last_event_id = _parse_last_event_id_header()
+    last_namespace = last_event_id[0] if last_event_id else None
+    last_sequence = last_event_id[1] if last_event_id else 0
+    # 仅当断点与本分支同体系时才做断点过滤；跨体系一律全量重发
+    resume_live = last_sequence if last_namespace == EVENT_ID_NAMESPACE_LIVE else 0
+    resume_db = last_sequence if last_namespace == EVENT_ID_NAMESPACE_DB else 0
 
     # 4. 流式生成器（三分支: 降级快照 / 终态补发 / 实时订阅）
     @stream_with_context
@@ -597,13 +652,12 @@ def stream_execution_events(execution_id: str):
                     # 明细查询异常不阻断流: 降级为单条终态快照帧
                     detail = None
                 # 合成id从1起连续分配（batch_start=1、case_finished
-                # 依次递增、batch_finished=2+N），与通道event_id是
-                # 两套独立编号，仅服务本次重建响应的断点过滤；
-                # last_event_id为None时归一化为0（id从1起，等同全量）
-                resume_after = last_event_id if last_event_id is not None else 0
+                # 依次递增、batch_finished=2+N）。本分支的帧id统一带
+                # db: 前缀，与通道 event_id（live:）彻底区分；断点过滤
+                # 只认同为 db 体系的序号，跨体系一律全量重发
                 next_frame_id = 1
                 if detail is not None:
-                    if next_frame_id > resume_after:
+                    if next_frame_id > resume_db:
                         yield _format_sse_frame(
                             "batch_start",
                             {
@@ -611,10 +665,11 @@ def stream_execution_events(execution_id: str):
                                 "executor_kind": None,
                             },
                             event_id=next_frame_id,
+                            namespace=EVENT_ID_NAMESPACE_DB,
                         )
                     next_frame_id += 1
                     for item in detail["items"]:
-                        if next_frame_id > resume_after:
+                        if next_frame_id > resume_db:
                             yield _format_sse_frame(
                                 "case_finished",
                                 {
@@ -625,18 +680,25 @@ def stream_execution_events(execution_id: str):
                                     "error_message": item["error_message"],
                                 },
                                 event_id=next_frame_id,
+                                namespace=EVENT_ID_NAMESPACE_DB,
                             )
                         next_frame_id += 1
                 # 终态帧同样按断点过滤: 客户端已收到过该id则不重复补发
-                if next_frame_id > resume_after:
+                if next_frame_id > resume_db:
                     yield _terminal_snapshot_frame(
-                        status_data, event_id=next_frame_id
+                        status_data,
+                        event_id=next_frame_id,
+                        namespace=EVENT_ID_NAMESPACE_DB,
                     )
                 return
             if status_data["status"] == "failed":
                 # 失败批次: 无defect_statistics汇总行，单帧终态直发
                 # （固定event_id=1: 单帧即全量，无断点过滤意义）
-                yield _terminal_snapshot_frame(status_data, event_id=1)
+                yield _terminal_snapshot_frame(
+                    status_data,
+                    event_id=1,
+                    namespace=EVENT_ID_NAMESPACE_DB,
+                )
                 return
             # pending极早期/CLI运行中批次: 单帧进行中快照直发
             # （不挂死等待——CLI批次在Web进程内永远等不到publish）
@@ -647,16 +709,26 @@ def stream_execution_events(execution_id: str):
                     "status": status_data["status"],
                 },
                 event_id=1,
+                namespace=EVENT_ID_NAMESPACE_DB,
             )
             return
 
         # 分支二: 通道存在但批次已终态（publish后close前的竞态窗口）
+        # 本分支的帧id来自通道真实 event_id，属 live 体系
         if status_data["status"] in ("finished", "failed"):
             saw_terminal = False
             for event in channel.snapshot():
-                # event_id透传进帧（通道内真实编号）
+                # 按 live 体系断点过滤：客户端已收到过的序号不重复补发
+                # （修复前本分支完全不过滤，重连时整段积压事件重复追加）
+                if event.event_id <= resume_live:
+                    if event.event_type in TERMINAL_EVENT_TYPES:
+                        saw_terminal = True
+                    continue
                 yield _format_sse_frame(
-                    event.event_type, event.data, event_id=event.event_id
+                    event.event_type,
+                    event.data,
+                    event_id=event.event_id,
+                    namespace=EVENT_ID_NAMESPACE_LIVE,
                 )
                 if event.event_type in TERMINAL_EVENT_TYPES:
                     saw_terminal = True
@@ -670,7 +742,7 @@ def stream_execution_events(execution_id: str):
         # 从注册表移除，残余事件仍能被读完，不丢终态事件）
         last_activity = time.monotonic()
         for event in channel.subscribe(
-            last_event_id=last_event_id, tick=True
+            last_event_id=resume_live or None, tick=True
         ):
             if event is None:
                 # 心跳节拍（订阅0.5s限时等待超时）: 距上次活动
