@@ -33,6 +33,12 @@ const state = {
     knownModules: [],     // 历次列表累积发现的模块名（跨页填充模块下拉）
 };
 
+// 模块下拉累积上界：knownModules 跨翻页累积且无自然终点（每翻一页都可能
+// 遇到新模块），长期使用/超大数据集下会无界增长。超过该上限后停止追加，
+// 防止下拉选项与内存占用随会话时长线性膨胀。当前已选模块不计入此上界，
+// 保证「已选模块始终可选」优先于上界。
+const MAX_KNOWN_MODULES = 200;
+
 /* ==========================================================================
    DOM 引用集中获取（节点均为模板静态元素，脚本在 body 底部加载）
    ========================================================================== */
@@ -327,24 +333,43 @@ function renderPagination() {
  * 从当前页 items 累积模块名并刷新模块下拉选项
  *
  * 设计：后端无“模块字典”接口，模块选项从列表数据去重提取；跨翻页
- * 累积到 state.knownModules，避免只保留当前页模块。当前选中值在
- * 重渲染后恢复，不打断筛选。
+ * 累积到 state.knownModules，避免只保留当前页模块。两项保护：
+ *   1. 上界：累积集合超过 MAX_KNOWN_MODULES 即截断，防止无界增长；
+ *   2. 已选保留：当前选中的模块即使被上界截断，也会补回列表——否则
+ *      选中某模块后下拉只剩该模块，用户无法切回“全部模块”或其他模块。
+ * 当前选中值在重渲染后恢复，不打断筛选。
  *
  * @param {Array<object>} items 当前页用例行
  * @returns {void}
  */
 function renderModuleOptions(items) {
+    // 合并来源：历史累积 + 当前页提取（去重，保留首次出现顺序）
+    const merged = state.knownModules.slice();
     items.forEach(function (item) {
         const name = item.module || "";
-        if (name && state.knownModules.indexOf(name) === -1) {
-            state.knownModules.push(name);
+        if (name && merged.indexOf(name) === -1) {
+            merged.push(name);
         }
     });
-    state.knownModules.sort(function (a, b) {
+    // 上界保护：超限截断（不排序，保留已累积的靠前项，行为更稳定）
+    if (merged.length > MAX_KNOWN_MODULES) {
+        merged.length = MAX_KNOWN_MODULES;
+    }
+    merged.sort(function (a, b) {
         return a.localeCompare(b, "zh-Hans-CN");
     });
 
-    const selected = els.filterModule.value; // 重渲染前保留当前选中
+    // 当前已选模块：state.filters 为准，DOM 值为兜底（双保险防 desync）
+    const selected = state.filters.module || els.filterModule.value;
+    if (selected && merged.indexOf(selected) === -1) {
+        // 被上界截断掉的已选模块补回，保证用户始终能选回它
+        merged.push(selected);
+        merged.sort(function (a, b) {
+            return a.localeCompare(b, "zh-Hans-CN");
+        });
+    }
+    state.knownModules = merged;
+
     els.filterModule.innerHTML =
         '<option value="">全部模块</option>' +
         state.knownModules
@@ -676,26 +701,12 @@ async function submitForm() {
         getFormModal().hide();
         await loadCases(); // 刷新当前页看到新增/更新结果
     } catch (error) {
-        // 409 重复编号 / 400 校验失败 / 404 不存在：message 已由 api.js 解包
+        // 409 重复编号 / 400 校验失败 / 404 不存在：message 已由 api.js 解包，
+        // 弹窗保留（不 hide）让用户可改正后重提，按钮在 finally 中恢复
         window.showToast(error.message, "danger");
-        // 后端返回 detail 字段字典时，把首个错误回填到对应字段
-        applyBackendFieldErrors(error);
     } finally {
         setSaveLoading(false);
     }
-}
-
-/**
- * 尝试把后端 400 detail（字段→错误数组）回填到表单项
- *
- * api.js 只解包了 message，detail 未透出，故此处仅做防御性占位：
- * 当前统一以 toast 展示 message；保留方法以便 api 层未来透出 detail。
- *
- * @param {Error} _error 请求错误对象
- * @returns {void}
- */
-function applyBackendFieldErrors(_error) {
-    // 无 detail 可用时不做处理（toast 已覆盖错误可见性）
 }
 
 /* ==========================================================================
@@ -792,6 +803,23 @@ async function importCases(file) {
         throw new Error(
             (payload && payload.message) ||
                 "导入失败，HTTP 状态码：" + response.status
+        );
+    }
+    // 业务层防御：统一响应体 {code,message,data} 中 code 非成功值时，
+    // 即使 HTTP 状态为 2xx 也按业务失败抛出。若只判 response.ok，
+    // 后端一旦改用「HTTP 200 + code=500」风格返回错误，这里会静默
+    // 返回 data=null，调用方回落成「新增0条，更新0条」的假成功 toast，
+    // 用户以为导入完成实则数据未入库。code 兼容 0/200 两种成功约定；
+    // 响应体无 code 字段时（如后端简化契约）不做拦截，保持向后兼容。
+    if (
+        payload &&
+        payload.code !== undefined &&
+        payload.code !== null &&
+        payload.code !== 0 &&
+        payload.code !== 200
+    ) {
+        throw new Error(
+            payload.message || "导入失败，业务错误码：" + payload.code
         );
     }
     return payload ? payload.data : null;
