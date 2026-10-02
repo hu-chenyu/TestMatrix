@@ -187,11 +187,8 @@ class EventChannel:
             无（全部内部消化，只记日志）
         """
         try:
-            if self._closed:
-                logger.warning(
-                    f"事件通道已关闭，事件被丢弃 | 类型: {event.event_type}"
-                )
-                return
+            # 事件类型校验留在锁外：它只读入参、不触碰任何共享状态，
+            # 放锁内会让每次非法 publish 都持锁做一次 warning 输出
             if event.event_type not in VALID_EVENT_TYPES:
                 logger.warning(
                     f"非法事件类型，事件被丢弃 | 类型: {event.event_type} | "
@@ -199,6 +196,16 @@ class EventChannel:
                 )
                 return
             with self._condition:
+                # closed 校验必须在锁内: 移到锁外时，检查与 append 之间
+                # 存在窗口——close() 可在此间完成并唤醒订阅者，订阅者
+                # drain 完历史后正常结束，本事件才被 append 进去，
+                # 结果是"批次已关闭通道后仍收到了本该丢弃的事件"，
+                # 且该事件永远无人再读到
+                if self._closed:
+                    logger.warning(
+                        f"事件通道已关闭，事件被丢弃 | 类型: {event.event_type}"
+                    )
+                    return
                 # 锁内分配单调递增event_id（游标定位与Last-Event-ID
                 # 回放的唯一依据），随后追加历史环（超容量自动淘汰）
                 event.event_id = self._next_event_id

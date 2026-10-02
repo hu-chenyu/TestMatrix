@@ -49,6 +49,7 @@ from src.web.exceptions import (
     NotFoundError,
     ValidationError,
 )
+from src.web.pagination import parse_int_param
 from src.web.response import created, no_content, success
 
 logger = LogManager.get_logger()
@@ -146,7 +147,7 @@ class CaseUpdateSchema(Schema):
 
 def _parse_int_param(name: str, default: int) -> int:
     """
-    解析整型查询参数（内部方法）
+    解析整型查询参数（内部方法，委托公共实现）
 
     参数缺省或空白串时返回默认值；传入非合法整数时抛ValidationError。
 
@@ -160,14 +161,7 @@ def _parse_int_param(name: str, default: int) -> int:
     异常:
         ValidationError: 参数值不是合法整数时抛出
     """
-    raw_value = request.args.get(name)
-    if raw_value is None or not raw_value.strip():
-        return default
-    try:
-        return int(raw_value)
-    except (TypeError, ValueError):
-        # 参数校验失败是干净的业务错误，与底层 TypeError/ValueError 无因果链，显式抑制
-        raise ValidationError("page和page_size必须为正整数") from None
+    return parse_int_param(name, default, param_hint="page和page_size")
 
 
 def _parse_optional_str(name: str) -> str | None:
