@@ -44,6 +44,7 @@ TTL策略:
 
 import hashlib
 import json
+from collections.abc import Callable
 from typing import Any
 
 import redis
@@ -52,6 +53,12 @@ from src.common.env_manager import env_manager
 from src.common.logger import LogManager
 
 logger = LogManager.get_logger()
+
+# redis.from_url 随包发布了 py.typed 但自身未标注返回类型，mypy strict 的
+# disallow_untyped_calls 会把"从已注解函数调用它"判为 no-untyped-call。
+# 经一个已注解的 Callable 间接调用即可消除，既不改 mypy 配置，
+# 也不用行内忽略注释（CI 明确禁止在新增行使用忽略注释）。
+_REDIS_FROM_URL: Callable[..., Any] = redis.from_url
 
 # 缓存key统一前缀与业务域前缀（key构造的单一事实来源，禁止散落硬编码）
 KEY_PREFIX = "tm"
@@ -272,7 +279,8 @@ class CacheClient:
             Any | None: 后端实例；未启用或fakeredis依赖缺失时为None
 
         异常:
-            无（ImportError降级为None并记warning，连接异常在
+            无（构建期异常一律降级为None并记warning：fakeredis缺失按ImportError，
+                Redis URL非法按ValueError/TypeError/RedisError；连接层异常在
                 具体命令处由RedisError兜底）
         """
         # 开关关闭: 不构建也不复用历史后端（热关闭立即生效）
@@ -297,11 +305,24 @@ class CacheClient:
                     return None
             else:
                 # 真实Redis客户端（decode_responses=True统一str读写）
-                self._backend = redis.from_url(
-                    url,
-                    decode_responses=True,
-                    socket_timeout=2,
-                )
+                # 构建期异常必须在此兜底: 三个公开方法都是先取后端再进try,
+                # 构建期的 ValueError（URL端口非数字/scheme非法/含中文冒号等）
+                # 完全在保护范围之外, 冒泡会让只读接口直接500。缓存是旁路
+                # 能力, 配置错误只降级为no-op, 绝不阻断业务（铁律同 6.1）
+                try:
+                    self._backend = _REDIS_FROM_URL(
+                        url,
+                        decode_responses=True,
+                        socket_timeout=2,
+                    )
+                except (ValueError, TypeError, redis.RedisError) as exc:
+                    # 不缓存异常对象: _backend保持None, 下次访问会重新尝试
+                    # 构建, 配置修好后可自愈, 无需重启进程
+                    logger.warning(
+                        f"缓存后端构建失败，缓存降级no-op | URL: {url} | "
+                        f"异常: {type(exc).__name__}: {exc}"
+                    )
+                    return None
                 logger.debug(f"缓存后端已构建 | 类型: redis | URL: {url}")
         return self._backend
 

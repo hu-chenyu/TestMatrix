@@ -320,7 +320,9 @@ class TaskQueueClient:
                                     0表示不阻塞立即返回
 
         返回:
-            dict | None: 任务payload字典；超时/未启用/异常时为None
+            dict | None: 任务payload字典；超时/未启用/反序列化失败/
+                        载荷非JSON对象时为None（保证worker主循环永不死于
+                        单条畸形消息）
 
         异常:
             无
@@ -341,11 +343,24 @@ class TaskQueueClient:
             return None
         try:
             _, raw_payload = result
-            return json.loads(raw_payload)
+            payload = json.loads(raw_payload)
         except (ValueError, TypeError) as exc:
             # 坏消息不卡死worker: 记warning后跳过（消息已被BRPOP移除）
             logger.warning(f"任务载荷反序列化失败，消息已丢弃 | {exc}")
             return None
+        # 结构校验: json.loads 对合法JSON数组/标量也成功，但返回的不是
+        # 载荷字典。TaskWorker.run 在 try 块**之前**执行
+        # `payload.get("execution_id")`，非dict会抛 AttributeError
+        # 逃出while循环、令worker线程静默死亡，后续任务永久堆积
+        # （队列是跨进程共享的持久存储，混入非对象载荷完全可能）。
+        # 归入与坏消息相同的跳过路径，保持worker存活。
+        if not isinstance(payload, dict):
+            logger.warning(
+                f"任务载荷结构非法（期望JSON对象），消息已丢弃 | "
+                f"实际类型: {type(payload).__name__}"
+            )
+            return None
+        return payload
 
     # ------------------------------------------------------------------
     # 任务状态hash（调度层快查，权威状态仍在SQLite批次表）
