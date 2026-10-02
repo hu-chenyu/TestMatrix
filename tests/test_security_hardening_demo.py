@@ -49,6 +49,7 @@ from src.core.notification import (
     _mask_webhook_url,
 )
 from src.core.report_analyzer import FailedCaseDetail, ModuleStat
+from src.db.db_session import DatabaseSession
 from src.web import create_app
 from src.web.config import (
     MAX_UPLOAD_BYTES,
@@ -606,6 +607,38 @@ class TestConfigHardening:
 class TestCasesImportHardening:
     """P2: 日志注入防护 + secure_filename 中文名兼容"""
 
+    @pytest.fixture
+    def import_client(self, monkeypatch, tmp_path):
+        """
+        导入接口测试客户端（隔离的临时 SQLite 库，用例前后重置引擎单例）
+
+        为什么必须显式建表: /api/cases/import 会真实写库，而 DatabaseSession
+        的引擎是进程级单例，不会自动建表。若不显式 init_db()，用例实际依赖
+        环境里"恰好已存在的表"——本地 output/testmatrix.db 有历史残留表能侥幸
+        通过，CI 全新 checkout 是空库则必然报
+        `(sqlite3.OperationalError) no such table: test_cases`。
+        这正是 CI 红灯而本地全绿的真实成因。
+
+        口径与项目既有的 tests/test_cases_import_sanitize.py::import_client 一致:
+        monkeypatch 隔离库路径 -> reset() 清引擎单例 -> init_db() 建表
+        -> teardown 再 reset()，避免污染其他用例的引擎状态。
+
+        参数:
+            monkeypatch (pytest.MonkeyPatch): 环境变量覆写fixture
+            tmp_path (Path): pytest临时目录fixture
+
+        返回:
+            Iterator[FlaskClient]: yield Flask测试客户端
+        """
+        monkeypatch.setenv("TM_DB_TYPE", "sqlite")
+        monkeypatch.setenv(
+            "TM_DB_SQLITE_PATH", str(tmp_path / "security_hardening_api.db")
+        )
+        DatabaseSession.reset()
+        DatabaseSession.init_db()
+        yield create_app("test").test_client()
+        DatabaseSession.reset()
+
     def test_sanitize_log_field_folds_control_chars(self) -> None:
         """
         _sanitize_log_field 必须折叠换行等控制字符
@@ -635,7 +668,9 @@ class TestCasesImportHardening:
             "api_user_query.yaml"
         ), "普通文件名应原样保留"
 
-    def test_chinese_filename_import_preserves_extension(self) -> None:
+    def test_chinese_filename_import_preserves_extension(
+        self, import_client: FlaskClient
+    ) -> None:
         """
         中文名 xlsx 上传必须保留扩展名
 
@@ -653,8 +688,7 @@ class TestCasesImportHardening:
         )
 
         workbook_bytes = _build_minimal_xlsx()
-        client = create_app("test").test_client()
-        response = client.post(
+        response = import_client.post(
             "/api/cases/import",
             data={"file": (io.BytesIO(workbook_bytes), "用例数据.xlsx")},
             content_type="multipart/form-data",
@@ -676,7 +710,7 @@ class TestCasesImportHardening:
             "file_name 仍应回显原始上传名"
         )
 
-    def test_ascii_filename_still_works(self) -> None:
+    def test_ascii_filename_still_works(self, import_client: FlaskClient) -> None:
         """
         修复不得破坏 ASCII 文件名的既有行为（不回归）
 
@@ -684,8 +718,7 @@ class TestCasesImportHardening:
         因此断言口径是统计值而非用例编号。
         """
         workbook_bytes = _build_minimal_xlsx()
-        client = create_app("test").test_client()
-        response = client.post(
+        response = import_client.post(
             "/api/cases/import",
             data={
                 "file": (
@@ -708,7 +741,7 @@ class TestCasesImportHardening:
             payload["inserted"] + payload["updated"] == payload["total"]
         ), "导入统计自相矛盾"
 
-    def test_path_traversal_still_blocked(self) -> None:
+    def test_path_traversal_still_blocked(self, import_client: FlaskClient) -> None:
         """
         修复不得削弱路径遍历防护（不回归）
 
@@ -716,8 +749,7 @@ class TestCasesImportHardening:
         "../../secret.yaml" 仍无法逃出临时目录。
         """
         workbook_bytes = _build_minimal_xlsx()
-        client = create_app("test").test_client()
-        response = client.post(
+        response = import_client.post(
             "/api/cases/import",
             data={
                 "file": (

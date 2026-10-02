@@ -20,7 +20,6 @@ pytest全局配置模块（tests/conftest.py）
     真实被测服务通过.env的TM_BASE_URL配置，由后续阶段用例按需接入。
 """
 
-import os
 import sys
 import threading
 import time
@@ -286,7 +285,7 @@ def _disable_real_notification_channels(monkeypatch):
 # ===========================================================================
 def pytest_configure(config):
     """
-    会话初始化钩子: 完成Loguru全局配置 + 旁路捕获终态摘要（仅CI生效）
+    会话初始化钩子: 完成Loguru全局配置
 
     参数:
         config (pytest.Config): pytest配置对象
@@ -304,7 +303,6 @@ def pytest_configure(config):
         f"TestMatrix测试会话启动 | 环境: {env_manager.current_env} | "
         f"日志级别: {env_manager.log_level}"
     )
-    _install_summary_capture(config)
 
 
 def pytest_sessionstart(session):
@@ -354,11 +352,6 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
 
-    # 注解回传覆盖 setup/call/teardown 三个阶段：setup/teardown 的 ERROR
-    # 同样会让 pytest exit 1，但不会走到下面的 call 阶段采集分支
-    if report.failed:
-        _emit_github_failure_annotation(item, report)
-
     # setup/teardown阶段失败由error报表体现，此处仅采集call阶段
     if report.when != "call":
         return
@@ -382,163 +375,6 @@ def pytest_runtest_makereport(item, call):
         trace_logger.warning(f"用例跳过 | {report.longrepr}")
     else:
         trace_logger.debug(f"用例执行通过 | 耗时: {report.duration:.3f}s")
-
-
-def _emit_github_failure_annotation(item, report) -> None:
-    """
-    测试失败时向 GitHub Actions 发出 error 注解（仅CI环境生效）
-
-    背景: CI 日志下载接口需鉴权，未认证环境只能读到 annotation。CI 在
-    Linux runner 上出现"本地全绿、CI 判红"且无法取回失败用例名时，
-    靠注解回传失败证据是唯一可靠手段。
-
-    实现: GitHub workflow command 格式 `::error title=..::message`，
-    消息中的换行编码为 %0A（否则注解被截断在第一行）。
-    必须直写 sys.__stdout__ 绕过 pytest 的输出捕获，否则注解不会出现在
-    runner 日志里。
-
-    非 CI 环境（GITHUB_ACTIONS 未设置）直接返回，无任何副作用。
-
-    参数:
-        item (pytest.Item): 失败用例对象
-        report (pytest.TestReport): 失败报告
-
-    返回:
-        无
-    """
-    if not os.environ.get("GITHUB_ACTIONS"):
-        return
-    try:
-        raw = str(report.longrepr)
-        # 只保留末尾的错误摘要行，去掉冗长的框架堆栈噪声
-        tail_lines = [
-            line.strip()
-            for line in raw.splitlines()
-            if line.strip() and not line.strip().startswith(("self.", "return "))
-        ]
-        summary = " | ".join(tail_lines[-6:])[:900]
-        message = f"{item.nodeid} :: {summary}"
-        _write_github_annotation("error", f"pytest-failed-{report.when}", message)
-    except Exception:  # noqa: BLE001 注解是诊断辅助，失败不得影响测试结果
-        pass
-
-
-def _install_summary_capture(config) -> None:
-    """
-    旁路捕获 pytest 终态摘要输出（仅CI环境生效）
-
-    存在性: pytest 的失败出口不止"用例失败"一种——
-      1) 用例/夹具失败 -> makereport 失败事件（_emit_github_failure_annotation 覆盖）
-      2) --cov-fail-under 未达标 -> 全部用例通过但 exit 1（无任何失败事件）
-      3) collection 阶段导入失败 -> 直接 exit，无 makereport
-    后两类逐用例钩子完全捕获不到。因此改为旁路 reporter.write_line，
-    把终态摘要里与失败/覆盖率相关的行统一回传。
-
-    参数:
-        config (pytest.Config): pytest配置对象
-
-    返回:
-        无
-    """
-    if not os.environ.get("GITHUB_ACTIONS"):
-        return
-    reporter = config.pluginmanager.get_plugin("terminalreporter")
-    if reporter is None:
-        return
-    # 必须挂在 _tw.line 而非 reporter.write_line: pytest 的
-    # short_test_summary 用 self._tw.line 直接写，绕过 write_line，
-    # 挂在 write_line 上会漏掉全部 FAILED 行
-    terminal_writer = getattr(reporter, "_tw", None)
-    if terminal_writer is None:
-        return
-    original_line = terminal_writer.line
-    captured: list = []
-
-    def _tee_line(s, **markup) -> None:
-        """原始写行不变，同时把行收进缓冲区"""
-        captured.append(s)
-        original_line(s, **markup)
-
-    terminal_writer.line = _tee_line
-    config._tm_captured_summary_lines = captured
-
-
-def _write_github_annotation(level: str, title: str, message: str) -> None:
-    """
-    输出一条 GitHub Actions workflow command 注解（仅CI环境生效）
-
-    参数:
-        level (str): 注解级别，error/warning/notice
-        title (str): 注解标题
-        message (str): 注解正文（内部完成转义）
-
-    返回:
-        无
-    """
-    safe = (
-        message.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
-    )
-    sys.__stdout__.write(f"::{level} title={title}::{safe}\n")
-    sys.__stdout__.flush()
-
-
-@pytest.hookimpl(trylast=True)
-def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
-    """
-    会话结束: 把失败证据合并为**单条**注解回传（仅CI环境生效）
-
-    为什么挂在 pytest_terminal_summary 而不是 pytest_sessionfinish:
-    实测 Run #26 从 terminal_summary 发出的注解能被 GitHub 收到，
-    而 Run #27 改挂 sessionfinish 后注解完全消失（发出位置太靠日志末尾，
-    超出 GitHub 的日志扫描窗口）。既然 terminal_summary 是**已实证可用**
-    的位置，就固定用它，不动这个已验证的变量，只换载荷内容。
-
-    为什么只发一条: GitHub 对 workflow command 生成的注解有数量上限，
-    逐用例各发一条会被截断丢弃（Run #26 实测逐用例注解全部丢失）。
-
-    载荷来源: 直读 reporter.stats['failed']——它就是 TestReport 列表，
-    自带 nodeid 与 longrepr。pytest 的 short test_summary 用 _tw.line
-    直接写、绕过多层包装，文本解析在 write_line/_tw.line/trylast
-    三种挂点下均捕获不到 FAILED 行，故不再走文本路线。
-
-    参数:
-        terminalreporter: pytest 终端报告器
-        exitstatus (int): pytest退出码
-        config (pytest.Config): pytest配置对象
-
-    返回:
-        无
-    """
-    if not os.environ.get("GITHUB_ACTIONS"):
-        return
-    try:
-        stats = getattr(terminalreporter, "stats", {})
-        parts = [
-            f"{key}={len(stats.get(key, []))}"
-            for key in ("passed", "failed", "error", "skipped", "rerun")
-        ]
-        chunks = [f"exitstatus={exitstatus} " + " ".join(parts)]
-
-        failed_reports = list(stats.get("failed", [])) + list(
-            stats.get("error", [])
-        )
-        for report in failed_reports[:10]:
-            nodeid = getattr(report, "nodeid", "<unknown>")
-            longrepr = str(getattr(report, "longrepr", "") or "")
-            tail = [ln.strip() for ln in longrepr.splitlines() if ln.strip()]
-            chunks.append(f"FAILED[{nodeid}] :: " + " | ".join(tail[-5:])[:600])
-
-        # 覆盖率门禁未达标时没有任何失败报告，需单独识别
-        for line in getattr(config, "_tm_captured_summary_lines", None) or []:
-            if "Required test coverage" in line:
-                chunks.append(line.strip()[:300])
-                break
-
-        _write_github_annotation(
-            "error", "pytest-diagnosis", " || ".join(chunks)[:3500]
-        )
-    except Exception:  # noqa: BLE001 注解是诊断辅助，失败不得影响测试结果
-        pass
 
 
 def pytest_sessionfinish(session, exitstatus):
