@@ -134,6 +134,102 @@ class TestSanitizeErrorMessage:
         assert "a.yaml" in out
         assert "b.yaml" in out
 
+    # ------------------------------------------------------------------
+    # v3 新增: 含空格路径（v2 审查 V2-P1-2）
+    #
+    # 修复前字符类排除 \s，含空格的路径整条匹配失败、**原样回显**；
+    # 更隐蔽的是部分匹配会把安全的 `C:\Users\` 前缀打码、留下操作系统
+    # 账户名与其后全部路径——看起来生效了，实际泄露更多。
+    # 既有样本用无空格的 ci_user，恰好绕开了这个洞。
+    # ------------------------------------------------------------------
+
+    @allure.story("Windows 含空格账户名收敛为文件名")
+    def test_windows_path_with_spaces_reduced_to_basename(self):
+        """账户名含空格（John Smith）时也必须完整脱敏"""
+        spaced_dir = (
+            "C:" + "\\Users" + "\\John Smith"
+            + "\\AppData" + "\\Local" + "\\Temp" + "\\tm_case_import_abc"
+        )
+        spaced_file = spaced_dir + "\\bad.yaml"
+        out = _sanitize_error_message(
+            "用例数据加载失败: [数据文件 " + spaced_file + "] "
+            "YAML语法解析失败: while parsing a block mapping"
+        )
+
+        assert "John Smith" not in out, f"含空格的账户名泄露: {out}"
+        assert "tm_case_import_abc" not in out, f"临时目录名泄露: {out}"
+        assert "C:" + "\\" not in out, f"盘符泄露: {out}"
+        assert "AppData" not in out, f"中间目录泄露: {out}"
+        assert "bad.yaml" in out, f"文件名应保留: {out}"
+        assert "YAML语法解析失败" in out, "错误类型应保留"
+
+    @allure.story("Windows Program Files 路径收敛为文件名")
+    def test_windows_program_files_path_reduced_to_basename(self):
+        """Program Files 是最典型的含空格真实路径，修复前完全零匹配"""
+        program_files = (
+            "C:" + "\\Program Files" + "\\TestMatrix" + "\\data" + "\\cases.yaml"
+        )
+        out = _sanitize_error_message("数据文件 " + program_files + " 解析失败")
+
+        assert "Program Files" not in out, f"含空格目录泄露: {out}"
+        assert "TestMatrix" not in out, f"中间目录泄露: {out}"
+        assert "C:" + "\\" not in out, f"盘符泄露: {out}"
+        assert "cases.yaml" in out, f"文件名应保留: {out}"
+        assert "解析失败" in out
+
+    @allure.story("Windows 无目录短路径收敛为文件名")
+    def test_windows_short_path_reduced_to_basename(self):
+        """C:\\a.yaml 这类无目录短路径也必须收敛（目录段是可选的）"""
+        out = _sanitize_error_message("数据文件 C:" + "\\bad.yaml 解析失败")
+
+        assert "C:" + "\\" not in out, f"盘符泄露: {out}"
+        assert "bad.yaml" in out, f"文件名应保留: {out}"
+
+    @allure.story("含空格路径在引号内正确终止")
+    def test_spaced_path_stops_at_quote(self):
+        """路径后紧跟引号与行列号时，诊断信息必须原样保留"""
+        spaced_file = (
+            "C:" + "\\Users" + "\\John Smith" + "\\AppData" + "\\t" + "\\a.yaml"
+        )
+        out = _sanitize_error_message(
+            '  in "' + spaced_file + '", line 1, column 3'
+        )
+
+        assert "John Smith" not in out, f"含空格账户名泄露: {out}"
+        assert "a.yaml" in out, f"文件名应保留: {out}"
+        assert "line 1, column 3" in out, "行列号等诊断信息必须原样保留"
+
+    @allure.story("Unix 含单空格目录收敛为文件名")
+    def test_unix_path_with_spaces_reduced_to_basename(self):
+        """/tmp/my case/deep/a.yaml 这类含空格 Unix 路径也必须脱敏"""
+        out = _sanitize_error_message(
+            "数据文件 /tmp/my case/deep/a.yaml 解析失败"
+        )
+
+        assert "my case" not in out, f"含空格目录泄露: {out}"
+        assert "a.yaml" in out, f"文件名应保留: {out}"
+
+    @allure.story("多处路径含空格时仍逐条脱敏")
+    def test_multiple_spaced_paths_all_sanitized(self):
+        """
+        允许空格不得导致贪婪匹配跨过散文吞掉下一条路径
+
+        这是本次修复最容易引入的回归: 空格一旦无条件放行，
+        `/tmp/x/a.yaml then /tmp/y/b.yaml` 会被整体匹配、只剩 b.yaml。
+
+        目录名用**单空格**（`tm case`）——多条空格目录与"散文后接新路径"
+        在正则层面无法区分，属已记录的已知限制，不在此构造。
+        """
+        out = _sanitize_error_message(
+            "first /tmp/tm case/a.yaml then /tmp/tm other/b.yaml failed"
+        )
+
+        assert "tm case" not in out, f"第一条路径目录泄露: {out}"
+        assert "tm other" not in out, f"第二条路径目录泄露: {out}"
+        assert "a.yaml" in out, f"第一个文件名应保留: {out}"
+        assert "b.yaml" in out, f"第二个文件名应保留: {out}"
+        assert "failed" in out
+
 
 # ===========================================================================
 # 2. 接口层: POST /api/cases/import
