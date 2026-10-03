@@ -1,19 +1,301 @@
-{# 执行记录页面（Day35 骨架占位，Day43 上线批次列表/详情/触发/SSE 日志） #}
+{# 执行记录页面（Day35 骨架 → Day43 完整上线）
+   区块：页头触发入口 / 批次列表（分页+三态）/ 批次详情模态框
+        （汇总卡片+单用例明细）/ 执行触发模态框（含 202 受理结果区）/
+        SSE 实时日志模态框（流式帧渲染+终态报告入口）。
+   数据全部由 executions.js 异步调 /api/executions/* 获取，本模板无业务数据。
+   列表口径：后端列表接口只含已完成批次（defect_statistics 汇总），
+   故列表状态列固定“已完成”；执行中批次经触发受理区的实时日志入口观察。 #}
 {% extends "base.html" %}
 
 {% block title %}执行记录 - TestMatrix{% endblock %}
 
 {% block content %}
-<!-- 骨架阶段占位卡片：仅渲染静态结构，数据由 Day43+ 前端 JS 异步调 /api/executions 获取 -->
-<div class="card placeholder-card">
-    <div class="card-body py-5">
-        <div class="placeholder-icon mb-3">
-            <i class="bi bi-play-circle"></i>
-        </div>
-        <h2 class="h4 mb-3">执行记录建设中（Day43 上线）</h2>
-        <p class="text-secondary mb-0">
-            将提供批次列表、用例详情、执行触发与实时日志能力。
-        </p>
+<!-- ====== 1. 页头行：标题 + 触发新执行入口 ====== -->
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">
+        <i class="bi bi-play-circle me-2 text-primary"></i>执行记录
+    </h1>
+    <div class="d-flex gap-2">
+        <button id="triggerBtn" type="button" class="btn btn-primary btn-sm">
+            <i class="bi bi-lightning-charge me-1"></i>触发新执行
+        </button>
     </div>
 </div>
+
+<!-- 列表加载失败提示条（默认隐藏，由 executions.js 切换） -->
+<div class="alert alert-danger d-none py-2 mb-3" id="listErrorAlert" role="alert">
+    <i class="bi bi-exclamation-triangle-fill me-1"></i>
+    <span id="listErrorText">执行批次加载失败，请稍后重试。</span>
+</div>
+
+<!-- ====== 2. 批次列表卡片：已完成批次（后端列表口径） ====== -->
+<div class="card">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0" id="executionsTable">
+            <thead>
+                <tr>
+                    <th>批次号</th>
+                    <th>状态</th>
+                    <th class="text-end">用例总数</th>
+                    <th class="text-end">通过</th>
+                    <th class="text-end">失败</th>
+                    <th class="text-end">异常</th>
+                    <th class="text-end">通过率</th>
+                    <th>完成时间</th>
+                    <th class="text-end text-nowrap">操作</th>
+                </tr>
+            </thead>
+            <!-- 初始 loading 态；data-execution-id 由 JS 渲染到操作按钮供事件委托读取 -->
+            <tbody id="executionsTableBody">
+                <tr id="executionsLoadingRow">
+                    <td colspan="9" class="text-center text-muted py-4">
+                        <span class="spinner-border spinner-border-sm me-1"
+                              aria-hidden="true"></span>加载中...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- ====== 分页栏：总数 + 每页条数 | 页码导航 ====== -->
+    <div class="card-footer bg-white d-flex flex-wrap justify-content-between
+                align-items-center gap-2">
+        <div class="d-flex align-items-center gap-2 small">
+            <span>共 <span id="totalCount">0</span> 个已完成批次</span>
+            <select id="pageSizeSelect" class="form-select form-select-sm w-auto">
+                <option value="10">10 条/页</option>
+                <option value="20" selected>20 条/页</option>
+                <option value="50">50 条/页</option>
+                <option value="100">100 条/页</option>
+            </select>
+        </div>
+        <nav aria-label="执行批次分页">
+            <ul class="pagination pagination-sm mb-0" id="pagination"></ul>
+        </nav>
+    </div>
+</div>
+
+<!-- ====== 3. 批次详情模态框：顶部汇总卡片 + 单用例明细列表 ====== -->
+<div class="modal fade" id="detailModal" tabindex="-1"
+     aria-labelledby="detailModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="detailModalTitle">批次详情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                        aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <!-- 3.1 批次汇总统计卡片（6 项，JS 渲染） -->
+                <div class="row g-2 mb-3" id="detailSummaryCards">
+                    <div class="col-4 col-md-2">
+                        <div class="border rounded text-center py-2">
+                            <div class="text-muted small">用例总数</div>
+                            <div class="fs-5 fw-bold" id="sumTotal">--</div>
+                        </div>
+                    </div>
+                    <div class="col-4 col-md-2">
+                        <div class="border rounded text-center py-2">
+                            <div class="text-muted small">通过</div>
+                            <div class="fs-5 fw-bold text-success"
+                                 id="sumPassed">--</div>
+                        </div>
+                    </div>
+                    <div class="col-4 col-md-2">
+                        <div class="border rounded text-center py-2">
+                            <div class="text-muted small">失败</div>
+                            <div class="fs-5 fw-bold text-danger"
+                                 id="sumFailed">--</div>
+                        </div>
+                    </div>
+                    <div class="col-4 col-md-2">
+                        <div class="border rounded text-center py-2">
+                            <div class="text-muted small">异常</div>
+                            <div class="fs-5 fw-bold text-warning"
+                                 id="sumError">--</div>
+                        </div>
+                    </div>
+                    <div class="col-4 col-md-2">
+                        <div class="border rounded text-center py-2">
+                            <div class="text-muted small">跳过</div>
+                            <div class="fs-5 fw-bold text-secondary"
+                                 id="sumSkipped">--</div>
+                        </div>
+                    </div>
+                    <div class="col-4 col-md-2">
+                        <div class="border rounded text-center py-2">
+                            <div class="text-muted small">通过率</div>
+                            <div class="fs-5 fw-bold text-primary"
+                                 id="sumPassRate">--</div>
+                        </div>
+                    </div>
+                </div>
+                <!-- 批次元信息：批次号 + 完成时间 -->
+                <div class="small text-muted mb-2" id="detailMeta"></div>
+
+                <!-- 3.2 单用例执行明细表格 -->
+                <div class="table-responsive" style="max-height:46vh">
+                    <table class="table table-sm table-hover align-middle mb-0">
+                        <thead class="table-light sticky-top">
+                            <tr>
+                                <th>用例编号</th>
+                                <th>用例名称</th>
+                                <th>结果</th>
+                                <th class="text-end">耗时(ms)</th>
+                                <th style="width:42%">错误信息</th>
+                            </tr>
+                        </thead>
+                        <tbody id="detailItemsBody">
+                            <tr>
+                                <td colspan="5" class="text-center text-muted py-3">
+                                    加载中...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <!-- 终态批次的“实时日志”回放该批次完整事件序列 -->
+                <button type="button" class="btn btn-outline-secondary btn-sm"
+                        id="detailReplayLogBtn">
+                    <i class="bi bi-broadcast me-1"></i>实时日志
+                </button>
+                <button type="button" class="btn btn-outline-secondary"
+                        data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ====== 4. 执行触发模态框：全部字段可选（无值即全量回归） ====== -->
+<div class="modal fade" id="triggerModal" tabindex="-1"
+     aria-labelledby="triggerModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="triggerModalTitle">触发新执行</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                        aria-label="关闭"></button>
+            </div>
+            <form id="triggerForm" novalidate>
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <!-- 筛选项留空即不参与过滤（全量回归） -->
+                        <div class="col-md-6">
+                            <label for="tModule" class="form-label">模块</label>
+                            <input type="text" class="form-control form-control-sm"
+                                   id="tModule" maxlength="64"
+                                   placeholder="留空=全部模块">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="tPriority" class="form-label">优先级</label>
+                            <input type="text" class="form-control form-control-sm"
+                                   id="tPriority" maxlength="64"
+                                   placeholder="留空=全部，如 P0 或 P0,P1">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="tTags" class="form-label">标签</label>
+                            <input type="text" class="form-control form-control-sm"
+                                   id="tTags" maxlength="200"
+                                   placeholder="留空=全部，逗号分隔">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="tCaseType" class="form-label">用例类型</label>
+                            <select id="tCaseType" class="form-select form-select-sm">
+                                <option value="api" selected>api</option>
+                                <option value="chip">chip</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="tExecutor" class="form-label">执行器</label>
+                            <select id="tExecutor" class="form-select form-select-sm">
+                                <option value="" selected>默认（simulated）</option>
+                                <option value="simulated">simulated</option>
+                                <option value="pytest">pytest</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="tEnvironment" class="form-label">执行环境</label>
+                            <input type="text" class="form-control form-control-sm"
+                                   id="tEnvironment" maxlength="32" value="dev">
+                        </div>
+                        <div class="col-12">
+                            <label for="tRemark" class="form-label">批次备注</label>
+                            <input type="text" class="form-control form-control-sm"
+                                   id="tRemark" maxlength="200"
+                                   placeholder="可选">
+                        </div>
+                    </div>
+
+                    <!-- 4.x 202 受理结果区（默认隐藏，提交成功后展示） -->
+                    <div class="alert alert-success d-none mt-3 mb-0"
+                         id="triggerResultAlert" role="alert">
+                        <div class="fw-semibold mb-1">
+                            <i class="bi bi-check-circle-fill me-1"></i>
+                            执行批次已受理，后台执行中
+                        </div>
+                        <div class="small" id="triggerResultText"></div>
+                        <button type="button"
+                                class="btn btn-success btn-sm mt-2"
+                                id="triggerViewLogBtn">
+                            <i class="bi bi-broadcast me-1"></i>查看实时日志
+                        </button>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary"
+                            data-bs-dismiss="modal">关闭</button>
+                    <!-- 提交期间禁用并显示 spinner，互斥锁防重复提交 -->
+                    <button type="submit" class="btn btn-primary"
+                            id="triggerSubmitBtn">
+                        <span class="spinner-border spinner-border-sm d-none me-1"
+                              id="triggerSubmitSpinner"
+                              aria-hidden="true"></span>触发执行
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- ====== 5. SSE 实时日志模态框：流式帧逐行渲染，终态后给报告入口 ====== -->
+<div class="modal fade" id="logModal" tabindex="-1"
+     aria-labelledby="logModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    实时日志
+                    <span class="badge text-bg-secondary ms-1"
+                          id="logConnectionBadge">连接中</span>
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                        aria-label="关闭" id="logCloseBtn"></button>
+            </div>
+            <div class="modal-body">
+                <div class="small text-muted mb-2" id="logExecutionMeta"></div>
+                <!-- 等宽字体日志区：pre 保留换行，固定高度纵向滚动，新帧自动到底 -->
+                <pre id="logContainer"
+                     class="bg-light border rounded p-2 mb-0 small"
+                     style="height:46vh; overflow-y:auto; white-space:
+                            pre-wrap; word-break:break-all;"></pre>
+            </div>
+            <div class="modal-footer">
+                <!-- 终态后出现：关闭日志并打开该批次完整详情 -->
+                <button type="button" class="btn btn-primary btn-sm d-none"
+                        id="logViewReportBtn">
+                    <i class="bi bi-file-text me-1"></i>查看完整报告
+                </button>
+                <button type="button" class="btn btn-outline-secondary"
+                        data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<!-- 执行记录页业务脚本（无图表，不加载 ECharts；defer 与 body 底部加载双保险） -->
+<script defer src="{{ url_for('static', filename='js/executions.js') }}"></script>
 {% endblock %}
