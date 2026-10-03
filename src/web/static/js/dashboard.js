@@ -267,17 +267,35 @@ function initDashboardCharts() {
    ========================================================================== */
 
 /**
- * 把批次 created_at（ISO，如 2026-09-20T10:30:46）格式化为 MM-DD HH:mm
+ * 把批次 created_at（ISO 8601，如 2026-10-03T06:03:53+00:00）格式化为本地时间 MM-DD HH:mm
  *
- * @param {string} isoTime 后端 created_at ISO 字符串
- * @returns {string} 横轴短标签；异常/空值返回 "--"
+ * 为什么必须解析而不能用定长切片: 后端时间序列化统一带时区标识
+ * （UTC 来源补 +00:00，本地来源换算成 UTC，见 time_utils 双来源规范），
+ * 前端只有经 new Date() 解析、再用本地 getter 取值，才能得到正确的本地
+ * 时间。原实现用定长切片（slice(5,10)/slice(11,16)）隐含"第 11-16 位
+ * 就是本地时间"的假设，对带 +00:00 的串会**直接显示 UTC**，偏一个时区
+ * 偏移（UTC+8 用户看到的趋势图横轴比实际早 8 小时）。
+ *
+ * @param {string} isoTime 后端 created_at ISO 字符串（带时区标识）
+ * @returns {string} 横轴短标签 MM-DD HH:mm；异常/空值返回 "--"
  */
 function formatBatchLabel(isoTime) {
     if (typeof isoTime !== "string" || isoTime.length < 16) {
         return "--";
     }
-    // ISO 固定位切片：[5:10]=MM-DD，[11:16]=HH:mm，零日期库依赖
-    return isoTime.slice(5, 10) + " " + isoTime.slice(11, 16);
+    // 带 +00:00 的 ISO 串按 UTC 解析，getMonth/getHours 等自动返回本地值；
+    // 无时区标识的历史串按本地解析，与旧行为一致
+    const date = new Date(isoTime);
+    // 非法日期（脏数据）降级，避免渲染出 NaN-NaN
+    if (isNaN(date.getTime())) {
+        return "--";
+    }
+    // 逐段补零；输出格式与原实现完全一致（MM-DD HH:mm，共 11 字符）
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    const hours = String(date.getHours()).padStart(2, "0");
+    const minutes = String(date.getMinutes()).padStart(2, "0");
+    return month + "-" + day + " " + hours + ":" + minutes;
 }
 
 /**
