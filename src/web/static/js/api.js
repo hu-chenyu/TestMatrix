@@ -72,9 +72,23 @@ async function request(path, options) {
     // （用户误判为库是空的），看板统计卡片则抛 Cannot read properties of
     // null，把真实的后端 message 覆盖掉——排查方向被彻底带偏。
     // 与 cases.js 的 importCases 保持同一口径。
+    //
+    // 判据由"白名单 [0, 200]"改为"**2xx 全放行**"（v5 遗留修复）:
+    // 本项目 code 与 HTTP 状态码同值（response.py 统一封装），成功码
+    // **不止 200**——创建用例回 201（response.created）、触发执行回 202
+    // （trigger 固定 202 受理）。原白名单把这两个成功响应判成业务失败:
+    //   · 202 → executions.js 的 trigger 一旦改走本封装就会拿不到
+    //     execution_id/total_cases（Day43 因此让 triggerExecution 直连
+    //     fetch 绕过本封装，属被迫的例外而非最优设计）；
+    //   · 201 → **更隐蔽也更严重**：cases.js 的 createCase 走
+    //     window.api.post，新建用例必然抛"业务处理失败，业务码：201"，
+    //     而 HTTP 层明明是 201 Created。该缺陷此前被 cases.js 整脚本
+    //     SyntaxError 完全掩盖，页面恢复后才会暴露。
+    // 4xx/5xx 行为不变（照常抛错并优先取后端 message）；非数字 code
+    // 走 Number() 得 NaN，比较恒为 false → 仍判失败，与修复前一致。
     if (payload && payload.code !== undefined && payload.code !== null) {
         const code = Number(payload.code);
-        if (code !== 0 && code !== 200) {
+        if (!(code >= 0 && code < 400)) {
             throw new Error(
                 payload.message || ("业务处理失败，业务码：" + payload.code)
             );

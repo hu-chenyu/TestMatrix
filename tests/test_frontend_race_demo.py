@@ -141,16 +141,25 @@ class TestApiBusinessCodeGuard:
         data=null，用例列表渲染成"暂无数据"（用户误判为库是空的），
         看板统计卡片则抛 Cannot read properties of null，把后端真实
         message 覆盖掉，排查方向被彻底带偏。
+
+        判据口径变更（v5 遗留修复）: 原断言要求源码里出现
+        `code !== 0` 与 `code !== 200` 两个**白名单**比较，那等价于
+        "只放行 0 与 200"。但本项目 code 与 HTTP 状态码同值
+        （response.py 统一封装），成功码不止 200——创建用例回 201、
+        触发执行回 202，原判据把它们判成业务失败（cases.js 新建用例
+        必报"业务处理失败，业务码：201"）。现改为正向断言"0 与 2xx
+        全放行、4xx/5xx 仍失败"，语义更强且不依赖具体写法。
         """
         assert "payload.code" in api_js, (
             "api.js 必须读取并校验响应体业务码 payload.code"
         )
-        # 必须同时排除两种成功约定（0 与 200），否则 200 成功会被误杀
-        assert re.search(r"code\s*!==\s*0", api_js), (
-            "业务码校验必须放行 code=0（统一响应封装用的是 0）"
+        # 成功判据：放行 code=0 与全部 2xx（200/201/202）
+        assert re.search(r"code\s*>=\s*0\s*&&\s*code\s*<\s*400", api_js), (
+            "业务码校验必须放行 code=0 与全部 2xx（200/201/202）"
         )
-        assert re.search(r"code\s*!==\s*200", api_js), (
-            "业务码校验必须放行 code=200（部分端点沿用 HTTP 语义）"
+        # 反向对照：分界必须是 400，4xx/5xx 不得被放行
+        assert "code < 400" in api_js, (
+            "业务码校验必须以 400 为成功/失败分界，4xx/5xx 照常判失败"
         )
         # 业务失败必须抛错，而不是返回一个"看起来正常"的值
         assert re.search(r"throw new Error\(", api_js), (
