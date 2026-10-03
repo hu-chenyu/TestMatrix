@@ -43,6 +43,7 @@ TestMatrix Day24: 用例执行触发API测试
 """
 
 import re
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -450,7 +451,13 @@ class TestExecutionsTriggerApi:
         pytest执行器退出码解析: mock子进程returncode
         0→passed（error_message为None）/ 1→failed（error_message非空）/
         2→error（error_message非空且含stderr内容）；
-        附命令拼装结构断言（py -m pytest path -q --tb=short）
+        附命令拼装结构断言（sys.executable -m pytest -- path -q --tb=short）
+
+        命令结构断言的变更（Day43 收尾 M1/D6/M2）: 解释器由硬编码的
+        "py"（Windows 专属启动器，非 Windows 平台每条用例都 OSError）
+        改为 sys.executable（跨平台且指向当前 venv 解释器）；并在 path
+        前加 "--" 选项终止符，使 path 必被当作位置参数而非 pytest 选项。
+        行为已变，按验收铁律 2 适配断言而非删除该测试。
         """
         runner = PytestRunner()
         case = {"case_id": "TM-UC-0002"}
@@ -458,8 +465,13 @@ class TestExecutionsTriggerApi:
         # 命令拼装结构（骨架契约）
         command = runner.build_command(case)
         assert command == [
-            "py", "-m", "pytest", "TM-UC-0002", "-q", "--tb=short",
+            sys.executable, "-m", "pytest", "--", "TM-UC-0002",
+            "-q", "--tb=short",
         ]
+        # 回归点: 解释器必须是当前解释器而非 "py"，且必须有 "--" 终止符
+        assert command[0] == sys.executable
+        assert command[0] != "py", "不得回退到 Windows 专属的 py 启动器"
+        assert "--" in command, "必须有选项终止符，防止 case_id 被当作选项"
 
         def _mock_completed(returncode: int, stderr: str = "") -> MagicMock:
             """构造mock子进程完成对象（returncode/stdout/stderr）"""

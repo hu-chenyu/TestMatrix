@@ -25,7 +25,10 @@ services:
       TM_DB_MYSQL_HOST: mysql
       TM_DB_MYSQL_PORT: "3306"
       TM_DB_MYSQL_USER: ${TM_DB_MYSQL_USER:-testmatrix}
-      TM_DB_MYSQL_PASSWORD: ${TM_DB_MYSQL_PASSWORD:-testmatrix123}
+      # 口令不再有明文默认值：未设置时 compose 直接报错退出（Day43 收尾 D4）。
+      # 原先此处有一个写死的明文默认口令，会随本文件入库，任何照抄起环境的
+      # 人拿到的都是同一个弱口令。
+      TM_DB_MYSQL_PASSWORD: ${TM_DB_MYSQL_PASSWORD:?必须在 .env 设置 TM_DB_MYSQL_PASSWORD}
       TM_DB_MYSQL_DATABASE: ${TM_DB_MYSQL_DATABASE:-testmatrix}
     volumes:
       # 测试产物（日志/Allure结果）挂载宿主机，便于本机查看报告
@@ -38,10 +41,13 @@ services:
     container_name: testmatrix-mysql
     profiles: ["mysql"]
     environment:
-      MYSQL_ROOT_PASSWORD: root123456
-      MYSQL_DATABASE: testmatrix
-      MYSQL_USER: testmatrix
-      MYSQL_PASSWORD: testmatrix123
+      # root 与用户口令均强制显式配置，无明文默认值（Day43 收尾 D4）。
+      # ${VAR:?msg} 语法：VAR 未设置时 compose 立即报错并打印 msg，
+      # 避免"照抄默认口令起环境"这种弱口令进共享/生产网络的路径。
+      MYSQL_ROOT_PASSWORD: ${TM_DB_MYSQL_ROOT_PASSWORD:?必须在 .env 设置 TM_DB_MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${TM_DB_MYSQL_DATABASE:-testmatrix}
+      MYSQL_USER: ${TM_DB_MYSQL_USER:-testmatrix}
+      MYSQL_PASSWORD: ${TM_DB_MYSQL_PASSWORD:?必须在 .env 设置 TM_DB_MYSQL_PASSWORD}
       TZ: Asia/Shanghai
     ports:
       - "3306:3306"

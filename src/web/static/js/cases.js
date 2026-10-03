@@ -32,6 +32,9 @@ const state = {
     loading: false,       // 列表加载互斥锁（防并发重复请求）
     pendingRefresh: false,// 锁释放后需补刷一次的标志（保存/删除/导入后
                           // 的刷新撞上在途请求时登记，避免刷新被丢弃）
+    pendingPage: null,    // 列表在途期间被点击的目标页码，锁释放后自动补刷
+                          // （与 pendingRefresh 同机制，但需记住目标页）
+    pendingPageSize: null,// 列表在途期间被改动的每页条数，锁释放后回第 1 页补刷
     knownModules: [],     // 历次列表累积发现的模块名（跨页填充模块下拉）
 };
 
@@ -141,7 +144,9 @@ function priorityBadge(priority) {
         P2: "text-bg-primary",
         P3: "text-bg-secondary",
     };
-    const cls = colorMap[priority] || "text-bg-secondary";
+    const cls = Object.prototype.hasOwnProperty.call(colorMap, priority)
+        ? colorMap[priority]
+        : "text-bg-secondary";
     return '<span class="badge ' + cls + '">' + escHtml(priority) + "</span>";
 }
 
@@ -423,6 +428,23 @@ async function loadCases() {
         // 锁释放后补刷被登记的刷新请求
         if (state.pendingRefresh) {
             state.pendingRefresh = false;
+            loadCases();
+            return;
+        }
+        // 补刷在途期间登记的分页变更（Day43 收尾 D10）。
+        // 先置 null 再递归：补刷请求若再次撞锁会重新登记而非立即递归，
+        // 杜绝无限循环。pendingPageSize 优先级更高（改页大小要回第 1 页）。
+        if (state.pendingPageSize !== null || state.pendingPage !== null) {
+            const size = state.pendingPageSize;
+            const page = state.pendingPage;
+            state.pendingPageSize = null;
+            state.pendingPage = null;
+            if (size !== null) {
+                state.pageSize = size;
+                state.page = 1;
+            } else {
+                state.page = page;
+            }
             loadCases();
         }
     }
@@ -873,8 +895,15 @@ function initCasesPage() {
     });
 
     // 每页条数变化：重置第 1 页
-    els.pageSizeSelect.addEventListener("change", function () {
-        state.pageSize = parseInt(els.pageSizeSelect.value, 10) || 20;
+    els.pageSizeSelect.addEventListener("change", function (event) {
+        const newSize = parseInt(event.target.value, 10) || 20;
+        // 列表在途：登记待补刷（改页大小要回第 1 页），否则下拉框已显示
+        // 新值而列表仍是旧数据，直到用户再次操作才生效
+        if (state.loading) {
+            state.pendingPageSize = newSize;
+            return;
+        }
+        state.pageSize = newSize;
         state.page = 1;
         loadCases();
     });
@@ -886,20 +915,34 @@ function initCasesPage() {
             return;
         }
         event.preventDefault();
-        if (state.loading || link.parentElement.classList.contains("disabled")) {
-            return; // 加载中/禁用态不响应
+        // 禁用态（首/末页）直接忽略，这是正确的 UI 语义
+        if (link.parentElement.classList.contains("disabled")) {
+            return;
         }
         const action = link.getAttribute("data-action");
+        // 解析出本次点击想要的目标页（不立即跳转）
+        let targetPage = state.page;
         if (action === "prev" && state.page > 1) {
-            state.page -= 1;
+            targetPage = state.page - 1;
         } else if (action === "next" && state.page < state.totalPages) {
-            state.page += 1;
+            targetPage = state.page + 1;
         } else if (action === "page") {
-            const targetPage = parseInt(link.getAttribute("data-page"), 10);
-            if (!isNaN(targetPage)) {
-                state.page = targetPage;
+            const parsed = parseInt(link.getAttribute("data-page"), 10);
+            if (!isNaN(parsed)) {
+                targetPage = parsed;
             }
         }
+        if (targetPage === state.page) {
+            return;
+        }
+        // 列表在途：登记待补刷的目标页，锁释放后自动跳过去
+        // （与每页条数变更的 pendingPageSize 同一机制；修复前此处撞上
+        //  state.loading 直接 return，加载中点页码被静默丢弃）
+        if (state.loading) {
+            state.pendingPage = targetPage;
+            return;
+        }
+        state.page = targetPage;
         loadCases();
     });
 

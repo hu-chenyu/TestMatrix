@@ -62,6 +62,7 @@ const state = {
     eventSource: null,    // 当前 EventSource 实例（同时只允许一个订阅）
     terminalReceived: false, // 本订阅是否已收到终态帧（防重复 close/渲染）
     pendingPageSize: null, // 列表在途期间被改动的页大小，锁释放后自动补刷
+    pendingPage: null,   // 列表在途期间被点击的目标页码，锁释放后自动补刷
     detailRequestSeq: 0,  // 详情请求序号，防慢响应覆盖后发起的响应
     logRequestSeq: 0,     // 日志探活请求序号，语义同上
 };
@@ -478,14 +479,24 @@ async function loadExecutions() {
     } finally {
         state.listLoading = false;
         renderPagination();
-        // 锁释放后补刷在途期间登记的页大小变更（cases.js pendingRefresh
-        // 同款机制）：锁在途时 loadExecutions 会直接 return，若不补刷，
-        // 下拉框已显示新页大小而表格仍是旧数据，直到下次翻页才生效
-        if (state.pendingPageSize !== null) {
-            const pendingSize = state.pendingPageSize;
+        // 锁释放后补刷在途期间登记的变更（cases.js pendingRefresh 同款机制）：
+        // ①pendingPageSize 列表在途时改每页条数
+        // ②pendingPage    列表在途时点数字页码/上一页/下一页
+        // 修复前这两处都是直接 return，变更被静默丢弃——下拉框已显示新
+        // 页大小、页码按钮已点过，但列表毫无反应。
+        // 补刷前先把标志置 null 再递归：若补刷请求再次撞锁，会重新登记
+        // 而非立即递归，杜绝无限循环。
+        if (state.pendingPageSize !== null || state.pendingPage !== null) {
+            const size = state.pendingPageSize;
+            const page = state.pendingPage;
             state.pendingPageSize = null;
-            state.pageSize = pendingSize;
-            state.currentPage = 1;
+            state.pendingPage = null;
+            if (size !== null) {
+                state.pageSize = size;
+                state.currentPage = 1;
+            } else {
+                state.currentPage = page;
+            }
             loadExecutions();
         }
     }
@@ -746,7 +757,8 @@ function getLogModal() {
  *
  * @param {string} phase connecting（连接中）/running（接收事件）/
  *                     reconnecting（断线重连）/finished（已完成）/failed（失败）/
- *                     snapshot（终态前快照，已主动停止订阅）
+ *                     snapshot（终态前快照，已主动停止订阅）/
+ *                     closed（浏览器已放弃重连，连接终止）
  * @returns {void}
  */
 function setConnectionBadge(phase) {
@@ -757,6 +769,7 @@ function setConnectionBadge(phase) {
         finished: { cls: "text-bg-success", text: "已完成" },
         failed: { cls: "text-bg-danger", text: "失败" },
         snapshot: { cls: "text-bg-secondary", text: "快照·已停订阅" },
+        closed: { cls: "text-bg-danger", text: "已断开" },
     };
     const conf = map[phase] || map.connecting;
     els.logConnectionBadge.className = "badge ms-1 " + conf.cls;
@@ -1067,10 +1080,29 @@ async function openLogView(executionId) {
         }
     });
     es.onerror = function () {
-        // readyState=CONNECTING：浏览器正在自动重连，仅提示不手动干预；
-        // readyState=CLOSED 多为终态后服务端正常结束，已在终态回调关闭，
-        // 此处仅在未收终态时给出重连提示
-        if (!state.terminalReceived) {
+        // 终态后忽略一切错误（终态回调已主动关流并亮出报告入口）
+        if (state.terminalReceived) {
+            return;
+        }
+        // 三种 readyState 必须区分（Day43 收尾修复 D8）:
+        //   CLOSED(2)   浏览器**已放弃**重连（建连 500 / CORS / 网络不可达
+        //               / 浏览器主动停止）。此时不会再有任何重连，若仍按
+        //               "重连中"提示，用户会面对一个永不变化的徽章和永不
+        //               到达的日志——UI 与真实连接状态背离。必须收流并如实
+        //               告知"已断开"。
+        //   CONNECTING(0) 浏览器正在按规范自动重连（正常瞬断），提示即可。
+        //   OPEN(1)      连接正常，onerror 属竞态噪声，不处理。
+        if (es.readyState === EventSource.CLOSED) {
+            closeEventSource();
+            setConnectionBadge("closed");
+            appendLogLine(
+                "连接已终止（服务端错误或网络不可达，浏览器已停止重连），" +
+                "请关闭本窗口后重新打开查看。",
+                "danger"
+            );
+            return;
+        }
+        if (es.readyState === EventSource.CONNECTING) {
             setConnectionBadge("reconnecting");
             appendLogLine(
                 "连接中断，浏览器正在自动重连（断点由 Last-Event-ID 续传）...",
@@ -1139,26 +1171,37 @@ function initExecutionsPage() {
             return;
         }
         event.preventDefault();
-        if (
-            state.listLoading ||
-            link.parentElement.classList.contains("disabled")
-        ) {
+        // 禁用态（首/末页）直接忽略，这是正确的 UI 语义
+        if (link.parentElement.classList.contains("disabled")) {
             return;
         }
         const action = link.getAttribute("data-action");
+        // 解析出本次点击想要的目标页（不立即跳转）
+        let targetPage = state.currentPage;
         if (action === "prev" && state.currentPage > 1) {
-            state.currentPage -= 1;
+            targetPage = state.currentPage - 1;
         } else if (
             action === "next" &&
             state.currentPage < state.totalPages
         ) {
-            state.currentPage += 1;
+            targetPage = state.currentPage + 1;
         } else if (action === "page") {
-            const targetPage = parseInt(link.getAttribute("data-page"), 10);
-            if (!isNaN(targetPage)) {
-                state.currentPage = targetPage;
+            const parsed = parseInt(link.getAttribute("data-page"), 10);
+            if (!isNaN(parsed)) {
+                targetPage = parsed;
             }
         }
+        if (targetPage === state.currentPage) {
+            return;
+        }
+        // 列表在途：登记待补刷的目标页，锁释放后自动跳过去
+        // （与每页条数变更的 pendingPageSize 同一机制；修复前此处直接
+        //  return，加载中点页码被静默丢弃，用户看到列表毫无反应）
+        if (state.listLoading) {
+            state.pendingPage = targetPage;
+            return;
+        }
+        state.currentPage = targetPage;
         loadExecutions();
     });
 
