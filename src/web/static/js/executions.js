@@ -5,7 +5,8 @@
         loading/empty/error 三态 + 页码分页 + 每页条数切换；
      2. 批次详情：GET /executions/<id>，顶部汇总卡片 + 单用例明细
         （结果徽章 / 耗时 ms / 失败堆栈等宽可滚动区，失败行高亮）；
-     3. 执行触发：POST /executions/trigger（字段全可选=全量回归），
+     3. 执行触发：POST /executions/trigger（筛选项留空=不按该维度过滤，
+        注意 case_type 恒定下发，单次触发只覆盖一种用例类型），
         202 受理区展示 execution_id/pending/total_cases + 实时日志入口，
         提交互斥锁防重复；
      4. SSE 实时日志：EventSource 订阅 /executions/<id>/events，
@@ -32,6 +33,19 @@
  * 精确匹配而非子串包含，理由见 openLogView 内的注释。
  */
 const EXECUTION_NOT_FOUND_MESSAGE = "执行批次不存在";
+
+/**
+ * 批次状态枚举（后端 test_execution_batches.status 的取值域）
+ *
+ * 具名化而非散落字面量：状态串在本文件出现在"列表状态列""SSE 终态判定"
+ * "报告入口分支"三处，任一处写错大小写都只是静默降级而非报错。
+ */
+const BATCH_STATUS = {
+    FINISHED: "finished",
+    FAILED: "failed",
+    RUNNING: "running",
+    PENDING: "pending",
+};
 
 /* ==========================================================================
    页面级状态
@@ -124,46 +138,54 @@ let logModal = null;
 const escHtml = window.escapeHtml;
 
 /**
- * 批次状态徽章 HTML（枚举固定值，颜色类不走转义）
+ * 批次状态徽章 HTML
  *
- * @param {string} status finished/failed/running/pending
- * @returns {string} Bootstrap badge HTML 片段；未知值降级灰色
+ * 实现已下沉到 main.js 的 window.statusBadge（Day44 收尾）。该全局实现
+ * 同时覆盖用例启停域（active/disabled）与批次执行域（finished/failed/
+ * running/pending），两个域的既有文案均保持不变。此处仅做异名引用。
  */
-function statusBadge(status) {
-    // 已完成绿 / 失败红 / 执行中蓝 / 等待中黄
-    const colorMap = {
-        finished: "text-bg-success",
-        failed: "text-bg-danger",
-        running: "text-bg-primary",
-        pending: "text-bg-warning",
-    };
-    const textMap = {
-        finished: "已完成",
-        failed: "失败",
-        running: "执行中",
-        pending: "等待中",
-    };
-    const cls = colorMap[status] || "text-bg-secondary";
-    const text = textMap[status] || status || "未知";
-    return '<span class="badge ' + cls + '">' + escHtml(text) + "</span>";
-}
+const statusBadge = window.statusBadge;
 
 /**
  * 单用例执行结果徽章 HTML
+ *
+ * 与状态徽章不同域（result 而非 status），故仍在本文件持有；但补上
+ * 自有属性判定——直接 colorMap[result] 会命中 Object.prototype 上的键
+ * （constructor/toString 等）并把函数对象拼进 class 属性。
  *
  * @param {string} result passed/failed/error/skipped
  * @returns {string} Bootstrap badge HTML 片段；未知值降级灰色
  */
 function resultBadge(result) {
-    // 通过绿 / 失败红 / 异常橙 / 跳过黄
+    // 通过绿 / 失败红 / 异常橙 / 跳过灰
     const colorMap = {
         passed: "text-bg-success",
         failed: "text-bg-danger",
         error: "bg-warning text-dark",
         skipped: "text-bg-secondary",
     };
-    const cls = colorMap[result] || "text-bg-secondary";
+    const cls = Object.prototype.hasOwnProperty.call(colorMap, result)
+        ? colorMap[result]
+        : "text-bg-secondary";
     return '<span class="badge ' + cls + '">' + escHtml(result) + "</span>";
+}
+
+/**
+ * 通过率百分比文本（0~1 小数转百分比，非法值降级为横线）
+ *
+ * 为什么要 NaN 防御: 字段缺失时 Number(x) 得 NaN，直接 (NaN*100).toFixed(1)
+ * 会渲染出字面量 "NaN%"。三个来源（列表汇总/详情汇总/SSE 终态帧）统一
+ * 走本函数，保证异常值呈现一致。
+ *
+ * @param {number|string|null|undefined} passRate 0~1 的通过率
+ * @returns {string} 百分比文本（如 "87.5%"）；非有限值返回 "-"
+ */
+function formatPassRate(passRate) {
+    const value = Number(passRate);
+    if (!isFinite(value)) {
+        return "-";
+    }
+    return (value * 100).toFixed(1) + "%";
 }
 
 /**
@@ -209,42 +231,11 @@ function splitFilterValues(rawValue) {
 /**
  * 计算分页页码序列
  *
- * 总页数 ≤7 全部显示；>7 时显示首末页、当前页前后各 1 页，缺口插省略号。
- * 与 cases.js 同款算法，保证三个页面分页交互一致。
- *
- * @param {number} current 当前页
- * @param {number} totalPages 总页数
- * @returns {Array<number|string>} 页码序列，省略号位为 "..."
+ * 实现已下沉到 main.js 的 window.buildPageSequence（Day44 收尾，本文件与
+ * cases.js 原本逐字重复的两份实现合并为一处，三个页面分页交互口径统一）。
+ * 此处仅做异名引用，保留 window.executionsPage 的同名导出。
  */
-function buildPageSequence(current, totalPages) {
-    if (totalPages <= 7) {
-        const all = [];
-        for (let i = 1; i <= totalPages; i++) {
-            all.push(i);
-        }
-        return all;
-    }
-    const pages = new Set([1, totalPages, current - 1, current, current + 1]);
-    const valid = [];
-    pages.forEach(function (p) {
-        if (p >= 1 && p <= totalPages) {
-            valid.push(p);
-        }
-    });
-    valid.sort(function (a, b) {
-        return a - b;
-    });
-    const sequence = [];
-    let prev = 0;
-    valid.forEach(function (p) {
-        if (p - prev > 1) {
-            sequence.push("...");
-        }
-        sequence.push(p);
-        prev = p;
-    });
-    return sequence;
-}
+const buildPageSequence = window.buildPageSequence;
 
 /* ==========================================================================
    API 语义封装（均走 window.api，自动拼 /api 前缀并解包统一响应体）
@@ -286,47 +277,21 @@ function getExecutionStatus(executionId) {
 }
 
 /**
- * 触发用例异步执行（直连 fetch，不走 window.api）
+ * 触发用例异步执行（走 window.api 统一封装）
  *
- * 绕过 window.api 的理由: trigger 是全项目唯一以 **202 Accepted**
- * 表达成功的接口，而 api.js 的业务码校验白名单仅放行 0/200，
- * 202 会被误判为业务失败抛错——经 window.api.post 拿不到受理响应
- * 体中的 execution_id/total_cases（仅能拿到错误文案），无法满足
- * “展示 202 受理三要素”的要求。在不改 api.js（当日白名单外文件）
- * 的前提下，此处与 cases.js 的 multipart 导入同为例外：直连
- * fetch 并显式按 202 成功口径解包统一响应体。
+ * 本函数此前直连 fetch 显式判 202，原因是当时的 api.js 业务码白名单只
+ * 放行 0/200，trigger 的 202 会被误判为业务失败。Day44 已把 api.js 的
+ * 判据改为区间（code >= 0 && code < 400，2xx 全放行，见 6.36 决策 2），
+ * 绕封装的理由已消失，本函数随之收编回统一封装——全项目不再有第二套
+ * 请求代码路径。202 受理体由 api.js 统一解包返回 data。
  *
- * @param {object} formData 触发表单（字段全可选，空对象=全量回归）
+ * @param {object} formData 触发表单（字段全可选，空对象=选中全部 api 用例）
  * @returns {Promise<object>} 202 受理结果
  *          {execution_id, status:"pending", total_cases}
- * @throws {Error} 网络失败或 HTTP 非 2xx（message 取后端业务文案）
+ * @throws {Error} 网络失败或 HTTP 非 2xx（message 由 api.js 取后端业务文案）
  */
 async function triggerExecution(formData) {
-    let response;
-    try {
-        response = await fetch("/api/executions/trigger", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(formData),
-        });
-    } catch (networkError) {
-        throw new Error("网络请求失败，请检查连接后重试：" + networkError.message);
-    }
-
-    let payload = null;
-    try {
-        payload = await response.json();
-    } catch (parseError) {
-        throw new Error("触发响应解析失败，HTTP 状态码：" + response.status);
-    }
-    // 成功口径：202 Accepted（后端对受理成功固定返回 202）
-    if (response.status !== 202 || !response.ok) {
-        throw new Error(
-            (payload && payload.message) ||
-                "触发失败，HTTP 状态码：" + response.status
-        );
-    }
-    return payload ? payload.data : null;
+    return window.api.post("/executions/trigger", formData);
 }
 
 /* ==========================================================================
@@ -382,12 +347,19 @@ function renderExecutionsTable(items) {
         .map(function (item) {
             // data-execution-id 同样转义，防编号中的引号截断属性
             const safeId = escHtml(item.execution_id);
-            // 通过率 0~1 小数转百分比保留 1 位
-            const rateText = (Number(item.pass_rate) * 100).toFixed(1) + "%";
+            // 通过率 0~1 小数转百分比保留 1 位（统一走 formatPassRate 做 NaN 防御）
+            const rateText = formatPassRate(item.pass_rate);
+            // 状态列取后端返回的真实状态（Day44 收尾）：原先硬编码
+            // "finished"，但核心层写汇总行与更新批次行两步非原子，会留下
+            // "有汇总行但批次行非终态"的孤儿批次被误显示为已完成。字段
+            // 缺失时按列表口径的既有不变量兜底 finished。
+            const statusText = statusBadge(
+                item.status || BATCH_STATUS.FINISHED
+            );
             return (
                 "<tr>" +
                 '<td class="fw-semibold text-nowrap">' + safeId + "</td>" +
-                "<td>" + statusBadge("finished") + "</td>" +
+                "<td>" + statusText + "</td>" +
                 '<td class="text-end">' + Number(item.total_cases || 0) + "</td>" +
                 '<td class="text-end text-success">' +
                     Number(item.passed || 0) + "</td>" +
@@ -402,6 +374,12 @@ function renderExecutionsTable(items) {
                 'data-action="detail" data-execution-id="' + safeId + '">' +
                 "详情</button>" +
                 '<button type="button" class="btn btn-outline-secondary btn-sm" ' +
+                // 历史批次（Day24 建表前、无 test_execution_batches 行）的
+                // "日志"按钮**无法在列表层前置置灰**：列表接口只提供
+                // defect_statistics 汇总口径，Day44 收尾补的 status 字段对
+                // 这类批次兜底就是 "finished"，与正常已完成批次不可区分。
+                // 因此保持"点击后 status 探活 + 失败 toast"方案（探活在
+                // 建流前，不会触发 EventSource 无限重连）。
                 'data-action="log" data-execution-id="' + safeId + '">' +
                 '<i class="bi bi-broadcast me-1"></i>日志</button>' +
                 "</td>" +
@@ -540,8 +518,7 @@ function renderSummary(summary) {
     els.sumFailed.textContent = String(summary.failed || 0);
     els.sumError.textContent = String(summary.error || 0);
     els.sumSkipped.textContent = String(summary.skipped || 0);
-    els.sumPassRate.textContent =
-        (Number(summary.pass_rate) * 100).toFixed(1) + "%";
+    els.sumPassRate.textContent = formatPassRate(summary.pass_rate);
     // 元信息走 textContent，编号天然防注入
     els.detailMeta.textContent =
         "批次号：" + summary.execution_id +
@@ -662,12 +639,16 @@ function openTriggerModal() {
 }
 
 /**
- * 收集触发表单为请求体（空文本字段不下发=全量回归口径）
+ * 收集触发表单为请求体（空文本字段不下发=不按该维度过滤）
  *
  * executor 选“默认”时不下发，由后端工厂按 TM_EXECUTOR 环境变量裁定。
  * priority/tags 按逗号拆分后**下发数组**（后端 _normalize_values 对
  * str 入参不拆逗号，整串当单值，多值下发字符串必然命中 0 条转 400）。
  * case_type 无“全部”选项，恒定下发（后端缺省亦为 api，见 6.34 决策）。
+ *
+ * 注意口径：其余筛选项留空=不按该维度过滤，但**不等于全量回归**——
+ * case_type 恒为下拉当前值（默认 api），单次触发只能覆盖一种用例类型，
+ * chip 用例需显式选 chip 才纳入。想跑全部类型需分两次触发。
  *
  * @returns {object} 仅含非空字段的请求体
  */
@@ -868,7 +849,7 @@ function handleBatchStart(data) {
         "primary"
     );
     // pending 快照帧（无 executor_kind 而带 status=pending）只提示不推进终态
-    if (data.status === "pending") {
+    if (data.status === BATCH_STATUS.PENDING) {
         appendLogLine("批次排队等待执行中，当前为状态快照。", "muted");
     }
     // 快照帧收束（终态前的单帧直发必须主动关流）:
@@ -879,7 +860,9 @@ function handleBatchStart(data) {
     // live 实时流（{total_cases, executor_kind}）与 DB 重建回放
     // （{total_cases, executor_kind: null}）的 batch_start 都不带 status，
     // 不会被误判；只有单帧快照分支带 status。
-    if (data.status && data.status !== "finished" && data.status !== "failed") {
+    const isTerminalStatus = data.status === BATCH_STATUS.FINISHED ||
+        data.status === BATCH_STATUS.FAILED;
+    if (data.status && !isTerminalStatus) {
         appendLogLine(
             "批次当前为 " + data.status + "，尚未产生终态事件；已停止订阅，" +
             "请在批次进入终态后重新打开本窗口查看完整日志。",
@@ -930,10 +913,10 @@ function handleBatchFinished(data) {
         " │ 失败 " + data.failed +
         " │ 异常 " + data.error +
         " │ 跳过 " + data.skipped +
-        " │ 通过率 " + (Number(data.pass_rate) * 100).toFixed(1) + "%",
+        " │ 通过率 " + formatPassRate(data.pass_rate),
         "success"
     );
-    finishLogView("finished");
+    finishLogView(BATCH_STATUS.FINISHED);
 }
 
 /**
@@ -947,7 +930,7 @@ function handleBatchFailed(data) {
     if (data.error_message) {
         appendLogBlock(data.error_message);
     }
-    finishLogView("failed");
+    finishLogView(BATCH_STATUS.FAILED);
 }
 
 /**
@@ -970,7 +953,7 @@ function finishLogView(phase) {
     }
     state.terminalReceived = true;
     setConnectionBadge(phase);
-    if (phase === "finished") {
+    if (phase === BATCH_STATUS.FINISHED) {
         els.logViewReportBtn.classList.remove("d-none");
     } else {
         // failed 批次无汇总行，详情接口必 404：入口保持隐藏

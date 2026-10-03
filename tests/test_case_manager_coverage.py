@@ -27,6 +27,11 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 from src.core.case_manager import MAX_PAGE_SIZE, CaseManager, CaseManagerError
 from src.db.db_session import DatabaseSession
+from src.db.models import DefectStatistic
+
+# 别名导入：模型类名以 Test 开头，直接 import 会被 pytest 的类名启发式
+# 当成测试类收集并抛 PytestCollectionWarning（验收要求 0 warning）
+from src.db.models import TestExecutionBatch as ExecutionBatchModel
 
 # 项目根目录（本文件位于 tests/ 下，向上一级为项目根）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -401,3 +406,114 @@ class TestUpdateBatchStatusMissingRow:
         ):
             result = CaseManager._update_batch_status("BATCH-NOT-EXIST", "finished")
         assert result is None
+
+
+# ===========================================================================
+# 5. 列表项附批次真实状态（Day44 收尾）
+# ===========================================================================
+@allure.feature("CaseManager列表状态字段")
+class TestListExecutionsStatusField:
+    """
+    list_executions_paged 每个 item 附 status 字段
+
+    回归点: 列表口径只查 defect_statistics，前端曾把状态列硬编码为
+    "已完成"。但 finish_execution（写汇总行）与 _update_batch_status
+    （更新批次行）两步非原子，前者成功后后者失败会留下"有汇总行但批次
+    行非终态"的孤儿批次，列表会显示错误状态。
+    """
+
+    @staticmethod
+    def _seed_batch(execution_id: str, status: str) -> None:
+        """写入一条批次元信息行（构造非终态孤儿批次用）"""
+        with DatabaseSession.session_scope() as session:
+            session.add(
+                ExecutionBatchModel(
+                    execution_id=execution_id,
+                    trigger="web",
+                    executor="unit-test",
+                    environment="dev",
+                    status=status,
+                    total_cases=2,
+                )
+            )
+
+    @staticmethod
+    def _seed_summary(execution_id: str) -> None:
+        """写入一条批次汇总行（列表数据源）"""
+        with DatabaseSession.session_scope() as session:
+            session.add(
+                DefectStatistic(
+                    execution_id=execution_id,
+                    total_cases=2,
+                    passed=1,
+                    failed=1,
+                    error=0,
+                    skipped=0,
+                    pass_rate=0.5,
+                )
+            )
+
+    @allure.story("正常批次：status 从批次元信息行取")
+    def test_status_taken_from_batch_row(self, temp_db):
+        self._seed_batch("RUN-STATUS-FINISHED", "finished")
+        self._seed_summary("RUN-STATUS-FINISHED")
+
+        result = CaseManager.list_executions_paged()
+
+        items = {item["execution_id"]: item for item in result["items"]}
+        assert "RUN-STATUS-FINISHED" in items
+        assert items["RUN-STATUS-FINISHED"]["status"] == "finished"
+
+    @allure.story("孤儿批次：汇总行 pending 时 status 不再谎报已完成")
+    def test_orphan_pending_batch_reports_real_status(self, temp_db):
+        """
+        核心断言: 两步非原子写入留下的孤儿批次，status 必须报真实值
+        """
+        self._seed_batch("RUN-STATUS-ORPHAN", "pending")
+        self._seed_summary("RUN-STATUS-ORPHAN")
+
+        result = CaseManager.list_executions_paged()
+
+        items = {item["execution_id"]: item for item in result["items"]}
+        assert items["RUN-STATUS-ORPHAN"]["status"] == "pending", (
+            "有汇总行但批次行仍 pending 的孤儿批次不得显示为 finished"
+        )
+
+    @allure.story("历史批次：有汇总行无批次行时兜底 finished")
+    def test_missing_batch_row_falls_back_to_finished(self, temp_db):
+        """Day24 建表前的历史批次没有批次元信息行，按既有不变量兜底"""
+        self._seed_summary("RUN-STATUS-LEGACY")
+
+        result = CaseManager.list_executions_paged()
+
+        items = {item["execution_id"]: item for item in result["items"]}
+        assert items["RUN-STATUS-LEGACY"]["status"] == "finished"
+
+    @allure.story("多批次混排时各自取自己的真实状态")
+    def test_mixed_batches_keep_independent_status(self, temp_db):
+        for execution_id, status in (
+            ("RUN-MIXED-A", "failed"),
+            ("RUN-MIXED-B", "running"),
+            ("RUN-MIXED-C", "finished"),
+        ):
+            self._seed_batch(execution_id, status)
+            self._seed_summary(execution_id)
+        self._seed_summary("RUN-MIXED-D")  # 无批次行
+
+        result = CaseManager.list_executions_paged()
+
+        items = {item["execution_id"]: item for item in result["items"]}
+        assert items["RUN-MIXED-A"]["status"] == "failed"
+        assert items["RUN-MIXED-B"]["status"] == "running"
+        assert items["RUN-MIXED-C"]["status"] == "finished"
+        assert items["RUN-MIXED-D"]["status"] == "finished"
+        assert result["total"] == 4
+
+    @allure.story("空列表：in_ 查询不执行且不报错")
+    def test_empty_list_skips_batch_query(self, temp_db):
+        """rows 为空时不能对空 IN 子句查询（各方言支持不一致）"""
+        result = CaseManager.list_executions_paged()
+
+        assert result["items"] == []
+        assert result["total"] == 0
+        assert result["total_pages"] == 0

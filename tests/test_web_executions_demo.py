@@ -196,10 +196,12 @@ class TestExecutionsQueryApi:
         assert len(page_data["items"]) == 1
 
         item = page_data["items"][0]
-        # 汇总字段完整性（序列化静态方法的全量字段）
+        # 汇总字段完整性（序列化静态方法的全量字段 + Day44 收尾新增的
+        # status：列表项附批次元信息行的真实状态，前端状态列据此渲染，
+        # 不再硬编码"已完成"——两步非原子写入会留下非终态孤儿批次）
         assert {
             "execution_id", "total_cases", "passed", "failed", "error",
-            "skipped", "pass_rate", "created_at",
+            "skipped", "pass_rate", "created_at", "status",
         } == set(item.keys()), "批次汇总应含完整字段"
         assert item["execution_id"] == execution_id
         assert item["total_cases"] == 3
@@ -207,6 +209,9 @@ class TestExecutionsQueryApi:
         assert item["failed"] == 1
         assert item["error"] == 0
         assert item["skipped"] == 1
+        assert item["status"] == "finished", (
+            "_create_finished_batch 造的批次行状态为 finished，列表项应原样透出"
+        )
         assert item["pass_rate"] == 0.3333, "通过率保留4位小数"
         # datetime已序列化为ISO字符串（不能断言等于datetime对象）
         assert isinstance(item["created_at"], str)

@@ -1342,12 +1342,21 @@ class CaseManager:
             created_at倒序（最新完成批次在前）+ execution_id倒序，
             双字段排序保证同秒完成的批次跨页次序稳定
 
+        状态字段:
+            每个 item 附 status（来自 test_execution_batches 的真实状态）。
+            两步非原子写入（先汇总行后批次行）失败时会留下"有汇总行但
+            批次行非终态"的孤儿批次，前端据此显示真实状态而非恒定
+            "已完成"；批次行缺失（Day24 建表前历史批次）时兜底
+            "finished"——有汇总行即视为已完成，是本接口的既有不变量
+
         参数:
             page (int): 页码，从1开始，默认1
             page_size (int): 每页条数，1到MAX_PAGE_SIZE，默认20
 
         返回:
-            dict: {"items": 当前页批次汇总列表(list[dict]),
+            dict: {"items": 当前页批次汇总列表(list[dict], 每项含
+                   execution_id/total_cases/passed/failed/error/skipped/
+                   pass_rate/created_at/status),
                    "total": 已完成批次总数,
                    "page": 当前页码,
                    "page_size": 每页条数,
@@ -1378,6 +1387,12 @@ class CaseManager:
                 },
             )
 
+        # 批次真实状态映射（Day44 收尾）: 列表口径虽然只查 defect_statistics
+        # （有汇总行即视为已完成），但核心层 finish_execution（写汇总行）与
+        # _update_batch_status（更新批次行）是**两步非原子**——前者成功后
+        # 后者失败会留下"有汇总行但批次行非终态"的孤儿批次。列表项附真实
+        # status，前端状态列不再硬编码"已完成"。
+        status_map: dict[str, str] = {}
         try:
             session = DatabaseSession.get_session()
             try:
@@ -1396,6 +1411,22 @@ class CaseManager:
                     .offset((page - 1) * page_size)
                     .all()
                 )
+
+                # 批量取本页批次的真实状态（一次 in_ 查询，不逐行查库）。
+                # 空列表不查：SQLAlchemy 对空 IN 子句的方言支持不一致
+                execution_ids = [row.execution_id for row in rows]
+                if execution_ids:
+                    batch_rows = (
+                        session.query(TestExecutionBatch)
+                        .filter(
+                            TestExecutionBatch.execution_id.in_(execution_ids)
+                        )
+                        .all()
+                    )
+                    status_map = {
+                        batch.execution_id: batch.status
+                        for batch in batch_rows
+                    }
             finally:
                 session.close()
         except SQLAlchemyError as exc:
@@ -1408,8 +1439,14 @@ class CaseManager:
         # 总页数: 整数运算实现向上取整（与list_cases_paged口径一致），
         # 0条时为0页
         total_pages = (total + page_size - 1) // page_size
+        # 批次行缺失时按"有汇总行即已完成"兜底（Day24 建表前的历史批次）
+        items = []
+        for row in rows:
+            item = cls._execution_summary_to_dict(row)
+            item["status"] = status_map.get(row.execution_id, "finished")
+            items.append(item)
         result = {
-            "items": [cls._execution_summary_to_dict(row) for row in rows],
+            "items": items,
             "total": total,
             "page": page,
             "page_size": page_size,
