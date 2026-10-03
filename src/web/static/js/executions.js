@@ -10,12 +10,28 @@
         提交互斥锁防重复；
      4. SSE 实时日志：EventSource 订阅 /executions/<id>/events，
         batch_start/case_finished/batch_finished/batch_failed 逐帧渲染，
-        心跳注释帧浏览器自动忽略，终态帧后主动 close() 并给报告入口。
+        心跳注释帧浏览器自动忽略，终态帧后主动 close() 并给报告入口；
+        终态前的单帧快照（载荷带 status）渲染后主动停订阅，避免
+        EventSource 约 3s 无限重连导致日志区无界增长。
+   健壮性：SSE 帧载荷统一经 parseSsePayload 兜底（解析失败只跳过该帧）；
+        列表/详情/日志三处异步链路各带互斥锁或请求序号（慢响应不得覆盖
+        新请求）；列表在途期间改页大小登记 pendingPageSize 由锁释放补刷。
    范式：与 cases.js（Day42/v5 收敛后）一致——const state 单页状态、
         window.api 统一请求、escapeHtml 单一来源（main.js 挂载）、
         锁防并发、Bootstrap5 模态框、事件委托。
    XSS：日志帧与表格全部走 textContent/escapeHtml，error_message 不例外。
    ========================================================================== */
+
+/* ==========================================================================
+   常量
+   ========================================================================== */
+
+/**
+ * 批次状态/详情接口 404 的后端业务文案（executions.py 两处 NotFoundError
+ * 的固定 message）。用于把“历史批次无批次行”与 500/网络类失败区分开：
+ * 精确匹配而非子串包含，理由见 openLogView 内的注释。
+ */
+const EXECUTION_NOT_FOUND_MESSAGE = "执行批次不存在";
 
 /* ==========================================================================
    页面级状态
@@ -31,6 +47,9 @@ const state = {
     currentLogId: null,   // 日志模态框当前订阅的批次号
     eventSource: null,    // 当前 EventSource 实例（同时只允许一个订阅）
     terminalReceived: false, // 本订阅是否已收到终态帧（防重复 close/渲染）
+    pendingPageSize: null, // 列表在途期间被改动的页大小，锁释放后自动补刷
+    detailRequestSeq: 0,  // 详情请求序号，防慢响应覆盖后发起的响应
+    logRequestSeq: 0,     // 日志探活请求序号，语义同上
 };
 
 /* ==========================================================================
@@ -150,7 +169,7 @@ function resultBadge(result) {
 /**
  * 秒级耗时转毫秒展示文本
  *
- * 后端 duration 字段单位为秒（浮点，如 0.5），页面按话术展示 ms。
+ * 后端 duration 字段单位为秒（浮点，如 0.5），页面按毫秒展示。
  *
  * @param {number|null|undefined} seconds 秒
  * @returns {string} 毫秒文本（如 "500 ms"）；空值显示 "-"
@@ -165,6 +184,26 @@ function formatDurationMs(seconds) {
     }
     // 毫秒取整（模拟执行器粒度为 10ms 级，小数毫秒无业务意义）
     return Math.round(ms) + " ms";
+}
+
+/**
+ * 逗号分隔的筛选值拆分为数组（触发表单 priority/tags 共用）
+ *
+ * 为什么必须拆：后端 _normalize_values 对 str 入参**不按逗号拆分**，
+ * 整个串被当作单个维度值（"P0,P1" → ["P0,P1"]），再进 priority 的
+ * in_ 过滤必然命中 0 条 → 触发接口 400「无符合条件的用例可执行」。
+ * 后端多值契约是 str | list[str]，多值场景只能下发数组。
+ *
+ * @param {string} rawValue 原始文本（可含中英文逗号与首尾空白）
+ * @returns {Array<string>} 逐段 trim 并剔除空项后的筛选值数组
+ */
+function splitFilterValues(rawValue) {
+    return String(rawValue)
+        .split(/[,，]/)
+        .map(function (item) {
+            return item.trim();
+        })
+        .filter(Boolean);
 }
 
 /**
@@ -453,10 +492,24 @@ async function loadExecutions() {
         // 错误态：页内提示条 + 空态占位，不白屏
         setListError(true, "执行批次加载失败：" + error.message);
         renderEmptyRow();
+        // 错误态清零分页状态：否则“共 N 个已完成批次”仍是上一次成功的
+        // 数字、分页按钮仍可点击，与空态文案自相矛盾
+        state.total = 0;
+        state.totalPages = 0;
         renderPagination();
     } finally {
         state.listLoading = false;
         renderPagination();
+        // 锁释放后补刷在途期间登记的页大小变更（cases.js pendingRefresh
+        // 同款机制）：锁在途时 loadExecutions 会直接 return，若不补刷，
+        // 下拉框已显示新页大小而表格仍是旧数据，直到下次翻页才生效
+        if (state.pendingPageSize !== null) {
+            const pendingSize = state.pendingPageSize;
+            state.pendingPageSize = null;
+            state.pageSize = pendingSize;
+            state.currentPage = 1;
+            loadExecutions();
+        }
     }
 }
 
@@ -554,11 +607,20 @@ async function openDetailModal(executionId) {
     state.detailExecutionId = executionId;
     getDetailModal().show();
 
+    // 请求序号：用户在 await 期间点了另一个批次时，先发的慢响应不得
+    // 覆盖后发批次的渲染（否则看到的内容与最后点击的行不一致）
+    const reqSeq = ++state.detailRequestSeq;
     try {
         const detail = await getExecutionDetail(executionId);
+        if (reqSeq !== state.detailRequestSeq) {
+            return; // 过期响应，直接丢弃（不渲染、不关弹窗）
+        }
         renderSummary(detail.summary);
         renderCaseItems(detail.items);
     } catch (error) {
+        if (reqSeq !== state.detailRequestSeq) {
+            return; // 过期响应的错误同样不打扰当前视图
+        }
         window.showToast("批次详情加载失败：" + error.message, "danger");
         getDetailModal().hide();
     }
@@ -602,8 +664,10 @@ function openTriggerModal() {
 /**
  * 收集触发表单为请求体（空文本字段不下发=全量回归口径）
  *
- * executor 选“默认”时不下发，由后端工厂按 TM_EXECUTOR 环境变量裁定；
- * priority/tags 文本原样透传（后端支持逗号分隔字符串）。
+ * executor 选“默认”时不下发，由后端工厂按 TM_EXECUTOR 环境变量裁定。
+ * priority/tags 按逗号拆分后**下发数组**（后端 _normalize_values 对
+ * str 入参不拆逗号，整串当单值，多值下发字符串必然命中 0 条转 400）。
+ * case_type 无“全部”选项，恒定下发（后端缺省亦为 api，见 6.34 决策）。
  *
  * @returns {object} 仅含非空字段的请求体
  */
@@ -620,11 +684,18 @@ function collectTriggerData() {
     if (moduleVal) {
         payload.module = moduleVal;
     }
+    // priority/tags 逗号分隔多值：逐段 trim 后剔除空项，拆分为数组下发
     if (priorityVal) {
-        payload.priority = priorityVal;
+        const priorityList = splitFilterValues(priorityVal);
+        if (priorityList.length) {
+            payload.priority = priorityList;
+        }
     }
     if (tagsVal) {
-        payload.tags = tagsVal;
+        const tagsList = splitFilterValues(tagsVal);
+        if (tagsList.length) {
+            payload.tags = tagsList;
+        }
     }
     if (executorVal) {
         payload.executor = executorVal;
@@ -693,7 +764,8 @@ function getLogModal() {
  * 切换连接状态徽章文案/颜色
  *
  * @param {string} phase connecting（连接中）/running（接收事件）/
- *                     reconnecting（断线重连）/finished（已完成）/failed（失败）
+ *                     reconnecting（断线重连）/finished（已完成）/failed（失败）/
+ *                     snapshot（终态前快照，已主动停止订阅）
  * @returns {void}
  */
 function setConnectionBadge(phase) {
@@ -703,6 +775,7 @@ function setConnectionBadge(phase) {
         reconnecting: { cls: "text-bg-warning", text: "重连中" },
         finished: { cls: "text-bg-success", text: "已完成" },
         failed: { cls: "text-bg-danger", text: "失败" },
+        snapshot: { cls: "text-bg-secondary", text: "快照·已停订阅" },
     };
     const conf = map[phase] || map.connecting;
     els.logConnectionBadge.className = "badge ms-1 " + conf.cls;
@@ -753,6 +826,34 @@ function appendLogBlock(text) {
 }
 
 /**
+ * 解析 SSE 事件帧的 JSON 载荷
+ *
+ * 为什么需要这层兜底: 四个事件回调直接 JSON.parse(event.data) 时，
+ * 任一帧载荷异常（代理插入的错误页内容、服务端序列化异常、跨版本字段
+ * 变更）都会在 DOM 事件回调里抛未捕获异常——帧被静默丢弃、连接保持、
+ * 页面无任何提示，排查时几乎无迹可循。解析失败只跳过该帧并记一行，
+ * 流的其余部分继续渲染。
+ *
+ * @param {MessageEvent} event SSE 消息事件
+ * @returns {object|null} 解析后的载荷对象；解析失败或非对象返回 null
+ */
+function parseSsePayload(event) {
+    let parsed;
+    try {
+        parsed = JSON.parse(event.data);
+    } catch (parseError) {
+        appendLogLine("事件帧解析失败，已跳过该帧：" + parseError.message, "muted");
+        return null;
+    }
+    // 非对象载荷（数字/字符串/null）同样无法驱动 handleXxx，跳过
+    if (parsed === null || typeof parsed !== "object") {
+        appendLogLine("事件帧载荷不是对象，已跳过该帧。", "muted");
+        return null;
+    }
+    return parsed;
+}
+
+/**
  * batch_start 帧处理：批次开始 + 用例总数（+执行器类型，可能为 null）
  *
  * @param {object} data {total_cases, executor_kind|status}
@@ -769,6 +870,23 @@ function handleBatchStart(data) {
     // pending 快照帧（无 executor_kind 而带 status=pending）只提示不推进终态
     if (data.status === "pending") {
         appendLogLine("批次排队等待执行中，当前为状态快照。", "muted");
+    }
+    // 快照帧收束（终态前的单帧直发必须主动关流）:
+    // 后端对“通道不存在且状态非终态”的批次只直发一帧 batch_start
+    // （载荷含 status）随即结束响应流。该帧无 id 行、非终态，若不主动
+    // 关闭，EventSource 会按规范约 3s 自动重连，每轮从头重发该帧，
+    // 日志区与请求量都无界增长。识别条件取 data.status 存在且非终态——
+    // live 实时流（{total_cases, executor_kind}）与 DB 重建回放
+    // （{total_cases, executor_kind: null}）的 batch_start 都不带 status，
+    // 不会被误判；只有单帧快照分支带 status。
+    if (data.status && data.status !== "finished" && data.status !== "failed") {
+        appendLogLine(
+            "批次当前为 " + data.status + "，尚未产生终态事件；已停止订阅，" +
+            "请在批次进入终态后重新打开本窗口查看完整日志。",
+            "muted"
+        );
+        closeEventSource();
+        setConnectionBadge("snapshot");
     }
 }
 
@@ -835,6 +953,13 @@ function handleBatchFailed(data) {
 /**
  * 终态收束：置徽章/报告按钮并关闭 EventSource（幂等，重复帧不重复处理）
  *
+ * 报告入口按终态类型区分：仅 finished 批次有详情可看。批次异常失败
+ * 走核心层 except 分支（case_manager.py:1913 起），该路径只置 failed
+ * 并发 batch_failed 事件，**不写 defect_statistics 汇总行**，而详情
+ * 接口以汇总行为存在与否判 404——若对 failed 批次仍亮出报告入口，
+ * 用户点击后必然经历“弹窗闪现→404→hide→红字 toast”。failed 的失败
+ * 原因（error_message）已在日志区由 handleBatchFailed 完整渲染。
+ *
  * @param {string} phase finished/failed
  * @returns {void}
  */
@@ -845,7 +970,12 @@ function finishLogView(phase) {
     }
     state.terminalReceived = true;
     setConnectionBadge(phase);
-    els.logViewReportBtn.classList.remove("d-none");
+    if (phase === "finished") {
+        els.logViewReportBtn.classList.remove("d-none");
+    } else {
+        // failed 批次无汇总行，详情接口必 404：入口保持隐藏
+        els.logViewReportBtn.classList.add("d-none");
+    }
     // 终态后主动关闭：服务端终态帧后亦关闭流，双保险不残留连接
     closeEventSource();
 }
@@ -869,21 +999,45 @@ function closeEventSource() {
  * 批次表建立前的历史批次（仅有完成汇总）会返回 404；EventSource
  * 对 404 会按规范无限自动重连，必须在建流前用 status 接口拦截，
  * 给出友好提示而不是让连接空转。已终态的新批次 status=finished
- * 探活通过后由后端 DB 重建完整事件序列快照直发。
+ * 探活通过后由后端 DB 重建完整事件序列快照直发。探活响应带单调序号，
+ * 用户在探活在途期间改点其他批次时，过期结果直接丢弃（防双流串批次）。
  *
  * @param {string} executionId 批次号
  * @returns {Promise<void>} 探活失败仅 toast 提示，不打开日志弹窗
  */
 async function openLogView(executionId) {
+    // 探活序号：用户在探活在途期间又点了另一个批次时，后发序号更大，
+    // 先发的探活结果必须丢弃（否则会建两条流或串批次）
+    const probeSeq = ++state.logRequestSeq;
     // 探活：无批次元信息行（历史批次/不存在）时拒绝建流
     try {
         await getExecutionStatus(executionId);
     } catch (error) {
-        window.showToast(
-            "该批次无实时事件记录（历史批次不支持日志回放）：" + error.message,
-            "danger"
-        );
+        if (probeSeq !== state.logRequestSeq) {
+            return; // 已被更新的探活取代，丢弃过期结果
+        }
+        // 404 与其他失败分流文案: 只在“批次表确无该批次行”时才断言
+        // 历史批次不支持回放。api.js 抛出的 Error 不带 HTTP 状态码
+        // （该文件今日不在改动范围），故按后端 404 的完整业务文案精确
+        // 匹配——刻意不用“包含不存在”的子串判定：500 类数据库错误
+        // （如“表 test_execution_batches 不存在”）也含该子串，子串
+        // 匹配会把真实故障误报成历史批次，正是后端路由层已明确规避的
+        // 反模式（executions.py 纯类型判定，无子串兜底）。
+        if (error.message === EXECUTION_NOT_FOUND_MESSAGE) {
+            window.showToast(
+                "该批次为历史批次，无实时事件记录，不支持日志回放。",
+                "warning"
+            );
+        } else {
+            window.showToast(
+                "无法获取批次状态，日志暂不可用：" + error.message,
+                "danger"
+            );
+        }
         return;
+    }
+    if (probeSeq !== state.logRequestSeq) {
+        return; // 探活期间用户已改点其他批次，丢弃过期结果
     }
 
     // 同时只允许一个订阅：先收掉旧连接，防多批次日志串流
@@ -906,16 +1060,28 @@ async function openLogView(executionId) {
     state.eventSource = es;
 
     es.addEventListener("batch_start", function (event) {
-        handleBatchStart(JSON.parse(event.data));
+        const data = parseSsePayload(event);
+        if (data) {
+            handleBatchStart(data);
+        }
     });
     es.addEventListener("case_finished", function (event) {
-        handleCaseFinished(JSON.parse(event.data));
+        const data = parseSsePayload(event);
+        if (data) {
+            handleCaseFinished(data);
+        }
     });
     es.addEventListener("batch_finished", function (event) {
-        handleBatchFinished(JSON.parse(event.data));
+        const data = parseSsePayload(event);
+        if (data) {
+            handleBatchFinished(data);
+        }
     });
     es.addEventListener("batch_failed", function (event) {
-        handleBatchFailed(JSON.parse(event.data));
+        const data = parseSsePayload(event);
+        if (data) {
+            handleBatchFailed(data);
+        }
     });
     es.onerror = function () {
         // readyState=CONNECTING：浏览器正在自动重连，仅提示不手动干预；
@@ -970,8 +1136,15 @@ function initExecutionsPage() {
     });
 
     // --- 每页条数变化：重置第 1 页 ---
-    els.pageSizeSelect.addEventListener("change", function () {
-        state.pageSize = parseInt(els.pageSizeSelect.value, 10) || 20;
+    els.pageSizeSelect.addEventListener("change", function (event) {
+        const newSize = parseInt(event.target.value, 10) || 20;
+        if (state.listLoading) {
+            // 列表在途：登记待补刷而非直接 return，否则本次切换被静默
+            // 丢弃（下拉显示新值、表格仍是旧数据）；锁释放时自动补刷
+            state.pendingPageSize = newSize;
+            return;
+        }
+        state.pageSize = newSize;
         state.currentPage = 1;
         loadExecutions();
     });
