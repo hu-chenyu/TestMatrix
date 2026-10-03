@@ -113,10 +113,19 @@ let deleteModal = null;
  * 加载序依赖: cases.html 经 base.html 继承，main.js 先于 cases.js 加载，
  * 故此处读取 window.escapeHtml 时它必然已就绪。
  *
+ * 为什么本地名是 escHtml 而不叫 escapeHtml（v5 遗留 bug 修复）:
+ * main.js 的 escapeHtml 是**顶层 function 声明**，在浏览器里会绑定成
+ * 全局对象的**不可配置**属性；本文件若再用 const/function 同名声明，
+ * 按 ECMAScript GlobalDeclarationInstantiation 规则，词法声明遇到同名
+ * 不可配置属性直接抛 SyntaxError——**整个 cases.js 不实例化**，页面
+ * 停在初始 HTML（列表永远"加载中"）且控制台只有一条语法错误。
+ * 与 executions.js 同样处理：换异名别名引用同一函数。症状只能靠浏览器
+ * 控制台发现，ruff/pytest 都管不到 JS。
+ *
  * @param {*} value 任意输入值（非字符串按空串处理）
  * @returns {string} 转义后的安全字符串（null/undefined 返回空串）
  */
-const escapeHtml = window.escapeHtml;
+const escHtml = window.escapeHtml;
 
 /**
  * 生成优先级 badge 的 HTML（枚举固定值，颜色不走转义）
@@ -133,7 +142,7 @@ function priorityBadge(priority) {
         P3: "text-bg-secondary",
     };
     const cls = colorMap[priority] || "text-bg-secondary";
-    return '<span class="badge ' + cls + '">' + escapeHtml(priority) + "</span>";
+    return '<span class="badge ' + cls + '">' + escHtml(priority) + "</span>";
 }
 
 /**
@@ -145,7 +154,7 @@ function priorityBadge(priority) {
 function statusBadge(status) {
     // active 绿（启用）/ disabled 灰（停用），与验收 4.23 一致
     const cls = status === "active" ? "text-bg-success" : "text-bg-secondary";
-    return '<span class="badge ' + cls + '">' + escapeHtml(status) + "</span>";
+    return '<span class="badge ' + cls + '">' + escHtml(status) + "</span>";
 }
 
 /**
@@ -228,16 +237,16 @@ function renderTableRows(items) {
     // data-case-id 同样转义，防止编号中的引号截断属性
     els.tableBody.innerHTML = items
         .map(function (item) {
-            const safeId = escapeHtml(item.case_id);
+            const safeId = escHtml(item.case_id);
             return (
                 "<tr>" +
                 '<td class="fw-semibold text-nowrap">' + safeId + "</td>" +
-                "<td>" + escapeHtml(item.name) + "</td>" +
-                "<td>" + escapeHtml(item.module) + "</td>" +
+                "<td>" + escHtml(item.name) + "</td>" +
+                "<td>" + escHtml(item.module) + "</td>" +
                 "<td>" + priorityBadge(item.priority) + "</td>" +
-                "<td>" + escapeHtml(item.case_type) + "</td>" +
+                "<td>" + escHtml(item.case_type) + "</td>" +
                 "<td>" + statusBadge(item.status) + "</td>" +
-                "<td>" + escapeHtml(item.creator) + "</td>" +
+                "<td>" + escHtml(item.creator) + "</td>" +
                 '<td class="text-nowrap">' + window.formatDate(item.created_at) + "</td>" +
                 '<td class="text-end text-nowrap">' +
                 '<button type="button" class="btn btn-outline-primary btn-sm me-1" ' +
@@ -384,8 +393,8 @@ function renderModuleOptions(items) {
         '<option value="">全部模块</option>' +
         state.knownModules
             .map(function (name) {
-                return '<option value="' + escapeHtml(name) + '">' +
-                    escapeHtml(name) + "</option>";
+                return '<option value="' + escHtml(name) + '">' +
+                    escHtml(name) + "</option>";
             })
             .join("");
     // 恢复选中；若已选模块不在累积列表中（如重置瞬间），回落到“全部”
@@ -1004,8 +1013,9 @@ window.casesPage = {
     openEditModal: openEditModal,
     confirmDelete: confirmDelete,
     importCases: importCases,
-    // 保留导出以不改变本模块的公开面：此时 escapeHtml 已指向
-    // window.escapeHtml，该赋值是幂等的
-    escapeHtml: escapeHtml,
+    // 保留导出以不改变本模块的公开面：本地名改为 escHtml 后，导出键
+    // 仍是 escapeHtml（6.33 决策——收敛的是实现唯一性，不是模块 API 面），
+    // 其值指向 window.escapeHtml，该赋值是幂等的
+    escapeHtml: escHtml,
     buildPageSequence: buildPageSequence,
 };

@@ -446,11 +446,33 @@ class TestEscapeHtmlConvergence:
         )
 
     def test_cases_js_binds_to_window_implementation(self) -> None:
-        """cases.js 必须显式绑定 window.escapeHtml（正向锁定修复形态）"""
+        """
+        cases.js 必须显式绑定 window.escapeHtml，且**不得同名声明**（正向锁定修复形态）
+
+        回归点（v5 遗留 bug）: 原断言只要求出现
+        `const escapeHtml = window.escapeHtml;`。但 main.js 的 escapeHtml
+        是顶层 function 声明，在浏览器里绑定成**不可配置**的全局对象
+        属性；cases.js 再用同名 const 声明，按
+        GlobalDeclarationInstantiation 规则直接抛 SyntaxError，
+        **整个 cases.js 不实例化**——用例页完全失效（列表永远"加载中"）。
+        该缺陷此前被 v5 自身的"无本地实现"断言漏过（它只查 function
+        形式，查不出 const 形式）。
+
+        现在正向锁定两件事：①绑定存在且本地名是 escHtml；
+        ②顶层不再有 escapeHtml 的词法声明（SyntaxError 触发条件）。
+        """
         cases_js = (JS_DIR / "cases.js").read_text(encoding="utf-8")
 
-        assert "const escapeHtml = window.escapeHtml;" in cases_js, (
-            "cases.js 应以 const escapeHtml = window.escapeHtml 复用唯一实现"
+        assert "const escHtml = window.escapeHtml;" in cases_js, (
+            "cases.js 应以 const escHtml = window.escapeHtml 复用唯一实现"
+        )
+        # 阴性对照：同名词法声明会与 main.js 的全局 function 冲突，
+        # 导致整脚本 SyntaxError。必须钉住这个名字不再出现。
+        assert re.search(
+            r"^(const|let|class|var|function)\s+escapeHtml\b", cases_js, re.M
+        ) is None, (
+            "cases.js 顶层不得再声明 escapeHtml（与 main.js 全局 function "
+            "同名会触发 SyntaxError，整个脚本不执行）"
         )
 
     def test_main_js_remains_the_single_source(self) -> None:
@@ -499,9 +521,17 @@ class TestEscapeHtmlConvergence:
         收敛后 escapeHtml 仍挂在 window.casesPage 上，但此时它已指向
         window.escapeHtml，该赋值是幂等的。删掉它不改变本模块行为，
         却会静默改变 window.casesPage 的公开面。
+
+        键名口径（v5 遗留修复）: 本地常量改名 escHtml 后，导出的**键**
+        仍是 escapeHtml（6.33 决策——收敛的是实现唯一性，不是模块 API
+        面），只有值改指 escHtml。键名一并改掉会破坏既有控制台联调代码。
         """
         cases_js = (JS_DIR / "cases.js").read_text(encoding="utf-8")
 
-        assert re.search(r"escapeHtml:\s*escapeHtml\s*,", cases_js) is not None, (
-            "window.casesPage 仍应导出 escapeHtml（此时为幂等赋值）"
+        assert re.search(r"escapeHtml:\s*escHtml\s*,", cases_js) is not None, (
+            "window.casesPage 仍应导出 escapeHtml 键（值为幂等的 escHtml 别名）"
+        )
+        # 公开面防护：键名不得被顺手改掉（值可以变，键不能变）
+        assert re.search(r"\bescapeHtml\s*:", cases_js) is not None, (
+            "window.casesPage 的 escapeHtml 导出键名必须保留"
         )
