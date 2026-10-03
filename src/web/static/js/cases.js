@@ -148,14 +148,11 @@ function priorityBadge(priority) {
 /**
  * 生成状态 badge 的 HTML
  *
- * @param {string} status active/disabled（其他值降级为次级灰 badge）
- * @returns {string} 带 Bootstrap badge 类的 HTML 字符串
+ * 实现已下沉到 main.js 的 window.statusBadge（Day44 收尾，消除两页重复
+ * 实现）。此处仅做异名引用，不再持有实现——与 escHtml 同一模式，且避开
+ * 与 main.js 全局同名的 SyntaxError 风险。
  */
-function statusBadge(status) {
-    // active 绿（启用）/ disabled 灰（停用），与验收 4.23 一致
-    const cls = status === "active" ? "text-bg-success" : "text-bg-secondary";
-    return '<span class="badge ' + cls + '">' + escHtml(status) + "</span>";
-}
+const statusBadge = window.statusBadge;
 
 /**
  * 根据 state.filters + 分页参数构造查询字符串
@@ -263,44 +260,10 @@ function renderTableRows(items) {
 /**
  * 计算分页页码按钮序列
  *
- * 规则（验收 1.4）：总页数 ≤7 全部显示；>7 时显示首页、末页、
- * 当前页前后各 1 页，其余位置用省略号占位。
- *
- * @param {number} current 当前页
- * @param {number} totalPages 总页数
- * @returns {Array<number|string>} 页码序列，省略号位为 "..."
+ * 实现已下沉到 main.js 的 window.buildPageSequence（Day44 收尾，与
+ * executions.js 原本逐字重复的两份实现合并为一处）。此处仅做异名引用。
  */
-function buildPageSequence(current, totalPages) {
-    if (totalPages <= 7) {
-        // 1..N 全部显示
-        const all = [];
-        for (let i = 1; i <= totalPages; i++) {
-            all.push(i);
-        }
-        return all;
-    }
-    // 从含首页、末页、当前页±1 的集合出发，排序后在缺口处插省略号
-    const pages = new Set([1, totalPages, current - 1, current, current + 1]);
-    const valid = [];
-    pages.forEach(function (p) {
-        if (p >= 1 && p <= totalPages) {
-            valid.push(p);
-        }
-    });
-    valid.sort(function (a, b) {
-        return a - b;
-    });
-    const sequence = [];
-    let prev = 0;
-    valid.forEach(function (p) {
-        if (p - prev > 1) {
-            sequence.push("..."); // 相邻页码不连续 → 省略号
-        }
-        sequence.push(p);
-        prev = p;
-    });
-    return sequence;
-}
+const buildPageSequence = window.buildPageSequence;
 
 /**
  * 渲染分页控件（上一页/页码/下一页）+ 总条数

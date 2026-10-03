@@ -168,7 +168,7 @@
     </div>
 </div>
 
-<!-- ====== 4. 执行触发模态框：全部字段可选（无值即全量回归） ====== -->
+<!-- ====== 4. 执行触发模态框：筛选项留空=不按该维度过滤 ====== -->
 <div class="modal fade" id="triggerModal" tabindex="-1"
      aria-labelledby="triggerModalTitle" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered modal-lg">
@@ -181,7 +181,8 @@
             <form id="triggerForm" novalidate>
                 <div class="modal-body">
                     <div class="row g-3">
-                        <!-- 筛选项留空即不参与过滤（全量回归） -->
+                        <!-- 筛选项留空即不按该维度过滤（注意 case_type 恒定下发，
+                             单次触发只覆盖一种用例类型，非"全量回归"） -->
                         <div class="col-md-6">
                             <label for="tModule" class="form-label">模块</label>
                             <input type="text" class="form-control form-control-sm"
@@ -265,7 +266,7 @@
     <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">
+                <h5 class="modal-title" id="logModalTitle">
                     实时日志
                     <span class="badge text-bg-secondary ms-1"
                           id="logConnectionBadge">连接中</span>
@@ -275,11 +276,16 @@
             </div>
             <div class="modal-body">
                 <div class="small text-muted mb-2" id="logExecutionMeta"></div>
-                <!-- 等宽字体日志区：pre 保留换行，固定高度纵向滚动，新帧自动到底 -->
-                <pre id="logContainer"
-                     class="bg-light border rounded p-2 mb-0 small"
+                <!-- 日志区：div 容器 + role=log/aria-live 播报流式追加。
+                     原用 <pre> 承载 JS 追加的 <div> 行属**无效嵌套**——pre 的
+                     HTML 内容模型只允许 phrasing content，div 是流内容。
+                     改 div 后用 .font-monospace 保留等宽呈现、white-space:
+                     pre-wrap 保留换行，固定高度纵向滚动，新帧自动到底 -->
+                <div id="logContainer"
+                     class="bg-light border rounded p-2 mb-0 small font-monospace"
+                     role="log" aria-live="polite" aria-atomic="false"
                      style="height:46vh; overflow-y:auto; white-space:
-                            pre-wrap; word-break:break-all;"></pre>
+                            pre-wrap; word-break:break-all;"></div>
             </div>
             <div class="modal-footer">
                 <!-- 终态后出现：关闭日志并打开该批次完整详情 -->

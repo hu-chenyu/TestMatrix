@@ -157,3 +157,94 @@ document.addEventListener("DOMContentLoaded", function () {
 window.formatDate = formatDate;
 window.showToast = showToast;
 window.escapeHtml = escapeHtml;
+
+// ===========================================================================
+// 跨页面共享的纯展示工具（Day44 收尾下沉）
+// ===========================================================================
+// 为什么用 window.xxx = function(){} 而不是顶层 function xxx(){}：
+// 顶层 function 声明会创建**不可配置**的全局对象属性，页面脚本再用同名
+// const 声明会触发 GlobalDeclarationInstantiation 的 SyntaxError，整个
+// 页面脚本不执行（cases.js 的 escapeHtml 事故即此因，6.33/7.36 坑 1）。
+// 赋值形式创建的是可配置属性，页面脚本 `const xxx = window.xxx` 安全。
+// 页面脚本一律用异名 const 引用，不再各自持有实现（6.33：收敛的是实现
+// 唯一性，不是模块 API 面）。
+
+/**
+ * 状态徽章 HTML（用例启停状态 + 批次执行状态共用）
+ *
+ * 两个域的状态值都在下表里，用例页的 active/disabled 原样显示英文
+ * （保持 Day42 既有呈现），批次页的 finished/failed 等显示中文。
+ * 未知值降级为灰色徽章并原样显示入参。
+ *
+ * @param {string} status active/disabled/finished/failed/running/pending
+ * @returns {string} Bootstrap badge HTML 片段
+ */
+window.statusBadge = function (status) {
+    const styleMap = {
+        // 用例启停域（cases.js）：active 绿 / disabled 灰
+        active: { cls: "text-bg-success", text: "active" },
+        disabled: { cls: "text-bg-secondary", text: "disabled" },
+        // 批次执行域（executions.js）：完成绿 / 失败红 / 执行中蓝 / 等待中黄
+        finished: { cls: "text-bg-success", text: "已完成" },
+        failed: { cls: "text-bg-danger", text: "失败" },
+        running: { cls: "text-bg-primary", text: "执行中" },
+        pending: { cls: "text-bg-warning", text: "等待中" },
+        // 单用例执行结果域中与状态同值的 skipped
+        skipped: { cls: "text-bg-secondary", text: "跳过" },
+    };
+    // 判自有属性而非直接查表：直接 map[status] 会命中 Object.prototype 上的
+    // 键（constructor/toString 等）并把函数对象拼进 class 属性
+    const conf = Object.prototype.hasOwnProperty.call(styleMap, status)
+        ? styleMap[status]
+        : null;
+    const cls = conf ? conf.cls : "text-bg-secondary";
+    const text = conf ? conf.text : status || "未知";
+    return '<span class="badge ' + cls + '">' + escapeHtml(text) + "</span>";
+};
+
+/**
+ * 分页序列"全部显示"的阈值（总页数 ≤ 该值时不插省略号）
+ */
+const PAGE_SEQUENCE_FULL_THRESHOLD = 7;
+
+/**
+ * 计算分页页码序列（cases.js / executions.js 共用同一实现）
+ *
+ * 规则（验收 1.4）：总页数 ≤7 全部显示；>7 时显示首页、末页、
+ * 当前页前后各 1 页，其余位置用省略号占位。
+ *
+ * @param {number} current 当前页
+ * @param {number} totalPages 总页数
+ * @returns {Array<number|string>} 页码序列，省略号位为 "..."
+ */
+window.buildPageSequence = function (current, totalPages) {
+    if (totalPages <= PAGE_SEQUENCE_FULL_THRESHOLD) {
+        // 1..N 全部显示
+        const all = [];
+        for (let i = 1; i <= totalPages; i++) {
+            all.push(i);
+        }
+        return all;
+    }
+    // 从含首页、末页、当前页±1 的集合出发，排序后在缺口处插省略号
+    const pages = new Set([1, totalPages, current - 1, current, current + 1]);
+    const valid = [];
+    pages.forEach(function (p) {
+        if (p >= 1 && p <= totalPages) {
+            valid.push(p);
+        }
+    });
+    valid.sort(function (a, b) {
+        return a - b;
+    });
+    const sequence = [];
+    let prev = 0;
+    valid.forEach(function (p) {
+        if (p - prev > 1) {
+            sequence.push("..."); // 相邻页码不连续 → 省略号
+        }
+        sequence.push(p);
+        prev = p;
+    });
+    return sequence;
+};
