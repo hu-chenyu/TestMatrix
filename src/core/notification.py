@@ -41,6 +41,7 @@ import requests
 
 from src.common.env_manager import env_manager
 from src.common.logger import LogManager
+from src.common.time_utils import to_utc_iso
 
 if TYPE_CHECKING:
     # 仅用于类型注解：StatisticsResult/FailedCaseDetail 由 report_analyzer 产出。
@@ -2072,9 +2073,7 @@ class NotificationDeadLetterRepository:
             "fail_reason": record.fail_reason,
             "attempts": record.attempts,
             "status": record.status,
-            "created_at": record.created_at.isoformat()
-            if record.created_at
-            else "",
+            "created_at": to_utc_iso(record.created_at) or "",
         }
 
 
@@ -2201,7 +2200,5 @@ class NotificationHistoryRepository:
             "subject": record.subject,
             "attempts": record.attempts,
             "error_message": record.error_message,
-            "created_at": record.created_at.isoformat()
-            if record.created_at
-            else "",
+            "created_at": to_utc_iso(record.created_at) or "",
         }

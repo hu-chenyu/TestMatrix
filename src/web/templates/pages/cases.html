@@ -25,7 +25,11 @@
     </div>
 </div>
 
-<!-- ====== 2. 筛选栏：四维下拉 + 关键字，任一变化重置页码并重查 ====== -->
+<!-- ====== 2. 筛选栏：四维下拉 + 关键字，任一变化重置页码并重查 =====
+     列宽口径（lg 断点 2×6=12 刚好占满一行）: 类型列原为 col-lg-1，
+     “全部类型”4 个中文字放不下会被右侧状态列压住；关键字原为 col-lg-3
+     过宽。统一为每列 col-sm-6 col-lg-2：lg 以上六列等宽一行排开，
+     lg 以下每列占半行自动换行（模块+优先级 / 类型+状态 / 关键字+按钮） -->
 <div class="card mb-3">
     <div class="card-body">
         <div class="row g-2 align-items-end">
@@ -47,8 +51,8 @@
                     <option value="P3">P3</option>
                 </select>
             </div>
-            <!-- 类型：固定枚举 api/chip -->
-            <div class="col-sm-6 col-lg-1">
+            <!-- 类型：固定枚举 api/chip（col-lg-2 避免"全部类型"被相邻列压住） -->
+            <div class="col-sm-6 col-lg-2">
                 <label for="filterType" class="form-label small mb-1">类型</label>
                 <select id="filterType" class="form-select form-select-sm">
                     <option value="">全部类型</option>
@@ -66,12 +70,12 @@
                 </select>
             </div>
             <!-- 关键字：回车或点“搜索”才查询，避免逐键请求 -->
-            <div class="col-lg-3">
+            <div class="col-sm-6 col-lg-2">
                 <label for="filterKeyword" class="form-label small mb-1">关键字</label>
                 <input id="filterKeyword" type="search" class="form-control form-control-sm"
                        placeholder="搜索编号/名称/描述">
             </div>
-            <div class="col-lg-2 d-flex gap-2">
+            <div class="col-sm-6 col-lg-2 d-flex gap-2">
                 <button id="searchBtn" type="button"
                         class="btn btn-primary btn-sm flex-grow-1">搜索</button>
                 <button id="resetBtn" type="button"
