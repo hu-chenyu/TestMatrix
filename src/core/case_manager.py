@@ -108,6 +108,7 @@ from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from src.common.logger import LogManager
+from src.common.time_utils import local_to_utc_iso, to_utc_iso
 from src.core.cache import cache_client
 from src.core.data_driver import DataDriver, DataDriverError
 from src.core.event_bus import ExecutionEvent, close_channel, get_channel
@@ -1560,9 +1561,7 @@ class CaseManager:
             "error": row.error,
             "skipped": row.skipped,
             "pass_rate": row.pass_rate,
-            "created_at": (
-                row.created_at.isoformat() if row.created_at else None
-            ),
+            "created_at": to_utc_iso(row.created_at),
         }
 
     @staticmethod
@@ -1589,17 +1588,13 @@ class CaseManager:
             "case_id": row.case_id,
             "case_name": row.case_name,
             "result": row.result,
-            "start_time": (
-                row.start_time.isoformat() if row.start_time else None
-            ),
-            "end_time": row.end_time.isoformat() if row.end_time else None,
+            "start_time": local_to_utc_iso(row.start_time),
+            "end_time": local_to_utc_iso(row.end_time),
             "duration": row.duration,
             "error_message": row.error_message,
             "environment": row.environment,
             "executor": row.executor,
-            "created_at": (
-                row.created_at.isoformat() if row.created_at else None
-            ),
+            "created_at": to_utc_iso(row.created_at),
         }
 
     # ------------------------------------------------------------------
@@ -2076,21 +2071,9 @@ class CaseManager:
             "skipped": batch_row.skipped,
             "pass_rate": batch_row.pass_rate,
             "error_message": batch_row.error_message,
-            "started_at": (
-                batch_row.started_at.isoformat()
-                if batch_row.started_at
-                else None
-            ),
-            "finished_at": (
-                batch_row.finished_at.isoformat()
-                if batch_row.finished_at
-                else None
-            ),
-            "created_at": (
-                batch_row.created_at.isoformat()
-                if batch_row.created_at
-                else None
-            ),
+            "started_at": local_to_utc_iso(batch_row.started_at),
+            "finished_at": local_to_utc_iso(batch_row.finished_at),
+            "created_at": to_utc_iso(batch_row.created_at),
         }
 
     @classmethod
@@ -2506,8 +2489,8 @@ class CaseManager:
             "status": row.status,
             "description": row.description,
             "creator": row.creator,
-            "created_at": row.created_at.isoformat() if row.created_at else None,
-            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "created_at": to_utc_iso(row.created_at),
+            "updated_at": to_utc_iso(row.updated_at),
         }
 
 

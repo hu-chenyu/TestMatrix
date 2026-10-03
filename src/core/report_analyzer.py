@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from src.common.logger import LogManager
+from src.common.time_utils import to_utc_iso
 
 logger = LogManager.get_logger()
 
@@ -1086,9 +1087,7 @@ class ReportRepository:
                 "passed": record.passed,
                 "failed": record.failed,
                 "error": record.error,
-                "created_at": record.created_at.isoformat()
-                if record.created_at
-                else "",
+                "created_at": to_utc_iso(record.created_at) or "",
             }
             for record in records
         ]
@@ -1201,11 +1200,7 @@ class ReportRepository:
             latest_batch = {
                 "execution_id": latest.execution_id,
                 "pass_rate": latest.pass_rate,
-                "created_at": (
-                    latest.created_at.isoformat()
-                    if latest.created_at
-                    else None
-                ),
+                "created_at": to_utc_iso(latest.created_at),
             }
 
         logger.info(
@@ -1519,8 +1514,8 @@ class ReportRepository:
                             "case_name": case_name,
                             "fail_count": fail_count,
                             "last_failed_at": (
-                                last_record.created_at.isoformat()
-                                if last_record and last_record.created_at
+                                to_utc_iso(last_record.created_at)
+                                if last_record
                                 else None
                             ),
                             "last_error_message": (
