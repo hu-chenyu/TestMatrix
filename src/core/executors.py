@@ -23,6 +23,7 @@
 """
 
 import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -40,6 +41,38 @@ PYTEST_TIMEOUT_SECONDS = 30
 
 # 子进程输出截断长度（防超长堆栈撑爆error_message与库表）
 OUTPUT_TRUNCATE_LENGTH = 2000
+
+# 子进程输出解码策略：pytest 输出含中文用例名/路径，Windows 默认 cp936
+# 遇 UTF-8 字节会抛 UnicodeDecodeError（而 run_one 只捕 TimeoutExpired/
+# OSError，异常会穿透到批次级 except 导致整批 failed）。errors="replace"
+# 把无法解码的字节替换为 � 而非抛异常，保证单条用例的编码问题不会
+# 升级成整批失败。
+SUBPROCESS_ENCODING = "utf-8"
+SUBPROCESS_ERRORS = "replace"
+
+
+def truncate_output_tail(text: str, limit: int = OUTPUT_TRUNCATE_LENGTH) -> str:
+    """
+    子进程输出截断（取**尾部**并加前缀标记）
+
+    为什么取尾部而不是头部: pytest 的输出结构是「session 头 → 进度行 →
+    末尾 FAILURES 段 + 汇总行（如 `3 failed, 27 passed in 1.2s`）」。
+    头部是最没信息量的部分，尾部才是定位失败所需的堆栈与汇总。取头部
+    会在长输出下把诊断价值最高的部分整段切掉。
+
+    参数:
+        text (str): 待截断的子进程输出
+        limit (int): 保留的最大字符数（默认 OUTPUT_TRUNCATE_LENGTH）
+
+    返回:
+        str: 未超限时原样返回；超限时返回「前缀标记 + 末尾 limit 字符」
+
+    异常:
+        无
+    """
+    if not text or len(text) <= limit:
+        return text
+    return f"...[输出过长，已保留末尾 {limit} 字符]...\n{text[-limit:]}"
 
 
 @dataclass
@@ -167,7 +200,14 @@ class PytestRunner(BaseExecutor):
         # TODO: 真实测试集执行时按用例数据解析可执行
         # 测试文件路径（当前用例暂无script_path字段，先用case_id占位）
         path = str(case.get("script_path") or case.get("case_id", ""))
-        return ["py", "-m", "pytest", path, "-q", "--tb=short"]
+        # sys.executable 指向当前解释器（虚拟环境下即 venv 的 python，
+        # 保证用项目依赖跑 pytest），跨 Windows/Linux/macOS 通用；
+        # 修前硬编码的 "py" 是 Windows 专属启动器，非 Windows 平台
+        # 每条用例都会 OSError 降级为 error。
+        # "--" 是 pytest 的选项终止符：其后的 path 必被当作位置参数
+        # （测试文件路径）而非选项，杜绝 case_id 形如 "--version" 时
+        # 被 pytest 当选项执行、退出码 0 被误判为 passed 的假通过。
+        return [sys.executable, "-m", "pytest", "--", path, "-q", "--tb=short"]
 
     def run_one(self, case: dict) -> ExecutionResult:
         """
@@ -197,6 +237,8 @@ class PytestRunner(BaseExecutor):
                 command,
                 capture_output=True,
                 text=True,
+                encoding=SUBPROCESS_ENCODING,
+                errors=SUBPROCESS_ERRORS,
                 timeout=PYTEST_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired:
@@ -230,7 +272,7 @@ class PytestRunner(BaseExecutor):
         if completed.returncode == 1:
             # pytest约定退出码1: 存在失败用例，失败详情在stdout
             output = (completed.stdout or "").strip() or (completed.stderr or "").strip()
-            message = output[:OUTPUT_TRUNCATE_LENGTH] or (
+            message = truncate_output_tail(output) or (
                 f"pytest退出码: {completed.returncode}"
             )
             logger.debug(f"pytest执行失败 | 用例: {case.get('case_id')}")
@@ -240,7 +282,7 @@ class PytestRunner(BaseExecutor):
 
         # 其他退出码(2/5等): 用法错误/内部错误/中断，详情在stderr
         stderr = (completed.stderr or "").strip()
-        message = stderr[:OUTPUT_TRUNCATE_LENGTH] or (
+        message = truncate_output_tail(stderr) or (
             f"pytest异常退出，退出码: {completed.returncode}"
         )
         logger.warning(

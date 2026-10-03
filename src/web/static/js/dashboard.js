@@ -311,6 +311,7 @@ async function loadTrendChart() {
     try {
         const rows = await window.api.get("/reports/trend?limit=20");
         if (!Array.isArray(rows) || rows.length === 0) {
+            markChartLoadState("trendChart", false);
             window.chartHelper.renderChartEmpty(chart, "暂无执行趋势");
             return;
         }
@@ -321,6 +322,7 @@ async function loadTrendChart() {
         const rates = rows.map(function (row) {
             return (Number(row.pass_rate) || 0) * 100;
         });
+        markChartLoadState("trendChart", false);
         chart.setOption({
             color: [TM_CHART_COLORS[0]],
             tooltip: {
@@ -381,8 +383,42 @@ async function loadTrendChart() {
             // 元素经默认合并模式残留叠加在真实图表上
         }, true);
     } catch (error) {
-        window.chartHelper.renderChartEmpty(chart, "暂无执行趋势");
+        markChartLoadState("trendChart", true);
+        window.chartHelper.renderChartEmpty(
+            chart, "加载失败，请点右上角「刷新」重试"
+        );
         showToast("通过率趋势加载失败：" + error.message, "warning");
+    }
+}
+
+/**
+ * 标记图表容器的加载态（成功/失败/空），用于把"接口失败"与"确实无数据"区分开
+ *
+ * 为什么需要（Day43 收尾 D11）: 三个图表加载器的 catch 分支原本与空态
+ * 渲染**完全相同**的文案，用户无法分辨"这个接口挂了"和"这个项目还没数据"。
+ * 失败时既有 toast 提示（3 秒即逝），图表区本身没有任何持久痕迹。
+ *
+ * 本函数不碰 chart-helper（不在本次改动范围），只在容器元素上打
+ * data-load-state 属性 + 一层淡红底色，样式与空态在视觉上可区分。
+ * 成功/空态调用 markChartLoadState(id, false) 清除。
+ *
+ * @param {string} containerId 图表容器 DOM id
+ * @param {boolean} isError true=加载失败（错误态）；false=成功或空态
+ * @returns {void}
+ */
+function markChartLoadState(containerId, isError) {
+    const container = document.getElementById(containerId);
+    if (!container) {
+        return;
+    }
+    if (isError) {
+        container.setAttribute("data-load-state", "error");
+        container.style.backgroundColor = "rgba(220, 53, 69, 0.06)";
+        container.style.borderRadius = "0.25rem";
+    } else {
+        container.removeAttribute("data-load-state");
+        container.style.backgroundColor = "";
+        container.style.borderRadius = "";
     }
 }
 
@@ -399,6 +435,7 @@ async function loadModulePieChart() {
     try {
         const rows = await window.api.get("/reports/module-distribution");
         if (!Array.isArray(rows) || rows.length === 0) {
+            markChartLoadState("modulePieChart", false);
             window.chartHelper.renderChartEmpty(chart, "暂无模块数据");
             return;
         }
@@ -443,7 +480,10 @@ async function loadModulePieChart() {
             // notMerge=true：移除空态 graphic，避免"暂无数据"叠加
         }, true);
     } catch (error) {
-        window.chartHelper.renderChartEmpty(chart, "暂无模块数据");
+        markChartLoadState("modulePieChart", true);
+        window.chartHelper.renderChartEmpty(
+            chart, "加载失败，请点右上角「刷新」重试"
+        );
         showToast("模块分布加载失败：" + error.message, "warning");
     }
 }
@@ -461,6 +501,7 @@ async function loadPriorityBarChart() {
     try {
         const rows = await window.api.get("/reports/priority-distribution");
         if (!Array.isArray(rows) || rows.length === 0) {
+            markChartLoadState("priorityBarChart", false);
             window.chartHelper.renderChartEmpty(chart, "暂无优先级数据");
             return;
         }
@@ -496,7 +537,10 @@ async function loadPriorityBarChart() {
             // notMerge=true：移除空态 graphic，避免"暂无数据"叠加
         }, true);
     } catch (error) {
-        window.chartHelper.renderChartEmpty(chart, "暂无优先级数据");
+        markChartLoadState("priorityBarChart", true);
+        window.chartHelper.renderChartEmpty(
+            chart, "加载失败，请点右上角「刷新」重试"
+        );
         showToast("优先级分布加载失败：" + error.message, "warning");
     }
 }

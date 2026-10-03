@@ -21,6 +21,11 @@
           content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
     <title>{% block title %}TestMatrix{% endblock %}</title>
 
+    <!-- 显式声明空 favicon：未声明时浏览器会自动请求 /favicon.ico，项目无该
+         资源 → 每个页面一条 404 噪声（本项目唯一的控制台噪声来源）。
+         data: 空 URI 不产生网络请求，也满足 CSP 的 img-src 'self' data:。 -->
+    <link rel="icon" href="data:,">
+
     <!-- Bootstrap5 样式（本地静态资源，离线可用，不依赖外网CDN） -->
     <link rel="stylesheet"
           href="{{ url_for('static', filename='css/bootstrap.min.css') }}">

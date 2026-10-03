@@ -89,8 +89,24 @@ class CaseCreateSchema(Schema):
         已废弃，使用会触发RemovedInMarshmallow4Warning）
     """
 
+    # case_id 字符集（Day43 收尾修复 D6/M2）: 首字符必须是字母或数字，
+    # 其余允许字母/数字/点/下划线/连字符。**为什么必须禁 `-` 开头**:
+    # PytestRunner 把 case_id 当测试文件路径传给 pytest（build_command），
+    # `case_id="--version"` 会让命令变成 `pytest --version -q`，pytest
+    # 打印版本后退出码 0，被判定为 passed —— 假通过会直接虚高通过率。
+    # executors 侧已用 `--` 终止符兜底，这里再加字符集约束是纵深防御：
+    # 编号本就该有命名规范，同时挡住 `../` 之类的路径形态。
+    # 只约束 create：update schema 不含 case_id（编号不可改，见 6.9），
+    # 故存量数据（含历史遗留的非常规编号）不受影响。
     case_id = fields.String(
-        required=True, validate=validate.Length(min=1, max=64)
+        required=True,
+        validate=[
+            validate.Length(min=1, max=64),
+            validate.Regexp(
+                r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                error="用例编号只能由字母、数字、点、下划线、连字符组成，且必须以字母或数字开头",
+            ),
+        ],
     )
     name = fields.String(
         required=True, validate=validate.Length(min=1, max=200)
