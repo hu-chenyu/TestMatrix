@@ -126,6 +126,30 @@ REASON_MAX_LEN = 1000
 DEAD_LETTER_CONTENT_PREVIEW = 2000
 
 
+class NotificationError(ValueError):
+    """
+    通知模块领域异常（Day44 热修 P1-2 新增）
+
+    为什么需要它而不用裸 ValueError:
+        核心层原先抛裸 `ValueError`，而 Web 层 `src/web/exceptions.py` 的
+        业务异常基类是 `APIError`。`ValueError` 不是 `APIError` 子类，
+        会一路落到 `@app.errorhandler(Exception)` 被兜成 **HTTP 500** ——
+        一个本该 400 的用户输入错误被伪装成服务端故障，监控按 5xx 告警时
+        会把排查方向带偏。这与 P2-07 刚刚在 `case_manager` /
+        `src/web/pagination.py` 立下的"参数错误必须是 400、绝不能是 500"
+        铁律直接矛盾。
+
+    为什么继承 ValueError 而非 Exception:
+        保持**向后兼容**——任何既有 `except ValueError` 的调用方（含测试）
+        行为完全不变，同时异常获得了可辨识的领域语义与可单独捕获的能力。
+        若直接改基类为 Exception，那些调用方会从"捕获得到"变成
+        "异常穿透"，反而制造新的故障。
+
+    典型场景:
+        `list_history(page=99999)` —— 页码越界，应由路由层转成 400。
+    """
+
+
 @dataclass
 class Notification:
     """
@@ -2222,9 +2246,18 @@ class NotificationHistoryRepository:
         # page 无上界时 page=1000000 会产生千万级 offset，SQLite 下退化为
         # 全表扫描。判据与 src/web/pagination.py 的 MAX_PAGE 同源，
         # 此处按核心层口径直接 import，避免两处上界再次分叉。
+        #
+        # 异常类型（Day44 热修 P1-2）：改为抛 NotificationError 而非裸
+        # ValueError。裸 ValueError **不是 APIError 子类**，会落到
+        # @app.errorhandler(Exception) 变成 HTTP 500 —— 把一个本该 400 的
+        # 用户输入错误伪装成服务端故障，与 P2-07 的铁律直接矛盾。
+        # 继承 ValueError 是刻意的：任何既有 `except ValueError` 的调用方
+        # 行为完全不变（向后兼容），同时异常获得了领域语义。
         if not isinstance(page, int) or isinstance(page, bool) \
                 or not (1 <= page <= MAX_PAGE):
-            raise ValueError(f"page必须为1到{MAX_PAGE}之间的整数: {page!r}")
+            raise NotificationError(
+                f"page必须为1到{MAX_PAGE}之间的整数: {page!r}"
+            )
 
         session = DatabaseSession.get_session()
         try:

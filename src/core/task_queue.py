@@ -41,6 +41,7 @@ payload约定（与_execute_batch_async真实签名严格对齐）:
 
 import json
 import threading
+import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -74,6 +75,21 @@ WORKER_JOIN_TIMEOUT_SECONDS = 3.0
 # 权威状态在 SQLite 批次行，批次终态后无需长期保留。取 24 小时是
 # 为了覆盖"跨夜未消费的积压任务仍可查到调度状态"这一运维排查场景。
 TASK_STATUS_TTL_SECONDS = 24 * 3600
+
+# 后端构建失败后的冷却秒数（Day44 热修 P1-1）
+# 取 5 秒的依据：足够把"构建失败"从"每微秒一次"降到"每 5 秒一次"
+# （实测热转时为 8871 次/秒，冷却后为 0.2 次/秒，约 4.4 万倍降幅），
+# 又足够短，使运维改完 TM_REDIS_URL 后最多等 5 秒 worker 就自动恢复，
+# 无需重启进程。同时它与 WORKER_IDLE_BACKOFF_SECONDS 构成两道独立的闸：
+# 冷却管"构建重试频率"，退避管"主循环空转频率"，两者缺一仍会出问题
+# （只冷却不退避 -> 不刷屏但空转；只退避不冷却 -> 不空转但仍刷屏）。
+BACKEND_FAILURE_COOLDOWN_SECONDS = 5.0
+
+# worker 主循环在后端不可用时的退避秒数（Day44 热修 P1-1）
+# 取 1 秒的依据：与 BRPOP 自身的 brpop_timeout(默认1s) 同量级，
+# 保证"后端正常时每 1 秒醒一次"与"后端不可用时每 1 秒醒一次"的节奏一致，
+# 不会因为加了退避而让正常情况下的消费变慢（正常路径不进入该分支）。
+WORKER_IDLE_BACKOFF_SECONDS = 1.0
 
 
 def task_status_key(execution_id: str) -> str:
@@ -125,6 +141,12 @@ class TaskQueueClient:
             无
         """
         self._backend: Any | None = None
+        # 后端构建失败的冷却截止时间戳（time.monotonic 基准）。
+        # 0.0 表示"从未失败过"。由 _get_backend 维护：失败时置为
+        # now + BACKEND_FAILURE_COOLDOWN_SECONDS，成功时清零。
+        # 单独一个属性而非复用 _backend，是为了与"后端实例缓存"解耦——
+        # 冷却期结束后仍必须能正常重建并自愈。
+        self._failed_until: float = 0.0
 
     # ------------------------------------------------------------------
     # 配置属性（实时读env_manager，monkeypatch可热替换）
@@ -228,50 +250,68 @@ class TaskQueueClient:
         """
         if not self.enabled:
             return None
-        if self._backend is None:
-            url = self.redis_url
-            if url.startswith(FAKE_SCHEME):
-                try:
-                    import fakeredis
+        if self._backend is not None:
+            return self._backend
+        # 失败冷却闸门（Day44 热修 P1-1）：修复前"构建失败不缓存异常以便自愈"
+        # 与 worker 循环 `payload is None -> continue`（无退避）叠加成热转——
+        # 实测 1 秒内 _get_backend 被调 8871 次、打 8871 条完全相同的 WARNING
+        # （外推 1 小时 3193 万条），CPU 占满一核 + 磁盘写满。
+        # 自愈是想要的，但"过一会儿再试一次"就够，不需要"每微秒再试一次"。
+        now = time.monotonic()
+        if now < self._failed_until:
+            # 冷却期内：静默返回，既不重试也不打日志
+            return None
+        recovering = self._failed_until > 0.0
+        url = self.redis_url
+        if url.startswith(FAKE_SCHEME):
+            try:
+                import fakeredis
 
-                    self._backend = fakeredis.FakeRedis(
-                        decode_responses=True
-                    )
+                self._backend = fakeredis.FakeRedis(decode_responses=True)
+                self._failed_until = 0.0
+                if recovering:
+                    logger.info("任务队列后端已恢复 | 类型: fakeredis内存实例")
+                else:
                     logger.debug("任务队列后端已构建 | 类型: fakeredis内存实例")
-                except ImportError as exc:
-                    logger.warning(
-                        f"任务队列已启用但fakeredis未安装，降级no-op | {exc}"
-                    )
-                    return None
-            else:
-                # 真实Redis客户端。构建期异常必须在此兜底（Day44 P2-04）：
-                # 三个公开方法（enqueue/dequeue/set_status）都是"先取后端
-                # 再进 try"，而 redis.from_url 对非法 URL 抛的是 ValueError
-                # （端口非数字 / scheme非法 / 含中文冒号），**不是 RedisError**，
-                # 完全没有被方法体内的 except redis.RedisError 覆盖。
-                # 未兜底时的后果是双重的：
-                #   ① trigger 路由的 enqueue() 冒泡到全局处理器 → 接口 500，
-                #      绕过了"入队失败 fallback 裸线程、接口不 500"的项目铁律，
-                #      已落的批次行永久停在 pending；
-                #   ② TaskWorker.run() 的 dequeue() 在 while 循环内、任何
-                #      try 之外，异常会逃出线程目标函数直接把 worker 打死，
-                #      且业务日志无痕、后续任务永久堆积。
-                # 与 src/core/cache.py:307-325 同一套判据，保持两侧一致。
-                try:
-                    self._backend = _REDIS_FROM_URL(
-                        url,
-                        decode_responses=True,
-                        socket_timeout=2,
-                    )
-                except (ValueError, TypeError, redis.RedisError) as exc:
-                    # 不缓存异常对象：_backend 保持 None，下次访问会重新尝试
-                    # 构建，配置修好后可自愈，无需重启进程
-                    logger.warning(
-                        f"任务队列后端构建失败，入队降级并交由调用方 fallback | "
-                        f"URL: {url} | 异常: {type(exc).__name__}: {exc}"
-                    )
-                    return None
-                logger.debug(f"任务队列后端已构建 | 类型: redis | URL: {url}")
+                return self._backend
+            except ImportError as exc:
+                logger.warning(
+                    f"任务队列已启用但fakeredis未安装，降级no-op | {exc}"
+                )
+                return None
+        # 真实Redis客户端。构建期异常必须在此兜底（Day44 P2-04）：
+        # 三个公开方法（enqueue/dequeue/set_status）都是"先取后端再进 try"，
+        # 而 redis.from_url 对非法 URL 抛的是 ValueError（端口非数字 /
+        # scheme非法 / 含中文冒号），**不是 RedisError**，完全没有被方法体内
+        # 的 except redis.RedisError 覆盖。未兜底时：① trigger 路由的
+        # enqueue() 冒泡到全局处理器 → 接口 500，绕过"入队失败 fallback
+        # 裸线程、接口不 500"的项目铁律；② TaskWorker.run() 的 dequeue()
+        # 在 while 循环内、任何 try 之外，异常逃出线程目标函数把 worker
+        # 打死且业务日志无痕。与 src/core/cache.py 同一套判据。
+        try:
+            self._backend = _REDIS_FROM_URL(
+                url,
+                decode_responses=True,
+                socket_timeout=2,
+            )
+        except (ValueError, TypeError, redis.RedisError) as exc:
+            # 关键改动：进入时间冷却，而不是"每次调用都重试并打一条日志"。
+            # 冷却期内本函数开头直接 return None，热转（CPU）与日志洪水
+            # （磁盘）两个后果同时消除。
+            # 自愈仍然成立：冷却是"时间到即重试"，不是"失败一次永久禁用"；
+            # 冷却期满后的第一次调用会真正重新尝试构建，成功则清空标记。
+            self._failed_until = time.monotonic() + BACKEND_FAILURE_COOLDOWN_SECONDS
+            logger.warning(
+                f"任务队列后端构建失败，入队降级并交由调用方 fallback | "
+                f"URL: {url} | 异常: {type(exc).__name__}: {exc} | "
+                f"将在 {BACKEND_FAILURE_COOLDOWN_SECONDS}s 后重试"
+            )
+            return None
+        self._failed_until = 0.0
+        if recovering:
+            logger.info(f"任务队列 Redis 连接已恢复 | URL: {url}")
+        else:
+            logger.debug(f"任务队列后端已构建 | 类型: redis | URL: {url}")
         return self._backend
 
     def reset_backend(self) -> None:
@@ -296,6 +336,9 @@ class TaskQueueClient:
             except Exception as exc:  # noqa: BLE001 测试重置不关心关闭异常
                 logger.debug(f"任务队列后端关闭异常已忽略 | {exc}")
         self._backend = None
+        # 一并清空失败冷却（Day44 热修 P1-1）：否则用例内先触发一次构建失败
+        # 就会让后续 5 秒内的所有调用静默返回 None，测试之间互相污染。
+        self._failed_until = 0.0
 
     # ------------------------------------------------------------------
     # 队列命令
@@ -541,6 +584,16 @@ class TaskWorker:
                 # 检查stop_event，保证停止信号最迟一个超时周期生效
                 payload = self.queue_client.dequeue()
                 if payload is None:
+                    # 退避闸（Day44 热修 P1-1）：后端不可用时 dequeue **不阻塞**
+                    # 直接返回 None，此处若直接 continue 就是零延时热转。
+                    # wait() 而非 sleep() 的理由：它同时监听 stop_event，
+                    # 因此退避不会让 stop_worker() 的响应变慢一个退避周期。
+                    # 正常后端下 payload 为 None 是"队列空"，此时 dequeue
+                    # 已在 BRPOP 上阻塞了 brpop_timeout 秒，再多等
+                    # WORKER_IDLE_BACKOFF_SECONDS 属于无谓延迟，故只在
+                    # 后端确实不可用时才退避。
+                    if self.queue_client._backend is None:
+                        self.stop_event.wait(WORKER_IDLE_BACKOFF_SECONDS)
                     continue
 
                 # execution_id 显式为 null 时 .get(key, "") 的默认值取不到，

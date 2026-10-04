@@ -16,6 +16,7 @@ from typing import Any
 
 from flask import Blueprint, request
 
+from src.core.case_manager import MAX_PAGE
 from src.core.notification import (
     NotificationDeadLetterRepository,
     NotificationHistoryRepository,
@@ -36,8 +37,16 @@ def _parse_pagination() -> tuple[int, int]:
     """
     从查询串解析分页参数（非法值抛 ValidationError → 400）
 
+    page 上界与 cases/executions 统一收口到 MAX_PAGE（Day44 热修 P1-2）：
+    修复前此处**只校验 page<1、没有上界**，而核心层 list_history 在 Day44
+    补了 MAX_PAGE 校验却抛的是裸 `ValueError`——`ValueError` 不是
+    `APIError` 子类，会落到 `@app.errorhandler(Exception)` 变成 **HTTP 500**。
+    即"修复深 offset"反而把一个本该 400 的用户输入错误变成了服务端故障，
+    与 P2-07 刚立下的铁律直接矛盾。本函数补上界后，越界在路由层就被拦成
+    400，核心层的领域异常只是第二道防线、不再是唯一防线。
+
     返回:
-        tuple[int, int]: (page, page_size)，page≥1、1≤page_size≤100
+        tuple[int, int]: (page, page_size)，1≤page≤MAX_PAGE、1≤page_size≤100
 
     异常:
         ValidationError: page/page_size 非正整数或超限
@@ -49,10 +58,12 @@ def _parse_pagination() -> tuple[int, int]:
         page_size = int(raw_size)
     except (TypeError, ValueError):
         raise ValidationError("page和page_size必须为正整数") from None
-    if page < 1 or page_size < 1 or page_size > MAX_PAGE_SIZE:
+    if page < 1 or page > MAX_PAGE:
         raise ValidationError(
-            f"page必须≥1，page_size须在1-{MAX_PAGE_SIZE}之间"
+            f"page必须在 1 与 {MAX_PAGE} 之间"
         )
+    if page_size < 1 or page_size > MAX_PAGE_SIZE:
+        raise ValidationError(f"page_size须在1-{MAX_PAGE_SIZE}之间")
     return page, page_size
 
 

@@ -1941,12 +1941,18 @@ class CaseManager:
         """
         try:
             # a. 置running + 记录批次开始时间
-            cls._update_batch_status(
+            # 顺带取回批次元信息（Day44 热修 P2-1）：_update_batch_status
+            # 本来就要 SELECT 这一行，返回值里多带了 environment/executor，
+            # 下面逐条明细直接透传，record_execution 就不必为每条用例再查一次。
+            batch_meta = cls._update_batch_status(
                 execution_id, status="running", started_at=datetime.now()
-            )
+            ) or {}
+            batch_environment = batch_meta.get("environment")
+            batch_executor = batch_meta.get("executor")
             logger.info(
                 f"批次开始执行 | 批次: {execution_id} | 用例数: {len(cases)} | "
-                f"执行器: {executor_kind or '(TM_EXECUTOR环境变量)'}"
+                f"执行器: {executor_kind or '(TM_EXECUTOR环境变量)'} | "
+                f"环境: {batch_environment}"
             )
             # 事件埋点: 批次开始（executor_kind为None表示读TM_EXECUTOR
             # 环境变量的默认执行器，载荷原样透传null）
@@ -1975,6 +1981,10 @@ class CaseManager:
                     end_time=case_end,
                     duration=exec_result.duration,
                     error_message=exec_result.error_message,
+                    # 整批不变的两个字段从批次行一次性取到后透传，
+                    # 避免 record_execution 内部逐条查批次行（Day44 热修 P2-1）
+                    environment=batch_environment,
+                    executor=batch_executor,
                 )
                 # 事件埋点: 单条用例执行完成（与明细表同口径字段）
                 cls._publish_execution_event(
@@ -2197,7 +2207,7 @@ class CaseManager:
         skipped: int | None = None,
         pass_rate: float | None = None,
         error_message: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """
         更新批次状态与冗余统计（内部方法）
 
@@ -2218,12 +2228,15 @@ class CaseManager:
             error_message (str | None): 批次级异常信息，None不更新
 
         返回:
-            None
+            dict[str, Any] | None: 本次读到的批次元信息
+                {"environment": ..., "executor": ...}；
+                批次行不存在时为 None（调用方需自行决定兜底）
 
         异常:
             CaseManagerError: 数据库操作异常时抛出
                               （由调用方决定兜底策略）
         """
+        meta: dict[str, Any] | None = None
         try:
             with DatabaseSession.session_scope() as session:
                 batch_row = (
@@ -2236,7 +2249,17 @@ class CaseManager:
                         f"批次行不存在，状态更新跳过 | 批次: {execution_id} | "
                         f"目标状态: {status}"
                     )
-                    return
+                    return None
+                # 顺带回传两个"整批不变"的字段（Day44 热修 P2-1）：本方法本来
+                # 就 SELECT 了这一行，多取两个标量零额外成本。调用方
+                # （_execute_batch_async）据此把值透传给每条明细的
+                # record_execution，避免它为每条用例再查一次批次行
+                # （修复前 20 条用例多出 22 次查询，放大 2.1x）。
+                # 必须在 session 关闭前取值。
+                meta = {
+                    "environment": batch_row.environment,
+                    "executor": batch_row.executor,
+                }
                 batch_row.status = status
                 if started_at is not None:
                     batch_row.started_at = started_at
@@ -2267,6 +2290,7 @@ class CaseManager:
                     "status": status,
                 },
             ) from exc
+        return meta
 
     # ------------------------------------------------------------------
     # 批次完成通知集成（第二阶段Day15）
