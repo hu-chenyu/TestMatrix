@@ -47,6 +47,15 @@ const BATCH_STATUS = {
     PENDING: "pending",
 };
 
+/**
+ * 日志区最大保留行数（Day44 D9 防御性上界）
+ *
+ * 正常批次日志行数有天然上界（=用例数×2+汇总，百级以内）且终态主动
+ * 关流；该常量只防未来新路径（如非终态正常断流后持续重连）导致日志
+ * DOM 无界增长拖垮页面。超限从头部删最旧行，保留尾部最新内容。
+ */
+const MAX_LOG_LINES = 2000;
+
 /* ==========================================================================
    页面级状态
    ========================================================================== */
@@ -331,7 +340,8 @@ function renderLoadingRow() {
 function renderEmptyRow() {
     els.tableBody.innerHTML =
         '<tr><td colspan="9" class="text-center text-muted py-4">' +
-        '<i class="bi bi-inbox me-1"></i>暂无已完成批次</td></tr>';
+        '<i class="bi bi-inbox me-1"></i>暂无执行记录，' +
+        "点击右上角「触发新执行」开始</td></tr>";
 }
 
 /**
@@ -776,6 +786,37 @@ function setConnectionBadge(phase) {
     els.logConnectionBadge.textContent = conf.text;
 }
 
+// 本订阅周期是否已提示过日志清理（每次打开日志视图重置，只提示一次）
+let _logCapNoticeShown = false;
+
+/**
+ * 日志区行数上界裁剪（Day44 D9）
+ *
+ * 子元素数超过 MAX_LOG_LINES 时从头部逐个删除最旧行，直到回到上界；
+ * 首次触发清理时追加一条斜体 muted 提示行（每次打开日志只提示一次，
+ * 不随裁剪反复刷屏）。提示行本身不再触发二次裁剪。
+ *
+ * @returns {void}
+ */
+function enforceLogLineCap() {
+    const container = els.logContainer;
+    let removedCount = 0;
+    while (container.childElementCount > MAX_LOG_LINES) {
+        // firstChild 即最旧行（append 顺序=时间顺序）
+        container.removeChild(container.firstChild);
+        removedCount += 1;
+    }
+    if (removedCount > 0 && !_logCapNoticeShown) {
+        _logCapNoticeShown = true;
+        const notice = document.createElement("div");
+        notice.className = "text-muted small fst-italic";
+        notice.textContent =
+            "（日志超过 " + MAX_LOG_LINES +
+            " 行上限，已自动清理最早的旧日志）";
+        container.appendChild(notice);
+    }
+}
+
 /**
  * 向日志区追加一行（全程 textContent/DOM API，杜绝 XSS）
  *
@@ -799,7 +840,9 @@ function appendLogLine(text, tone) {
     }
     line.textContent = text; // textContent 天然防注入，error_message 同样安全
     els.logContainer.appendChild(line);
-    // 新帧到达自动滚到底部（用户手动上滚查看历史的体验待 Day44 走查优化）
+    // 防御性上界：防未来异常重连路径下日志 DOM 无界增长
+    enforceLogLineCap();
+    // 新帧到达自动滚到底部（用户手动上滚查看历史的体验待后续走查优化）
     els.logContainer.scrollTop = els.logContainer.scrollHeight;
 }
 
@@ -816,6 +859,8 @@ function appendLogBlock(text) {
     block.style.wordBreak = "break-all";
     block.textContent = text;
     els.logContainer.appendChild(block);
+    // 堆栈块同样计入上界（一行块算一个子元素）
+    enforceLogLineCap();
     els.logContainer.scrollTop = els.logContainer.scrollHeight;
 }
 
@@ -1043,6 +1088,7 @@ async function openLogView(executionId) {
 
     // 重置日志区与连接态 UI
     els.logContainer.textContent = "";
+    _logCapNoticeShown = false; // 新一轮订阅重新获得一次清理提示机会
     els.logViewReportBtn.classList.add("d-none");
     els.logExecutionMeta.textContent = "批次号：" + executionId;
     setConnectionBadge("connecting");

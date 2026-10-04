@@ -225,7 +225,8 @@ function renderLoadingRow() {
 function renderEmptyRow() {
     els.tableBody.innerHTML =
         '<tr><td colspan="9" class="text-center text-muted py-4">' +
-        '<i class="bi bi-inbox me-1"></i>暂无用例数据</td></tr>';
+        '<i class="bi bi-inbox me-1"></i>暂无符合条件的用例，' +
+        "试试调整筛选条件或点击新增用例</td></tr>";
 }
 
 /**
@@ -836,14 +837,16 @@ async function importCases(file) {
     // 即使 HTTP 状态为 2xx 也按业务失败抛出。若只判 response.ok，
     // 后端一旦改用「HTTP 200 + code=500」风格返回错误，这里会静默
     // 返回 data=null，调用方回落成「新增0条，更新0条」的假成功 toast，
-    // 用户以为导入完成实则数据未入库。code 兼容 0/200 两种成功约定；
+    // 用户以为导入完成实则数据未入库。
+    // 成功判据与 api.js 统一为区间 code >= 0 && code < 400（6.36 决策2）：
+    // 本项目 code 与 HTTP 状态码同值，成功码是 0 与全部 2xx，枚举白名单
+    // （只认 0/200）会在导入改用 created() 返回 201 时把成功判成失败；
     // 响应体无 code 字段时（如后端简化契约）不做拦截，保持向后兼容。
     if (
         payload &&
         payload.code !== undefined &&
         payload.code !== null &&
-        payload.code !== 0 &&
-        payload.code !== 200
+        !(payload.code >= 0 && payload.code < 400)
     ) {
         throw new Error(
             payload.message || "导入失败，业务错误码：" + payload.code

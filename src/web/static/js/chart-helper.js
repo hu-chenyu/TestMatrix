@@ -60,6 +60,42 @@ function resizeAllCharts() {
 }
 
 /**
+ * 销毁指定容器的图表实例并从登记表移除（Day44 D16）
+ *
+ * ECharts 实例持有 canvas/DOM 与内部事件监听，重复 init 同一容器前
+ * 或路由切换卸载页面时必须先 dispose，否则实例与监听器堆积泄漏。
+ * 当前单页看板复用同一实例 setOption 无实际泄漏，本接口为防御性
+ * 能力，供未来多页/路由切换与容器重建场景调用。
+ *
+ * @param {string} chartId 图表容器 DOM 的 id
+ * @returns {boolean} 是否实际销毁了实例（未登记返回 false，幂等不报错）
+ */
+function disposeChart(chartId) {
+    const chart = _chartInstances.get(chartId);
+    if (!chart) {
+        return false;
+    }
+    chart.dispose();
+    _chartInstances.delete(chartId);
+    return true;
+}
+
+/**
+ * 销毁全部已登记图表并清空登记表（页面卸载/整体重绘前调用）
+ *
+ * @returns {number} 实际销毁的实例数量
+ */
+function disposeAllCharts() {
+    let disposedCount = 0;
+    _chartInstances.forEach(function (chart) {
+        chart.dispose();
+        disposedCount += 1;
+    });
+    _chartInstances.clear();
+    return disposedCount;
+}
+
+/**
  * 渲染图表空态：清空旧配置后居中绘制“暂无数据”文案
  *
  * @param {echarts.ECharts} chart initChart 返回的图表实例
@@ -108,6 +144,8 @@ window.addEventListener("resize", function () {
 window.chartHelper = {
     initChart: initChart,
     resizeAllCharts: resizeAllCharts,
+    disposeChart: disposeChart,
+    disposeAllCharts: disposeAllCharts,
     renderChartEmpty: renderChartEmpty,
     TM_CHART_COLORS: TM_CHART_COLORS,
 };

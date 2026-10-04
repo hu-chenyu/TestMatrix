@@ -284,9 +284,20 @@ class DefectStatistic(Base):
         DateTime, nullable=False, server_default=func.now(), comment="统计生成时间"
     )
 
+    # 单列索引: created_at 是批次列表分页与趋势图的默认排序键
+    # （list_executions_paged 的 order_by(created_at.desc())），
+    # 数据量上万后无索引会全表扫描线性劣化（Day44 M3 补齐）
+    __table_args__ = (
+        Index("idx_ds_created_at", "created_at"),
+        {"comment": "批次级执行汇总指标表"},
+    )
+
     def __repr__(self) -> str:
         """
-        模型可读化表示（调试与日志打印用）
+        缺陷统计表的可读化表示
+
+        参数:
+            无
 
         返回:
             str: 形如 DefectStatistic(execution_id=RUN-xxx, total=50, pass_rate=0.94) 的字符串
