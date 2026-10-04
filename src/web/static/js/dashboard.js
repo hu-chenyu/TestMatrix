@@ -332,10 +332,12 @@ async function loadTrendChart() {
                     const row = rows[idx];
                     const ratePct = (Number(row.pass_rate) * 100).toFixed(1);
                     // 同 P0 饼图 tooltip：自定义 formatter 返回值不转义，
-                    // 一旦 execution_id 改为可由用户指定即为等价 XSS
+                    // 一旦 execution_id 改为可由用户指定即为等价 XSS；
+                    // 时间取横轴同源标签 labels[idx]（本地 MM-DD HH:mm）
                     return (
                         "<div style='max-width:260px;word-break:break-all'>" +
                         "批次：" + escapeHtml(row.execution_id) + "<br>" +
+                        "时间：" + labels[idx] + "<br>" +
                         "通过：" + row.passed + " / 失败：" + row.failed +
                         " / 异常：" + row.error + "<br>" +
                         "通过率：<b>" + ratePct + "%</b></div>"
@@ -370,6 +372,13 @@ async function loadTrendChart() {
                             return p.value.toFixed(1) + "%";
                         },
                     },
+                    // 标签防重叠（Day44 走查发现）：近 20 个批次全部打标签时，
+                    // 平台段（连续 100% / 33.3%）的标签会挤成
+                    // "100100100100100.0%" 这种糊成一团的字符串，完全不可读。
+                    // hideOverlap 让 ECharts 自动隐藏放不下的标签，密集段留白、
+                    // 稀疏段照常显示；被隐藏处的精确值仍可由 tooltip 查看，
+                    // 横轴刻度与 Y 轴百分比也始终在，信息不丢。
+                    labelLayout: { hideOverlap: true },
                     // 面积渐变：主色蓝自上而下淡化，增强趋势可读性
                     areaStyle: {
                         color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -566,7 +575,7 @@ function renderFailedTopRows(items) {
         const emptyTd = document.createElement("td");
         emptyTd.colSpan = 4;
         emptyTd.className = "text-center text-muted py-4";
-        emptyTd.textContent = "暂无数据";
+        emptyTd.textContent = "暂无失败记录";
         const emptyIcon = document.createElement("i");
         emptyIcon.className = "bi bi-inbox me-1";
         emptyTd.insertBefore(emptyIcon, emptyTd.firstChild);
@@ -704,11 +713,23 @@ function initDashboard() {
 
     // 3. 失败 Top 表首屏占位行已在 HTML 中（id=failedTopEmpty），加载后替换
 
-    // 4. 刷新按钮绑定：统计卡片 + 四个图表/表格统一刷新
+    // 4. 刷新按钮绑定：统计卡片 + 四个图表/表格统一刷新。
+    //    仅手动点击给"已刷新"成功 toast（首屏加载不提示，避免进页即弹）；
+    //    各加载器失败已有独立 toast/错误条，这里不重复失败提示。
     const refreshBtn = document.getElementById("refreshBtn");
     if (refreshBtn) {
-        refreshBtn.addEventListener("click", loadAllDashboardData);
+        refreshBtn.addEventListener("click", async function () {
+            await loadAllDashboardData();
+            showToast("看板数据已刷新");
+        });
     }
+
+    // 4.5 页面卸载时销毁全部 ECharts 实例（D16：释放 canvas 与内部监听，
+    //     防御未来多页/路由切换场景的实例堆积；单页跳转浏览器本会回收，
+    //     此处显式处置形成统一约定）
+    window.addEventListener("beforeunload", function () {
+        window.chartHelper.disposeAllCharts();
+    });
 
     // 5. 首屏全量加载（loading/error/empty 三态由各加载器内部处理）
     loadAllDashboardData();

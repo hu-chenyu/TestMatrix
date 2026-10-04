@@ -63,6 +63,26 @@ function escapeHtml(value) {
 const TM_TOAST_TYPES = ["success", "danger", "warning", "info"];
 
 /**
+ * 各类型 toast 的图标与自动消失时长（Day44 UX 统一）
+ *
+ * 时长分级：成功/普通信息 3 秒（用户扫一眼即可），警告/失败 5 秒
+ * （错误文案通常更长，且用户需要时间读完并处理）；两种异常态同时
+ * 保留右上角手动关闭按钮，不强制等待自动消失。
+ */
+const TM_TOAST_ICONS = {
+    success: "bi-check-circle-fill",
+    danger: "bi-x-circle-fill",
+    warning: "bi-exclamation-triangle-fill",
+    info: "bi-info-circle-fill",
+};
+const TM_TOAST_DELAY_MS = {
+    success: 3000,
+    info: 3000,
+    warning: 5000,
+    danger: 5000,
+};
+
+/**
  * 展示 Bootstrap5 Toast 浮动消息
  *
  * @param {string} message 消息正文
@@ -92,10 +112,15 @@ function showToast(message, type) {
     // 形成的 XSS 汇点——调用方（cases.js 等）会把后端 error.message 喂进来，
     // 一旦后端错误文案回显用户输入，拼接过来的 message 就会被解析执行
     const toastInner = document.createElement("div");
-    toastInner.className = "d-flex";
+    toastInner.className = "d-flex align-items-center w-100";
+
+    // 类型图标：类名取自固定白名单映射，用户文本绝不进入 className
+    const iconEl = document.createElement("i");
+    iconEl.className = "bi " + TM_TOAST_ICONS[type] + " ms-3 me-2";
+    iconEl.setAttribute("aria-hidden", "true");
 
     const toastBody = document.createElement("div");
-    toastBody.className = "toast-body";
+    toastBody.className = "toast-body flex-grow-1";
     // 纯文本赋值：即使 message 含 <script> 也只作为字面量显示，不被解析执行
     toastBody.textContent = message;
 
@@ -106,13 +131,17 @@ function showToast(message, type) {
     closeBtn.setAttribute("data-bs-dismiss", "toast");
     closeBtn.setAttribute("aria-label", "关闭");
 
+    toastInner.appendChild(iconEl);
     toastInner.appendChild(toastBody);
     toastInner.appendChild(closeBtn);
     toastEl.appendChild(toastInner);
     container.appendChild(toastEl);
 
-    // 实例化 Toast 并展示，3 秒自动消失；关闭后移除节点避免 DOM 堆积
-    const toast = new bootstrap.Toast(toastEl, { delay: 3000 });
+    // 实例化 Toast 并展示：成功/信息 3 秒，警告/失败 5 秒；
+    // 关闭后移除节点避免 DOM 堆积
+    const toast = new bootstrap.Toast(toastEl, {
+        delay: TM_TOAST_DELAY_MS[type],
+    });
     toastEl.addEventListener("hidden.bs.toast", function () {
         toastEl.remove();
     });

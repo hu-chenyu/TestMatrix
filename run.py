@@ -81,6 +81,30 @@ def _warn_enabled_but_misconfigured() -> None:
         print("[警告] TM_EMAIL_ENABLED=true 但 SMTP 主机未配置/仍为 example.com，邮件通知将不生效。")
 
 
+def _warn_non_loopback_binding(host: str) -> None:
+    """绑定非本机回环地址时打印显式安全告警（不阻断启动）。
+
+    平台不含任何鉴权机制，docs/API.md 已声明"仅内网/本机使用，禁止暴露
+    公网"。默认绑 127.0.0.1 时无外暴露风险；一旦用户显式传入 0.0.0.0
+    等对外地址，启动瞬间必须给出醒目提示，避免无意识公网部署。
+
+    参数:
+        host (str): --host 实际绑定的监听地址
+
+    返回:
+        None
+    """
+    # 仅回环地址视为安全：127.0.0.1 与 localhost（其余如 0.0.0.0/内网IP均告警）
+    loopback_hosts = {"127.0.0.1", "localhost"}
+    if host in loopback_hosts:
+        return
+    print("!" + "=" * 62 + "!")
+    print("!  安全告警：当前绑定 " + host)
+    print("!  本服务无任何鉴权，仅限可信内网部署，禁止暴露公网！")
+    print("!  详见 docs/API.md；本机访问请使用默认值 127.0.0.1")
+    print("!" + "=" * 62 + "!")
+
+
 def parse_args() -> argparse.Namespace:
     """
     解析命令行启动参数
@@ -154,6 +178,9 @@ def main() -> None:
     print(f"  执行记录 : http://{args.host}:{args.port}/executions")
     print("  停止服务 : 按 Ctrl+C")
     print("=" * 64)
+
+    # 4.5 非回环绑定安全告警（仅提示不阻断；默认 127.0.0.1 不触发）
+    _warn_non_loopback_binding(args.host)
 
     # 5. 启动 Flask 内置开发服务器（阻塞）；use_reloader 跟随 debug 开关，
     #    关闭 reloader 可避免调试模式下进程被拉起两次导致的钩子/线程重复问题
