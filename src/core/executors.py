@@ -192,22 +192,30 @@ class PytestRunner(BaseExecutor):
 
         返回:
             list: 命令参数列表，如
-                  ["py", "-m", "pytest", path, "-q", "--tb=short"]
+                  [sys.executable, "-m", "pytest", "-q", "--tb=short", "--", path]
 
         异常:
             无
         """
-        # TODO: 真实测试集执行时按用例数据解析可执行
-        # 测试文件路径（当前用例暂无script_path字段，先用case_id占位）
+        # 测试文件路径：优先用 script_path，回落 case_id
         path = str(case.get("script_path") or case.get("case_id", ""))
         # sys.executable 指向当前解释器（虚拟环境下即 venv 的 python，
         # 保证用项目依赖跑 pytest），跨 Windows/Linux/macOS 通用；
         # 修前硬编码的 "py" 是 Windows 专属启动器，非 Windows 平台
         # 每条用例都会 OSError 降级为 error。
-        # "--" 是 pytest 的选项终止符：其后的 path 必被当作位置参数
-        # （测试文件路径）而非选项，杜绝 case_id 形如 "--version" 时
-        # 被 pytest 当选项执行、退出码 0 被误判为 passed 的假通过。
-        return [sys.executable, "-m", "pytest", "--", path, "-q", "--tb=short"]
+        #
+        # 选项终止符 "--" 的位置（Day44 P1-01）：
+        #   "--" 之后 pytest 的 argparse 停止解析选项，其后**全部**元素
+        #   一律作为位置参数（测试文件路径）。因此它必须放在**所有选项之后、
+        #   紧邻 path 之前**：
+        #       [.., "pytest", "-q", "--tb=short", "--", path]   ← 正确
+        #       [.., "pytest", "--", path, "-q", "--tb=short"]   ← 错误
+        #   错误写法会让 "-q" 与 "--tb=short" 同样被当成路径，pytest 报
+        #   "file or directory not found: -q" 并以退出码 4 收场，每条用例
+        #   都落入 error 分支——真实执行链路功能性不可用。
+        #   保持 "--" 的目的不变：阻断 case_id 形如 "--version" 时被 pytest
+        #   当选项执行、退出码 0 被误判为 passed 的假通过。
+        return [sys.executable, "-m", "pytest", "-q", "--tb=short", "--", path]
 
     def run_one(self, case: dict) -> ExecutionResult:
         """

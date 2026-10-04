@@ -417,8 +417,15 @@ class CacheClient:
             # ensure_ascii=False: 中文原样存储，可读且省字节
             payload = json.dumps(value, ensure_ascii=False)
             backend.setex(key, effective_ttl, payload)
-        except redis.RedisError as exc:
+        except (redis.RedisError, TypeError, ValueError) as exc:
+            # TypeError/ValueError 来自 json.dumps 本身（datetime / Decimal /
+            # 自定义对象不可序列化），**不是** RedisError。模块 docstring 承诺
+            # "所有命令异常一律在本层消化、绝不冒泡导致 API 返回 500"，
+            # 只捕 RedisError 会让该承诺在序列化环节失效（Day44 P3-05）。
+            # 当前 6 个调用点传入的都是已转字典的纯 JSON 结构、datetime 已由
+            # to_utc_iso 转字符串，故无实际触发路径，属契约层的潜在缺陷。
             logger.warning(f"缓存写入异常，已跳过 | key={key} | {exc}")
+            return
 
     # ------------------------------------------------------------------
     # 前缀失效（SCAN迭代，禁用KEYS）

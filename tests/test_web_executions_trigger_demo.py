@@ -458,20 +458,37 @@ class TestExecutionsTriggerApi:
         改为 sys.executable（跨平台且指向当前 venv 解释器）；并在 path
         前加 "--" 选项终止符，使 path 必被当作位置参数而非 pytest 选项。
         行为已变，按验收铁律 2 适配断言而非删除该测试。
+
+        追加修正（Day44 收尾 P1-01）: "--" 的**位置**也错了。argparse 在
+        "--" 之后停止解析选项，其后所有元素都是位置参数——原先把 "--" 放在
+        选项之前，等于把自身的 "-q" 与 "--tb=short" 一起变成了测试文件路径，
+        pytest 报 "file or directory not found: -q" 并以退出码 4 收场，
+        `TM_EXECUTOR=pytest` 下每条用例都落入 error 分支，真实执行链路
+        功能性不可用。正确顺序是所有选项在前、"--" 紧邻 path 之前。
         """
         runner = PytestRunner()
         case = {"case_id": "TM-UC-0002"}
 
-        # 命令拼装结构（骨架契约）
+        # 命令拼装结构（骨架契约）：选项全部在终止符之前，path 紧随其后
         command = runner.build_command(case)
         assert command == [
-            sys.executable, "-m", "pytest", "--", "TM-UC-0002",
-            "-q", "--tb=short",
+            sys.executable, "-m", "pytest",
+            "-q", "--tb=short", "--", "TM-UC-0002",
         ]
         # 回归点: 解释器必须是当前解释器而非 "py"，且必须有 "--" 终止符
         assert command[0] == sys.executable
         assert command[0] != "py", "不得回退到 Windows 专属的 py 启动器"
         assert "--" in command, "必须有选项终止符，防止 case_id 被当作选项"
+        # 回归点（Day44 P1-01）: 终止符之后只允许有 path 一个位置参数。
+        # 多出来的 "-q"/"--tb=short" 会被 pytest 当成不存在的测试文件，
+        # 每条用例都以 error 收尾——这个断言是本缺陷的直接护栏。
+        terminator_index = command.index("--")
+        assert command[terminator_index - 1] == "--tb=short", (
+            "所有选项必须位于终止符之前，否则被当作测试文件路径"
+        )
+        assert len(command) == terminator_index + 2, (
+            "终止符之后只应有 path 一个位置参数"
+        )
 
         def _mock_completed(returncode: int, stderr: str = "") -> MagicMock:
             """构造mock子进程完成对象（returncode/stdout/stderr）"""

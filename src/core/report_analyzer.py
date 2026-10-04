@@ -877,7 +877,10 @@ class ReportStatistics:
             if len(path_parts) >= 2:
                 return path_parts[-2]
 
-        logger.warning(f"模块名提取失败已降级unknown | 用例: {result.name}")
+        # 与 _extract_priority 的 severity 同理（Day44 P2-10）：提取链
+        # 全部落空只说明该用例没打模块类标签，是正常数据形态而非异常，
+        # 按 WARNING 逐条打点会淹没真实告警。
+        logger.debug(f"模块名提取失败已降级unknown | 用例: {result.name}")
         return UNKNOWN_LABEL
 
     @staticmethod
@@ -901,7 +904,14 @@ class ReportStatistics:
         values = result.get_label("severity")
         if values:
             return values[0]
-        logger.warning(f"优先级提取失败已降级unknown | 用例: {result.name}")
+        # severity 是 Allure 的**可选**标签（用例未加 @allure.severity 时
+        # 根本不存在），"没有该标签"是正常状态而非异常。原先按 WARNING 逐条
+        # 打点，而 WARNING 不受 TM_LOG_LEVEL 的 INFO 阈值约束，必然落盘并
+        # 刷控制台：1000 条用例的批次一次聚合就产生 1000+ 条同质告警，
+        # 把真正的 WARNING 淹没在噪声里（Day44 P2-10）。
+        # 降为 DEBUG：默认不可见，需要排查标签缺失时开 DEBUG 即可，
+        # 且随 loguru 的诊断开关可控。_extract_module 同理（见下）。
+        logger.debug(f"优先级标签缺失已降级unknown | 用例: {result.name}")
         return UNKNOWN_LABEL
 
 

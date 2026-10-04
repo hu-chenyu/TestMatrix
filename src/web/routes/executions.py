@@ -58,7 +58,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
-from flask import Blueprint, Response, request, stream_with_context
+from flask import Blueprint, Response, abort, request, stream_with_context
 
 from src.common.logger import LogManager
 from src.core.case_manager import (
@@ -72,7 +72,7 @@ from src.core.event_bus import get_channel
 from src.core.executors import VALID_EXECUTORS
 from src.core.task_queue import STATUS_PENDING, task_queue_client
 from src.web.exceptions import NotFoundError, ValidationError
-from src.web.pagination import parse_int_param
+from src.web.pagination import parse_int_param, parse_page_param
 from src.web.response import success
 
 # case_type合法枚举复用cases.py常量（单一事实来源，防两处定义漂移）
@@ -105,6 +105,24 @@ FRAME_INTERVAL_SECONDS = 0.05
 # ": heartbeat"注释帧保活（防中间代理/负载均衡掐断空闲连接）；
 # 注释帧不带id行，不会推进客户端的Last-Event-ID游标
 HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+# 单条SSE流的最长存活时间（秒，Day44 P2-08）：批次处于 pending/running 时
+# 流唯一的退出路径原本只有终态事件，心跳帧反而保证代理不掐断连接，
+# 于是一个卡死或超长批次会长期钉住一个 Flask 工作线程。取 1800 秒的依据：
+# 覆盖绝大多数真实执行批次的时长（Day45 真实执行器上线后单批可能到分钟级），
+# 超时也只是要求客户端重新打开，不会丢数据——终态批次走的是单帧直发分支。
+SSE_MAX_LIFETIME_SECONDS = 1800.0
+
+# 单个客户端IP的并发SSE订阅数上限（Day44 P2-08）：服务端此前没有任何
+# 并发订阅配额，配合"全站无鉴权"可用 N 条 EventSource 占满工作线程。
+# 取 5 的依据：正常用户同时最多开 1 条日志流（模态框同一时刻只显示一个），
+# 留出余量给"多标签页看不同批次"的合理用法。
+SSE_MAX_CONNECTIONS_PER_IP = 5
+
+# 进行中的SSE连接计数（key为客户端IP，value为当前连接数）。
+# 与SSE流同生命周期增减：进入流式响应时+1，finally中-1。
+_SSE_ACTIVE_CONNECTIONS: dict[str, int] = {}
+_SSE_CONNECTIONS_LOCK = threading.Lock()
 
 
 def _parse_int_param(name: str, default: int) -> int:
@@ -150,11 +168,11 @@ def list_executions():
         ValidationError: 分页参数非法时抛出（全局异常处理器统一转400）
         CaseManagerError: 核心层数据库异常原样上抛（兜底500）
     """
-    # 1. 分页参数解析与范围校验（口径与cases.py一致）
-    page = _parse_int_param("page", DEFAULT_PAGE)
+    # 1. 分页参数解析与范围校验（口径与cases.py一致；page 经 parse_page_param
+    #    收口到 [1, MAX_PAGE]，Day44 P2-07——page 无上界时超大 OFFSET 会让
+    #    SQLite 抛 OverflowError 并以 500 收场）
+    page = parse_page_param("page", DEFAULT_PAGE, "page和page_size")
     page_size = _parse_int_param("page_size", DEFAULT_PAGE_SIZE)
-    if page < 1:
-        raise ValidationError("page必须为大于等于1的整数")
     if page_size < 1 or page_size > MAX_PAGE_SIZE:
         raise ValidationError(f"page_size必须在1到{MAX_PAGE_SIZE}之间")
 
@@ -630,9 +648,52 @@ def stream_execution_events(execution_id: str):
     resume_live = last_sequence if last_namespace == EVENT_ID_NAMESPACE_LIVE else 0
     resume_db = last_sequence if last_namespace == EVENT_ID_NAMESPACE_DB else 0
 
+    # 4.0 并发订阅配额（Day44 P2-08）：在进入流式响应之前占用名额，
+    #     超限直接 429，避免无凭证客户端用大量 EventSource 占满工作线程。
+    #     名额在响应体被迭代完毕后由 finally 释放；客户端提前断开时
+    #     生成器被 GeneratorExit 关闭，finally 同样执行。
+    client_key = request.remote_addr or "unknown"
+    with _SSE_CONNECTIONS_LOCK:
+        current_count = _SSE_ACTIVE_CONNECTIONS.get(client_key, 0)
+        if current_count >= SSE_MAX_CONNECTIONS_PER_IP:
+            logger.warning(
+                f"SSE并发订阅数超限，拒绝新连接 | 客户端: {client_key} | "
+                f"当前: {current_count} | 上限: {SSE_MAX_CONNECTIONS_PER_IP}"
+            )
+            # 用 abort(429) 而非 ValidationError：后者按项目约定统一转 400，
+            # 但"配额超限"是资源语义，429 Too Many Requests 才能让客户端与
+            # 运维一眼看出该重试还是该改配置。HTTPException 处理器会保留
+            # 原始状态码（不会被吞成 500）。
+            abort(
+                429,
+                description=(
+                    f"并发日志订阅数已达上限（{SSE_MAX_CONNECTIONS_PER_IP}），"
+                    f"请关闭已打开的日志窗口后重试"
+                ),
+            )
+        _SSE_ACTIVE_CONNECTIONS[client_key] = current_count + 1
+
+    def _release_sse_slot() -> None:
+        """释放本请求占用的并发订阅名额（幂等，计数不会降到负数）。"""
+        with _SSE_CONNECTIONS_LOCK:
+            remaining = _SSE_ACTIVE_CONNECTIONS.get(client_key, 0) - 1
+            if remaining > 0:
+                _SSE_ACTIVE_CONNECTIONS[client_key] = remaining
+            else:
+                # 归零即移除键：否则 IP 集合会随客户端基数无界增长
+                _SSE_ACTIVE_CONNECTIONS.pop(client_key, None)
+
     # 4. 流式生成器（三分支: 降级快照 / 终态补发 / 实时订阅）
     @stream_with_context
     def event_generator() -> Iterator[str]:
+        try:
+            yield from _dispatch_events()
+        finally:
+            # 无论正常收流、提前 break、还是客户端断开抛 GeneratorExit，
+            # 都必须归还名额，否则一次异常断开就会永久占掉一个名额
+            _release_sse_slot()
+
+    def _dispatch_events() -> Iterator[str]:
         # 分支一: 通道不在注册表（pending极早期/CLI批次/终态已清理）
         if channel is None:
             if status_data["status"] == "finished":
@@ -753,19 +814,43 @@ def stream_execution_events(execution_id: str):
         # 分支三: 运行中批次: 订阅通道实时转发（断点回放+心跳）
         # （本线程持有channel引用，即使批次此刻终态且close_channel
         # 从注册表移除，残余事件仍能被读完，不丢终态事件）
+        #
+        # 存活时间与连接数上界（Day44 P2-08）：修复前本循环唯一的退出路径
+        # 是终态事件，批次处于 pending/running 时连接可无限存活——而心跳帧
+        # 反而保证反向代理不会掐断它，于是一个卡死或超长批次会长期钉住一个
+        # Flask 工作线程，且服务端没有任何并发订阅配额。叠加"全站无鉴权"
+        # （审查 P1-02）即构成一条无凭证的拒绝服务链：触发一个长批次，
+        # 再用 N 条 EventSource 占满工作线程。
+        # 两道闸：
+        #   ① 单流最长存活 SSE_MAX_LIFETIME_SECONDS，到期发一条终态提示帧
+        #      后正常收流（前端会按"已断开"提示重新打开，不会静默挂死）；
+        #   ② 单客户端（按 remote_addr）并发订阅数超 SSE_MAX_CONNECTIONS_PER_IP
+        #      直接返回 429，不进入流式响应。
         last_activity = time.monotonic()
+        stream_started = time.monotonic()
         for event in channel.subscribe(
             last_event_id=resume_live or None, tick=True
         ):
             if event is None:
                 # 心跳节拍（订阅0.5s限时等待超时）: 距上次活动
                 # 超过心跳间隔才发注释帧（保活但不刷屏）
-                if (
-                    time.monotonic() - last_activity
-                    >= HEARTBEAT_INTERVAL_SECONDS
-                ):
+                now = time.monotonic()
+                if now - last_activity >= HEARTBEAT_INTERVAL_SECONDS:
                     yield ": heartbeat\n\n"
-                    last_activity = time.monotonic()
+                    last_activity = now
+                # 存活超时判定放在心跳分支内：tick=True 保证每 0.5s
+                # 至少醒一次，不会因为批次长时间无事件而漏判超时
+                if now - stream_started >= SSE_MAX_LIFETIME_SECONDS:
+                    yield (
+                        ": stream-lifetime-exceeded "
+                        f"{SSE_MAX_LIFETIME_SECONDS}s\n\n"
+                    )
+                    logger.info(
+                        f"SSE流达到最长存活时间，主动收流 | "
+                        f"批次: {execution_id} | "
+                        f"存活: {now - stream_started:.1f}s"
+                    )
+                    return
                 continue
             # 真实事件转发（透传通道event_id）并刷新活动时间
             yield _format_sse_frame(

@@ -10,14 +10,26 @@
 // API 统一前缀：页面只传相对路径（如 "/cases/"），前缀在此处统一拼接
 const API_BASE = "/api";
 
+// 统一请求超时（毫秒，Day44 P2-09）：修复前 fetch 完全不设超时，
+// 数据库锁等待、网络黑洞或代理挂起时 await 永不返回——看板的刷新按钮、
+// 用例页的保存/删除确认、触发的提交按钮会一直停在 disabled + spinner，
+// 没有任何错误提示，用户唯一能做的只有刷新整个页面。服务端只有
+// /health 有 3 秒探测超时，列表与统计接口无任何上限。
+// 取 30000 的依据：覆盖"后端一次冷启动/慢查询"的正常上限，又不至于
+// 让用户干等；超过即主动 abort 并给出可读文案，按钮由调用方的 finally
+// 恢复（各页面的互斥锁复位均在 finally 路径上）。
+const API_REQUEST_TIMEOUT_MS = 30000;
+
 /**
  * 发起统一封装的 fetch 请求
  *
  * @param {string} path 接口相对路径（基于 /api，例如 "/reports/summary"）
- * @param {object} [options={}] fetch 原生配置项，支持 method/body/headers 等
+ * @param {object} [options={}] fetch 原生配置项，支持 method/body/headers；
+ *                            额外支持 timeout（毫秒，缺省 API_REQUEST_TIMEOUT_MS）；
+ *                            传 timeout: 0 表示不设超时（SSE 等长连接场景）
  * @returns {Promise<any>} 成功时 resolve 统一响应体的 data 字段；
  *                         响应无 JSON 体时 resolve null
- * @throws {Error} 网络异常或 HTTP 非 2xx 时抛出，message 可读可直接展示
+ * @throws {Error} 网络异常、超时或 HTTP 非 2xx 时抛出，message 可读可直接展示
  */
 async function request(path, options) {
     // 未传配置时兜底为空对象，避免解构/读取 undefined 报错
@@ -37,13 +49,40 @@ async function request(path, options) {
         finalOptions.body = JSON.stringify(finalOptions.body);
     }
 
+    // 超时闸（Day44 P2-09）：AbortController 让请求可被主动打断。
+    // 定时器与 fetch 同时挂起，谁先到用谁的结果；finally 清理定时器，
+    // 避免请求已返回后定时器仍挂着（长时间运行会累积定时器句柄）。
+    const timeoutMs =
+        typeof options.timeout === "number" ? options.timeout : API_REQUEST_TIMEOUT_MS;
+    let controller = null;
+    let timeoutId = null;
+    if (timeoutMs > 0 && typeof AbortController !== "undefined") {
+        controller = new AbortController();
+        finalOptions.signal = controller.signal;
+        timeoutId = setTimeout(function () {
+            controller.abort();
+        }, timeoutMs);
+    }
+
     // 发起网络请求，单独捕获网络层异常（断网/CORS/超时等）
     let response;
     try {
         response = await fetch(API_BASE + path, finalOptions);
     } catch (networkError) {
+        // 超时与普通网络故障给出不同文案：前者是"等太久主动放弃"，
+        // 后者是"根本没连上"，排障方向不同，不应混为一谈
+        if (controller && controller.signal.aborted) {
+            throw new Error(
+                "请求超时（" + Math.round(timeoutMs / 1000) +
+                "秒无响应），请稍后重试或刷新页面"
+            );
+        }
         // 网络层失败没有 HTTP 响应，转成带上下文的可读错误抛出
         throw new Error("网络请求失败，请检查连接后重试：" + networkError.message);
+    } finally {
+        if (timeoutId !== null) {
+            clearTimeout(timeoutId);
+        }
     }
 
     // 先尝试按统一响应体 {code, message, data} 解析 JSON

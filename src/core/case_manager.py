@@ -135,6 +135,15 @@ PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 # 分页查询每页最大条数（防止单页拉取全表，Web列表API分页上限）
 MAX_PAGE_SIZE = 100
 
+# 分页页码上界（Day44 P2-07）：SQL 的 OFFSET 是 (page-1)*page_size，
+# page 无上界时一个构造请求即可让数据库扫描并丢弃近乎整表的数据；SQLite 下
+# offset 超出 int64 还会抛 OverflowError，被包装成 SQLAlchemyError 后冒泡成
+# 500 —— 一个本该 400 的参数错误变成了服务端故障。取 10000 的依据：配合
+# MAX_PAGE_SIZE=100 即 offset 上限约 100 万行，已远超任何列表的合理翻页深度，
+# 同时远低于 int64 溢出阈值。本常量是 page 上界的单一事实来源，Web 层
+# src/web/pagination.py 从此处 import，避免两条路径的上界口径分叉。
+MAX_PAGE = 10000
+
 # 芯片板卡用例的路径特征关键词（路径命中任意词即判定为chip类型，统一小写匹配）
 CHIP_PATH_KEYWORDS = ("chip", "serial", "telnet")
 
@@ -339,6 +348,25 @@ def generate_execution_id() -> str:
         logger.debug(f"批次号碰撞，自动重生成 | {execution_id}")
 
 
+def _escape_like(value: str) -> str:
+    r"""
+    转义 SQL LIKE 模式中的元字符（Day44 P2-12）
+
+    LIKE 的元字符 `%`（任意长度）与 `_`（单字符）出现在用户输入里会被
+    当作通配符：搜索 "%" 生成的模式是 "%%%"，语义从"包含百分号"退化为
+    "匹配任意"，返回全表数据——结果与用户意图完全相反。
+    先把反斜杠本身也转义（否则用户输入 `a\%` 时反斜杠被 LIKE 当转义符
+    吃掉，导致后续字符的转义失效），再转义两个元字符。
+
+    参数:
+        value (str): 用户原始输入（调用方负责 strip 与 lower）
+
+    返回:
+        str: 可安全嵌入 LIKE 模式的可搜索文本
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class CaseManager:
     """
     用例调度与管理器
@@ -408,12 +436,28 @@ class CaseManager:
         updated = 0
         try:
             with DatabaseSession.session_scope() as session:
-                for case in cases:
-                    existing = (
+                # 一次性把本批 case_id 全部查出来建内存映射（Day44 P2-13）。
+                # 修复前是循环内逐条 .filter_by().first()，N 条用例 = N 次
+                # SELECT + N 次 INSERT；虽有 case_id 唯一索引兜底使单次查找
+                # 不慢，但数百至数千条导入仍产生同量级往返（典型数百毫秒
+                # 到数秒）。改成一次 IN 查询后，SELECT 从 N 次降到 1 次，
+                # 写路径不变（仍逐条 add 交给 session 统一 flush）。
+                #
+                # 同一文件内重复 case_id 的处理：后写入者覆盖先写入者且被计入
+                # updated。新建对象会即时登记回 existing_map（见循环内注释），
+                # 因此重复项命中的是内存对象而非再插一条，行为与修复前
+                # 依赖 autoflush 的逐条查询完全一致。
+                wanted_ids = {str(case["case_id"]) for case in cases}
+                existing_map: dict[str, Any] = {}
+                if wanted_ids:
+                    for row in (
                         session.query(TestCase)
-                        .filter_by(case_id=case["case_id"])
-                        .first()
-                    )
+                        .filter(TestCase.case_id.in_(wanted_ids))
+                        .all()
+                    ):
+                        existing_map[row.case_id] = row
+                for case in cases:
+                    existing = existing_map.get(str(case["case_id"]))
                     if existing is not None:
                         # 已存在: 更新业务字段，保留creator与status
                         existing.name = case["name"]
@@ -423,18 +467,24 @@ class CaseManager:
                         existing.description = cls._build_description(case)
                         updated += 1
                     else:
-                        session.add(
-                            TestCase(
-                                case_id=case["case_id"],
-                                name=case["name"],
-                                module=case["module"],
-                                priority=case["priority"],
-                                case_type=case_type,
-                                status="active",
-                                description=cls._build_description(case),
-                                creator=creator,
-                            )
+                        new_row = TestCase(
+                            case_id=case["case_id"],
+                            name=case["name"],
+                            module=case["module"],
+                            priority=case["priority"],
+                            case_type=case_type,
+                            status="active",
+                            description=cls._build_description(case),
+                            creator=creator,
                         )
+                        session.add(new_row)
+                        # 关键：把新建对象也登记回映射。批量查询发生在循环
+                        # 之前，不再依赖 SQLAlchemy 的隐式 autoflush 让
+                        # "下一次查询能看见上一次刚插入的行"——若不登记，
+                        # 同一文件内重复的 case_id 会被当成两条新记录各插一次，
+                        # flush 时撞唯一约束，整批导入回滚。
+                        # 登记后重复项走更新分支，与修复前的逐条查询行为一致。
+                        existing_map[str(case["case_id"])] = new_row
                         inserted += 1
         except SQLAlchemyError as exc:
             logger.error(f"用例入库数据库异常 | 文件: {file_path} | {exc}")
@@ -599,9 +649,9 @@ class CaseManager:
         """
         # 分页参数防御校验（bool是int子类需显式排除；非法limit/offset
         # 会在数据库层直接报错，此处提前拦截给出业务友好提示）
-        if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+        if not isinstance(page, int) or isinstance(page, bool) or not (1 <= page <= MAX_PAGE):
             raise CaseManagerError(
-                f"page必须为大于等于1的整数: {page!r}",
+                f"page必须为1到{MAX_PAGE}之间的整数: {page!r}",
                 context={"operation": "list_cases_paged", "page": page},
             )
         if (
@@ -655,12 +705,20 @@ class CaseManager:
                 # keyword模糊搜索: case_id/name/description三字段任一命中，
                 # 统一转小写实现跨库（SQLite/MySQL）不区分大小写匹配
                 if keyword is not None and str(keyword).strip():
-                    pattern = f"%{str(keyword).strip().lower()}%"
+                    # LIKE 通配符转义（Day44 P2-12）：用户搜索框输入的
+                    # "%" 与 "_" 是 LIKE 的元字符，不转义时 pattern 变成
+                    # "%%%" 或 "%_%"，语义从"包含该字面串"退化为
+                    # "匹配任意"——搜 '%' 会返回全表，与用户意图完全相反。
+                    # escape="\\" 让反斜杠成为转义符，跨 SQLite/MySQL 一致。
+                    escaped_keyword = _escape_like(str(keyword).strip().lower())
+                    pattern = f"%{escaped_keyword}%"
                     query = query.filter(
                         or_(
-                            func.lower(TestCase.case_id).like(pattern),
-                            func.lower(TestCase.name).like(pattern),
-                            func.lower(TestCase.description).like(pattern),
+                            func.lower(TestCase.case_id).like(pattern, escape="\\"),
+                            func.lower(TestCase.name).like(pattern, escape="\\"),
+                            func.lower(TestCase.description).like(
+                                pattern, escape="\\"
+                            ),
                         )
                     )
 
@@ -731,6 +789,10 @@ class CaseManager:
             CaseManagerError: 数据库查询异常时抛出（context携带
                               operation与case_id定位信息）
         """
+        # strip 归一化（Day44 P3-12）：原先只判空、查询用原值，
+        # 传入 " TM-0001 " 会让守卫放行但按带空格值查库 → 未命中 →
+        # 报"用例不存在"，而数据确实存在。
+        case_id = str(case_id).strip()
         try:
             with DatabaseSession.session_scope() as session:
                 row = (
@@ -941,6 +1003,9 @@ class CaseManager:
         if "priority" in payload:
             payload["priority"] = str(payload["priority"]).strip().upper()
 
+        # strip 归一化（Day44 P3-12，与 get_case/delete_case 同口径）
+        case_id = str(case_id).strip()
+
         try:
             with DatabaseSession.session_scope() as session:
                 row = (
@@ -997,6 +1062,9 @@ class CaseManager:
                 "用例编号不能为空",
                 context={"operation": "delete_case"},
             )
+
+        # strip 归一化（Day44 P3-12，与 get_case/update_case 同口径）
+        case_id = str(case_id).strip()
 
         try:
             with DatabaseSession.session_scope() as session:
@@ -1128,6 +1196,8 @@ class CaseManager:
         end_time: datetime,
         duration: float,
         error_message: str | None = None,
+        environment: str | None = None,
+        executor: str | None = None,
     ) -> None:
         """
         记录单条用例执行结果
@@ -1145,6 +1215,14 @@ class CaseManager:
             duration (float): 执行耗时（秒，支持亚秒精度）
             error_message (str | None): 失败/错误的异常信息，
                                         result为failed/error时必填
+            environment (str | None): 执行环境（dev/test/prod）。缺省时
+                                     从批次行读取该批次的真实环境；批次行
+                                     也不存在时回落到模型默认值
+                                     （Day44 P2-03：修复前明细恒为 dev/local，
+                                     与批次元数据矛盾——以 prod 触发时批次
+                                     显示 prod 而每条明细显示 dev）
+            executor (str | None): 执行器类型（simulated/pytest 等），
+                                   缺省处理口径同 environment
 
         返回:
             None
@@ -1155,16 +1233,21 @@ class CaseManager:
                               数据库操作异常时抛出，context携带operation定位
         """
         # 批次号与用例编号基础校验
+        # strip 归一化（Day44 P3-12）：原先只判空、查询/写入用原值，
+        # 传入 " TM-0001 " 会让守卫放行但按带空格值查询/落库——写进去的
+        # 批次号带空格，后续按干净批次号聚合时查不到明细。
         if not execution_id or not str(execution_id).strip():
             raise CaseManagerError(
                 "执行批次号不能为空",
                 context={"operation": "record_execution", "case_id": case_id},
             )
+        execution_id = str(execution_id).strip()
         if not case_id or not str(case_id).strip():
             raise CaseManagerError(
                 "用例编号不能为空",
                 context={"operation": "record_execution", "execution_id": execution_id},
             )
+        case_id = str(case_id).strip()
 
         # result合法性校验
         if result not in VALID_RESULTS:
@@ -1193,18 +1276,37 @@ class CaseManager:
 
         try:
             with DatabaseSession.session_scope() as session:
-                session.add(
-                    TestExecution(
-                        execution_id=execution_id,
-                        case_id=case_id,
-                        case_name=case_name,
-                        result=result,
-                        start_time=start_time,
-                        end_time=end_time,
-                        duration=duration,
-                        error_message=error_message,
+                # environment/executor 缺省时从批次行取真实值（Day44 P2-03）。
+                # 批次行也不存在（历史/CLI 直调路径）则留 None，交给 ORM 的
+                # 列默认值，与修复前的行为保持一致，不制造新的数据缺口。
+                resolved_env = environment
+                resolved_executor = executor
+                if resolved_env is None or resolved_executor is None:
+                    batch_row = (
+                        session.query(TestExecutionBatch)
+                        .filter_by(execution_id=execution_id)
+                        .first()
                     )
-                )
+                    if batch_row is not None:
+                        if resolved_env is None:
+                            resolved_env = batch_row.environment
+                        if resolved_executor is None:
+                            resolved_executor = batch_row.executor
+                row_kwargs: dict[str, Any] = {
+                    "execution_id": execution_id,
+                    "case_id": case_id,
+                    "case_name": case_name,
+                    "result": result,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "duration": duration,
+                    "error_message": error_message,
+                }
+                if resolved_env is not None:
+                    row_kwargs["environment"] = resolved_env
+                if resolved_executor is not None:
+                    row_kwargs["executor"] = resolved_executor
+                session.add(TestExecution(**row_kwargs))
         except SQLAlchemyError as exc:
             logger.error(
                 f"执行结果入库数据库异常 | 批次: {execution_id} | "
@@ -1272,12 +1374,17 @@ class CaseManager:
                     )
 
                 # 结果计数聚合
+                # total 恒 > 0：上一步已对空 records 抛 CaseNotFoundError，
+                # 故除零不变量由该 raise 保证。此处直接相除即可（Day44 P3-08：
+                # 原先写的是 `if total else 0.0`，else 分支永不可达，会误导
+                # 后续维护者以为空批次能走到这里、并掩盖"空批次已在上一行
+                # 被拒"这一真实契约）。
                 total = len(records)
                 passed = sum(1 for r in records if r.result == "passed")
                 failed = sum(1 for r in records if r.result == "failed")
                 error = sum(1 for r in records if r.result == "error")
                 skipped = sum(1 for r in records if r.result == "skipped")
-                pass_rate = round(passed / total, 4) if total else 0.0
+                pass_rate = round(passed / total, 4)
 
                 # upsert到defect_statistics（execution_id唯一键）
                 statistic = (
@@ -1368,10 +1475,11 @@ class CaseManager:
                               context携带operation定位信息
         """
         # 分页参数防御校验（口径与list_cases_paged一致: bool是int子类
-        # 需显式排除，非法limit/offset提前拦截给出业务友好提示）
-        if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+        # 需显式排除，非法limit/offset提前拦截给出业务友好提示；
+        # page 上界见 MAX_PAGE，Day44 P2-07）
+        if not isinstance(page, int) or isinstance(page, bool) or not (1 <= page <= MAX_PAGE):
             raise CaseManagerError(
-                f"page必须为大于等于1的整数: {page!r}",
+                f"page必须为1到{MAX_PAGE}之间的整数: {page!r}",
                 context={"operation": "list_executions_paged", "page": page},
             )
         if (

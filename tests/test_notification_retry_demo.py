@@ -20,6 +20,7 @@ import allure
 import pytest
 from src.common.env_manager import env_manager
 from src.core.notification import (
+    MAX_BACKOFF_DELAY_SECONDS,
     BaseNotifier,
     NotificationDeadLetterRepository,
     NotificationRouter,
@@ -256,13 +257,22 @@ class TestRetryStrategy:
 
     def test_backoff_configurable(self, temp_db):
         """
-        退避可配置: max_retries=4时序列精确[1,2,4,8]
+        退避可配置: max_retries=4 时序列为[1,2,4,5]（末位被单次上界截断）
 
         参数:
             temp_db (Path): 临时数据库fixture
 
         返回:
             无
+
+        变更说明（Day44 收尾 P3-02）: 指数退避原先**没有单次上界**，
+        base_delay 本身只校验了 >0 与有限性，配成 3600 时第 3 次退避就是
+        4 小时；且第 ~1025 次后 2**(attempts-1) 溢出为 inf，
+        time.sleep(inf) 抛 OverflowError，从 _send_with_retry 逃到 notify
+        的兜底 except——results 记 False 但不写死信不写历史，通知静默
+        无留痕；队列模式下更会直接把 worker 卡死。现按 MAX_BACKOFF_DELAY_
+        SECONDS=5.0 封顶，故正常的 [1,2,4,8] 变为 [1,2,4,5]。
+        行为已变，按验收铁律 2 适配断言而非删除该测试。
         """
         notifier = FakeNotifier("wechat", succeed_from=999)
         router, sleeper = make_router(
@@ -273,7 +283,11 @@ class TestRetryStrategy:
 
         assert results == {"wechat": False}
         assert notifier.send_count == 5
-        assert sleeper.delays == [1.0, 2.0, 4.0, 8.0]
+        # 指数退避在达到单次上界后被截断：1→2→4→(8 被截为 5)
+        assert sleeper.delays == [1.0, 2.0, 4.0, 5.0]
+        assert max(sleeper.delays) <= MAX_BACKOFF_DELAY_SECONDS, (
+            "任一次退避都不得突破单次上界"
+        )
 
     def test_send_exception_retried(self, temp_db):
         """

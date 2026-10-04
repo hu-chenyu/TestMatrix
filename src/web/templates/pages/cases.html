@@ -7,6 +7,17 @@
 {% block title %}用例管理 - TestMatrix{% endblock %}
 
 {% block content %}
+<!-- ====== 0. 无脚本降级提示（Day44 P3-20） ======
+     三页面的首屏内容全部由 JS 异步渲染，HTML 里直出的是"加载中"占位行。
+     JS 被拦截/加载失败/CSP 误配时，占位行永不替换，页面停在无限 spinner，
+     与"后端慢"或"后端挂了"在视觉上完全不可区分，排查成本很高。
+     noscript 只在脚本未执行时渲染，代价为零。 -->
+<noscript>
+    <div class="alert alert-warning" role="alert">
+        <i class="bi bi-exclamation-triangle me-1"></i>
+        本页的数据需要 JavaScript 才能加载，请先在浏览器中启用 JavaScript 后刷新页面。
+    </div>
+</noscript>
 <!-- ====== 1. 页头行：标题 + 批量导入 + 新增用例 ====== -->
 <div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
     <h1 class="h3 mb-0">
@@ -257,7 +268,8 @@
 </div>
 
 <!-- ====== 7. 批量导入隐藏文件输入：按钮 click 触发，change 后上传 ====== -->
-<input type="file" id="importFileInput" accept=".yaml,.yml,.xlsx" class="d-none">
+<input type="file" id="importFileInput" accept=".yaml,.yml,.xlsx" class="d-none"
+       aria-label="选择用例数据文件（支持 YAML 或 Excel）">
 {% endblock %}
 
 {% block extra_js %}
