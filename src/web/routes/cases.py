@@ -49,7 +49,7 @@ from src.web.exceptions import (
     NotFoundError,
     ValidationError,
 )
-from src.web.pagination import parse_int_param
+from src.web.pagination import parse_int_param, parse_page_param
 from src.web.response import created, no_content, success
 
 logger = LogManager.get_logger()
@@ -314,11 +314,12 @@ def list_cases():
         ValidationError: 分页参数非法 / case_type或status取值非法时
                          抛出（全局异常处理器统一转400响应）
     """
-    # 1. 分页参数解析与范围校验
-    page = _parse_int_param("page", DEFAULT_PAGE)
+    # 1. 分页参数解析与范围校验（page 经 parse_page_param 收口到
+    #    [1, MAX_PAGE]；上界的单一事实来源是核心层 case_manager.MAX_PAGE，
+    #    Day44 P2-07。公共解析层 parse_int_param 仍只做取值转换，
+    #    范围口径留在调用点，避免三处路由被一处需求带着一起变）
+    page = parse_page_param("page", DEFAULT_PAGE, "page和page_size")
     page_size = _parse_int_param("page_size", DEFAULT_PAGE_SIZE)
-    if page < 1:
-        raise ValidationError("page必须为大于等于1的整数")
     if page_size < 1 or page_size > MAX_PAGE_SIZE:
         raise ValidationError(f"page_size必须在1到{MAX_PAGE_SIZE}之间")
 

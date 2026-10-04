@@ -25,10 +25,13 @@ services:
       TM_DB_MYSQL_HOST: mysql
       TM_DB_MYSQL_PORT: "3306"
       TM_DB_MYSQL_USER: ${TM_DB_MYSQL_USER:-testmatrix}
-      # 口令不再有明文默认值：未设置时 compose 直接报错退出（Day43 收尾 D4）。
-      # 原先此处有一个写死的明文默认口令，会随本文件入库，任何照抄起环境的
-      # 人拿到的都是同一个弱口令。
-      TM_DB_MYSQL_PASSWORD: ${TM_DB_MYSQL_PASSWORD:?必须在 .env 设置 TM_DB_MYSQL_PASSWORD}
+      # 口令不在此处声明（Day44 P2-01）。原先写的是
+      #   TM_DB_MYSQL_PASSWORD: ${TM_DB_MYSQL_PASSWORD:?必须在 .env 设置 ...}
+      # 但 compose 的 ${VAR:?} 是**无条件求值**的——TM_DB_TYPE 默认 sqlite、
+      # 本服务根本不会用到 MySQL，新克隆仓库执行 README 的开箱命令
+      # `docker compose ... up test-runner` 仍会在解析阶段直接报错退出。
+      # 口径：sqlite 路径零配置可跑；MySQL 口令只由下方 mysql 服务
+      # （--profile mysql 才启用）强制要求，该处的守卫才是恰当位置。
       TM_DB_MYSQL_DATABASE: ${TM_DB_MYSQL_DATABASE:-testmatrix}
     volumes:
       # 测试产物（日志/Allure结果）挂载宿主机，便于本机查看报告
@@ -50,7 +53,10 @@ services:
       MYSQL_PASSWORD: ${TM_DB_MYSQL_PASSWORD:?必须在 .env 设置 TM_DB_MYSQL_PASSWORD}
       TZ: Asia/Shanghai
     ports:
-      - "3306:3306"
+      # 仅绑定回环（Day44 P2-02）：平台无鉴权，MySQL 端口对外暴露等于把
+      # 一个弱口令可爆破的数据库直接挂到公网。需要从别的机器连时，
+      # 显式改成 "0.0.0.0:3306:3306" 并自行承担风险。
+      - "127.0.0.1:3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:

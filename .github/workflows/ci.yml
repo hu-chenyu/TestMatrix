@@ -26,6 +26,11 @@ on:
   pull_request:
     branches: [main]
 
+# 测试数下限基线（Day44 P2-15）：只增不减，用于阻断"删测试换绿"。
+# 新增测试后把该值调大到新的收集数；调小需在 PR 中说明等价覆盖理由。
+env:
+  TEST_COUNT_BASELINE: "1165"
+
 jobs:
   test:
     name: Python ${{ matrix.python-version }}${{ matrix.experimental && '（探测版本，不阻断）' || '' }}
@@ -158,12 +163,34 @@ jobs:
           echo "::warning::TestMatrix mypy 全量存量错误 ${baseline_count} 个（趋势基线，只减不增；增量步骤已硬阻断变更文件自身新增错误）"
           echo "全量基线错误数=${baseline_count}（豁免不阻断），mypy 退出码=${baseline_code}"
 
-      - name: pytest 全量回归 + 覆盖率门禁（--cov-fail-under=85，测试数以实际输出为准）
+      - name: pytest 全量回归 + 覆盖率门禁（--cov-fail-under=85，测试数下限断言）
         id: pytest-run
         # 覆盖率不足/测试失败退出码 1 判红；退出码 5（无测试被收集）同样判红——
         # testpaths 固定为 tests/，0 收集只可能是配置/路径损坏，不设容忍以防静默通过
         run: |
           python -m pytest -q --cov=src --cov-report=term-missing --cov-fail-under=85
+
+      - name: 测试总数下限断言（防止"删测试换绿"）
+        # Day44 P2-15。此前 CI 对"测试数以实际运行为准"、不做任何下限校验，
+        # 意味着删除任意数量的测试，CI 依然全绿——项目用 44 天、上千条用例
+        # 建起的回归护栏没有任何机器校验的下限，是"改代码→删掉不通过的测试"
+        # 这条路径的天然缺口。
+        # 口径：基线只增不减。本次实际收集数 < 基线即判红；新增用例不受限。
+        # 维护约定：TEST_COUNT_BASELINE 只允许**调大**，且必须与新增测试同一个
+        # 提交（调小需在 PR 中说明理由并给出等价覆盖）。
+        run: |
+          BASELINE="${{ env.TEST_COUNT_BASELINE }}"
+          ACTUAL=$(python -m pytest -q --collect-only 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
+          echo "测试数基线: $BASELINE / 本次实际收集: $ACTUAL"
+          if [ -z "$ACTUAL" ]; then
+            echo "::error::无法解析实际收集到的用例数，门禁 fail-closed"
+            exit 1
+          fi
+          if [ "$ACTUAL" -lt "$BASELINE" ]; then
+            echo "::error::测试数从 $BASELINE 降至 $ACTUAL，违反『测试只增不减』铁律（差 $((BASELINE - ACTUAL)) 条）"
+            exit 1
+          fi
+          echo "测试数下限断言通过（$ACTUAL >= $BASELINE）"
 
       - name: pip-audit 完整报告（仅展示用，是否阻断由下一步分级门禁裁定）
         # 显式 -r requirements.txt：审计项目依赖闭包，不把 ruff/mypy/pip-audit 工具链自身算进来

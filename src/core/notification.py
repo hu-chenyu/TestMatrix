@@ -99,6 +99,25 @@ DEFAULT_MAX_RETRIES = 3
 # 指数退避基准秒数（第k次失败后等待 base×2^(k-1)，序列1/2/4/8...）
 DEFAULT_BASE_DELAY = 1.0
 
+# 重试次数上界（Day44 P3-02）：配置值只校验下界时，TM_NOTIFY_MAX_RETRIES
+# 配成 30 会让退避序列和约 17 年，且 2**(attempts-1) 在第 ~1025 次溢出为
+# inf 导致 time.sleep(inf) 抛 OverflowError、通知静默无留痕。取 5 的依据：
+# 覆盖"瞬时网络抖动"所需的重试深度（1+5=6 次尝试），再深的收益已趋近于零
+# 而代价是线性增长的占用时间。
+MAX_RETRIES_CAP = 5
+
+# 单次退避时长上界（秒，Day44 P3-02）：base_delay 本身只校验 >0 与有限性，
+# 配成 3600 时第 3 次退避就是 4 小时。取 5 秒：既保留了指数退避的"给对端
+# 留恢复时间"语义，又不会让单次等待吞掉整个 worker 的时间预算。
+MAX_BACKOFF_DELAY_SECONDS = 5.0
+
+# 单渠道发送总时间预算（秒，Day44 P2-05）：通知在 _execute_batch_async 内
+# 同步发生，而 Day32 任务队列是单 worker 串行消费——渠道故障期间重试会把
+# 消费线程整体堵住，后续任务一起排队。取 30 秒的依据：默认 3 次重试
+# （4 次尝试）在正常退避下约 7 秒，30 秒留足 SMTP/webhook 单次超时的余量，
+# 超出即提前收尾并如实记账失败。
+MAX_SEND_BUDGET_SECONDS = 30.0
+
 # 死信fail_reason落库截断长度（字符）
 REASON_MAX_LEN = 1000
 
@@ -1397,9 +1416,26 @@ class NotificationRouter:
                 "TM_NOTIFY_MAX_RETRIES", DEFAULT_MAX_RETRIES
             )
         if not isinstance(max_retries, int) or isinstance(max_retries, bool) \
-                or max_retries < 0:
-            logger.warning(f"重试次数非法: {max_retries!r}，按0处理")
-            max_retries = 0
+                or not (0 <= max_retries <= MAX_RETRIES_CAP):
+            # 上界同样必须收口（Day44 P3-02）：修复前只校验下界，
+            # 配成 TM_NOTIFY_MAX_RETRIES=30 时退避序列和约 5.4e8 秒（≈17年），
+            # 且第 ~1025 次后 2**(attempts-1) 溢出为 inf，
+            # time.sleep(inf) 抛 OverflowError —— 从 _send_with_retry 逃到
+            # notify 的兜底 except，results 记 False 但不写死信不写历史，
+            # 通知静默无留痕。队列模式下更会直接把 worker 卡死。
+            if (
+                isinstance(max_retries, int)
+                and not isinstance(max_retries, bool)
+                and max_retries > MAX_RETRIES_CAP
+            ):
+                logger.warning(
+                    f"重试次数超上界: {max_retries} > {MAX_RETRIES_CAP}，"
+                    f"按上界 {MAX_RETRIES_CAP} 处理"
+                )
+                max_retries = MAX_RETRIES_CAP
+            else:
+                logger.warning(f"重试次数非法: {max_retries!r}，按0处理")
+                max_retries = 0
         self.max_retries = max_retries
 
         if base_delay is None:
@@ -1665,6 +1701,10 @@ class NotificationRouter:
         max_attempts = 1 + self.max_retries
         attempts = 0
         last_reason = ""
+        # 累计退避时长（Day44 P2-05）：只统计本函数主动等待的时间，
+        # 不含 notifier.send 自身的网络耗时——后者由各渠道的超时参数
+        # 单独约束，此处只管"我们主动睡多久"。
+        elapsed = 0.0
         while attempts < max_attempts:
             attempts += 1
             try:
@@ -1676,7 +1716,27 @@ class NotificationRouter:
 
             # 还有下一次才计算等待（最后一次失败后不再空等）
             if attempts < max_attempts:
-                delay = self.base_delay * (2 ** (attempts - 1))
+                # 单次退避封顶（Day44 P3-02）：base_delay 本身只校验了
+                # >0 与有限性，配成 3600 时第 3 次退避就是 4 小时。
+                # min() 封顶同时顺带消除了 2**(attempts-1) 的溢出风险。
+                delay = min(
+                    self.base_delay * (2 ** (attempts - 1)),
+                    MAX_BACKOFF_DELAY_SECONDS,
+                )
+                # 累计预算封顶（Day44 P2-05）：Day32 的任务队列是单 worker
+                # 串行消费，而 _execute_batch_async 内的通知是**同步**发生的。
+                # 渠道故障时"4 次尝试 × SMTP 超时 + 退避"最坏可把 worker
+                # 堵住近一分钟，期间所有后续任务一起排队、队列深度持续增长。
+                # 预算耗尽即提前收尾，把剩余重试机会让给下一个批次。
+                if elapsed >= MAX_SEND_BUDGET_SECONDS:
+                    logger.warning(
+                        f"通知发送预算耗尽，提前收尾（剩余重试机会让给后续批次）| "
+                        f"渠道: {notifier.channel_name} | "
+                        f"已用: {elapsed:.2f}s / 预算: {MAX_SEND_BUDGET_SECONDS}s"
+                    )
+                    return False, attempts, f"{last_reason}（发送预算耗尽提前收尾）"
+                remaining_budget = MAX_SEND_BUDGET_SECONDS - elapsed
+                delay = min(delay, remaining_budget)
                 if self.use_jitter:
                     delay += random.uniform(0, delay * 0.25)
                 logger.warning(
@@ -1685,6 +1745,7 @@ class NotificationRouter:
                     f"等待: {delay:.2f}s"
                 )
                 self.sleeper(delay)
+                elapsed += delay
 
         return False, attempts, last_reason
 
@@ -2153,8 +2214,17 @@ class NotificationHistoryRepository:
         返回:
             Tuple[List[Dict], int]: (当前页字典列表, 满足条件的总条数)
         """
+        from src.core.case_manager import MAX_PAGE
         from src.db.db_session import DatabaseSession
         from src.db.models import NotificationHistory
+
+        # 页码上界（Day44 P3-07）：OFFSET 是 (page-1)*page_size，
+        # page 无上界时 page=1000000 会产生千万级 offset，SQLite 下退化为
+        # 全表扫描。判据与 src/web/pagination.py 的 MAX_PAGE 同源，
+        # 此处按核心层口径直接 import，避免两处上界再次分叉。
+        if not isinstance(page, int) or isinstance(page, bool) \
+                or not (1 <= page <= MAX_PAGE):
+            raise ValueError(f"page必须为1到{MAX_PAGE}之间的整数: {page!r}")
 
         session = DatabaseSession.get_session()
         try:

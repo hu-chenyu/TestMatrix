@@ -41,6 +41,7 @@ payload约定（与_execute_batch_async真实签名严格对齐）:
 
 import json
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -50,6 +51,11 @@ from src.common.env_manager import env_manager
 from src.common.logger import LogManager
 
 logger = LogManager.get_logger()
+
+# redis.from_url 本身无类型标注（redis 客户端未提供 py.typed），在 typed
+# 上下文直接调用会被 mypy 判为 no-untyped-call。与 src/core/cache.py:61
+# 同一处置：先收进一个标注为 Callable[..., Any] 的别名再调用。
+_REDIS_FROM_URL: Callable[..., Any] = redis.from_url
 
 # fake://协议标记: 与Day31缓存层同一约定，测试内存实例
 FAKE_SCHEME = "fake://"
@@ -63,6 +69,11 @@ STATUS_FAILED = "failed"
 # worker停止时join的最长等待秒数（一批次模拟执行约0.01s/条，
 # 3秒足够在途任务收尾；真实长任务由daemon属性保证不阻进程退出）
 WORKER_JOIN_TIMEOUT_SECONDS = 3.0
+
+# 任务状态hash的存活秒数（Day44 P3-03）：状态hash只是调度层镜像，
+# 权威状态在 SQLite 批次行，批次终态后无需长期保留。取 24 小时是
+# 为了覆盖"跨夜未消费的积压任务仍可查到调度状态"这一运维排查场景。
+TASK_STATUS_TTL_SECONDS = 24 * 3600
 
 
 def task_status_key(execution_id: str) -> str:
@@ -233,11 +244,33 @@ class TaskQueueClient:
                     )
                     return None
             else:
-                self._backend = redis.from_url(
-                    url,
-                    decode_responses=True,
-                    socket_timeout=2,
-                )
+                # 真实Redis客户端。构建期异常必须在此兜底（Day44 P2-04）：
+                # 三个公开方法（enqueue/dequeue/set_status）都是"先取后端
+                # 再进 try"，而 redis.from_url 对非法 URL 抛的是 ValueError
+                # （端口非数字 / scheme非法 / 含中文冒号），**不是 RedisError**，
+                # 完全没有被方法体内的 except redis.RedisError 覆盖。
+                # 未兜底时的后果是双重的：
+                #   ① trigger 路由的 enqueue() 冒泡到全局处理器 → 接口 500，
+                #      绕过了"入队失败 fallback 裸线程、接口不 500"的项目铁律，
+                #      已落的批次行永久停在 pending；
+                #   ② TaskWorker.run() 的 dequeue() 在 while 循环内、任何
+                #      try 之外，异常会逃出线程目标函数直接把 worker 打死，
+                #      且业务日志无痕、后续任务永久堆积。
+                # 与 src/core/cache.py:307-325 同一套判据，保持两侧一致。
+                try:
+                    self._backend = _REDIS_FROM_URL(
+                        url,
+                        decode_responses=True,
+                        socket_timeout=2,
+                    )
+                except (ValueError, TypeError, redis.RedisError) as exc:
+                    # 不缓存异常对象：_backend 保持 None，下次访问会重新尝试
+                    # 构建，配置修好后可自愈，无需重启进程
+                    logger.warning(
+                        f"任务队列后端构建失败，入队降级并交由调用方 fallback | "
+                        f"URL: {url} | 异常: {type(exc).__name__}: {exc}"
+                    )
+                    return None
                 logger.debug(f"任务队列后端已构建 | 类型: redis | URL: {url}")
         return self._backend
 
@@ -394,6 +427,12 @@ class TaskQueueClient:
                 mapping[field_name] = str(field_value)
         try:
             backend.hset(task_status_key(execution_id), mapping=mapping)
+            # 状态 hash 加 TTL（Day44 P3-03）：原先只 hset 不设过期，
+            # 每个执行批次会在 Redis 里留一个永久 key（error 字段失败时
+            # 可达数百字符），与 cache.py 全量 setex 的策略不一致，长期
+            # 运行时无界累积且无任何清理路径。批次终态后该 hash 只是
+            # 调度层镜像，权威状态在 SQLite 批次行，过期不影响正确性。
+            backend.expire(task_status_key(execution_id), TASK_STATUS_TTL_SECONDS)
         except redis.RedisError as exc:
             logger.warning(
                 f"任务状态写入异常，已跳过 | execution_id={execution_id} | {exc}"
@@ -491,25 +530,47 @@ class TaskWorker:
             f"BRPOP超时={self.queue_client.brpop_timeout}s"
         )
         while not self.stop_event.is_set():
-            # 有限超时阻塞取任务: 超时/异常均返回None，循环回头
-            # 检查stop_event，保证停止信号最迟一个超时周期生效
-            payload = self.queue_client.dequeue()
-            if payload is None:
-                continue
+            # 结构性兜底（Day44 P3-01）：本 docstring 承诺"循环内全部异常
+            # 捕获并记录，保证线程不崩"，但修复前只有 _execute_batch_async
+            # 调用点包了 try，dequeue() 与 set_status() 都在任何 try 之外——
+            # 任何未预料的异常都会逃出线程目标函数、直接杀死消费线程，
+            # 且业务日志无痕（只有 stderr 栈），后续任务永久堆积。
+            # 这里给整个循环体加最外层 except，兑现契约。
+            try:
+                # 有限超时阻塞取任务: 超时/异常均返回None，循环回头
+                # 检查stop_event，保证停止信号最迟一个超时周期生效
+                payload = self.queue_client.dequeue()
+                if payload is None:
+                    continue
 
-            execution_id = str(payload.get("execution_id", ""))
-            if not execution_id:
-                # 防御: 畸形消息无批次号直接跳过（dequeue已验JSON）
-                logger.warning(f"任务缺少execution_id字段，已跳过 | payload={payload}")
-                continue
+                # execution_id 显式为 null 时 .get(key, "") 的默认值取不到，
+                # str(None) 会得到字面串 "None" 并让 not 判断为假，绕过
+                # 畸形消息防御（Day44 P3-04）。这里先取原值再判空。
+                raw_execution_id = payload.get("execution_id")
+                execution_id = (
+                    "" if raw_execution_id is None else str(raw_execution_id).strip()
+                )
+                if not execution_id:
+                    # 防御: 畸形消息（缺字段 / null / 纯空白）直接跳过
+                    # （dequeue已验JSON）
+                    logger.warning(
+                        f"任务缺少有效execution_id字段，已跳过 | payload={payload}"
+                    )
+                    continue
 
-            # 调度状态置running并记开始时间
-            self.queue_client.set_status(
-                execution_id,
-                STATUS_RUNNING,
-                started_at=datetime.now().isoformat(),
-            )
-            logger.info(f"worker开始执行任务 | execution_id={execution_id}")
+                # 调度状态置running并记开始时间
+                self.queue_client.set_status(
+                    execution_id,
+                    STATUS_RUNNING,
+                    started_at=datetime.now().isoformat(),
+                )
+                logger.info(f"worker开始执行任务 | execution_id={execution_id}")
+            except Exception as exc:  # noqa: BLE001 线程绝不能因单轮异常退出
+                logger.error(
+                    f"worker单轮处理异常（已跳过本轮，循环继续）| "
+                    f"异常: {type(exc).__name__}: {exc}"
+                )
+                continue
 
             task_error: str | None = None
             try:

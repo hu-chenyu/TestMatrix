@@ -50,6 +50,7 @@ def ensure_env_file() -> None:
         return
     if ENV_EXAMPLE.exists():
         shutil.copyfile(ENV_EXAMPLE, ENV_FILE)
+        _warn_mysql_password_placeholder()
         print("+" + "=" * 62 + "+")
         print("|  未检测到 .env，已从 .env.example 创建默认配置             |")
         print("|                                                            |")
@@ -62,6 +63,34 @@ def ensure_env_file() -> None:
         print(f"  配置文件：{ENV_FILE}（已加入 .gitignore，不会提交）")
     else:
         print("[警告] .env 与 .env.example 均不存在，将使用全部内置默认值启动。")
+
+
+def _warn_mysql_password_placeholder() -> None:
+    """模板刚落地、且用户已选 MySQL 模式时提示补口令（Day44 P2-02）。
+
+    背景：docker-compose 的 `${VAR:?}` 只拦"未设置/为空"，不拦"占位值"。
+    模板里若留着 `your_password_here` 这类字面占位，run.py 自动复制后，
+    `docker compose --profile mysql up` 会真的以这串字符当口令启动。
+    模板已改为留空（见 .env.example），本函数只兜住"用户手写 .env 又填了
+    弱口令"这一残余路径。
+
+    仅告警不阻断：sqlite 是零配置默认路径，MySQL 口令缺失不影响其运行。
+
+    返回:
+        无
+    """
+    # 仅当用户已选 MySQL 模式时才需要口令；sqlite 是零配置默认路径，
+    # 此时缺失口令属正常，不告警
+    if str(env_manager.get("TM_DB_TYPE", "sqlite")).strip().lower() != "mysql":
+        return
+    weak_markers = ("your_password_here", "your_root_password_here", "123456")
+    for key in ("TM_DB_MYSQL_PASSWORD", "TM_DB_MYSQL_ROOT_PASSWORD"):
+        value = str(env_manager.get(key, "") or "").strip()
+        if value and any(marker in value.lower() for marker in weak_markers):
+            print("!" + "=" * 62 + "!")
+            print(f"!  安全告警：{key} 仍是示例/弱口令值（{value!r}）。          !")
+            print("!  MySQL 模式或 --profile mysql 启动前请改成真实强口令。     !")
+            print("!" + "=" * 62 + "!")
 
 
 def _warn_enabled_but_misconfigured() -> None:

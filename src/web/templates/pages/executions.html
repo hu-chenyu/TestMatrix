@@ -10,6 +10,15 @@
 {% block title %}执行记录 - TestMatrix{% endblock %}
 
 {% block content %}
+<!-- ====== 0. 无脚本降级提示（Day44 P3-20） ======
+     批次列表与三处模态框内容全部由 JS 异步渲染，HTML 里直出的是
+     "加载中"占位行。JS 未执行时页面停在无限 spinner，与"后端慢"不可区分。 -->
+<noscript>
+    <div class="alert alert-warning" role="alert">
+        <i class="bi bi-exclamation-triangle me-1"></i>
+        本页的执行记录需要 JavaScript 才能加载，请先在浏览器中启用 JavaScript 后刷新页面。
+    </div>
+</noscript>
 <!-- ====== 1. 页头行：标题 + 触发新执行入口 ====== -->
 <div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
     <h1 class="h3 mb-0">

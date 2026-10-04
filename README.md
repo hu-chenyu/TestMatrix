@@ -1,6 +1,11 @@
 # TestMatrix 通用自动化测试效能平台
 
-[![CI](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/) [![coverage 85%+](https://img.shields.io/badge/coverage-85%25%2B-brightgreen)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml)
+[![CI](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/) [![coverage 98%+](https://img.shields.io/badge/coverage-98%25%2B-brightgreen)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml)
+
+<!-- coverage 徽章说明（Day44 P4-18）：CI 门禁阈值为 --cov-fail-under=85，
+     而实测覆盖率稳定在 98%+（Day44 实测 98.77%）。徽章此前静态写 85%+，
+     是门禁下限而非实际水平，容易让读者以为项目覆盖率只有 85%。此处按
+     实测量级标注为 98%+，两者关系见下文「质量指标」。 -->
 
 > 面向互联网接口自动化测试的全链路效能平台：用例管理 → 调度执行 → 报告分析 →
 > Web 可视化 → 通知推送 → CI/CD，覆盖自动化框架设计、数据驱动、测试平台化与
@@ -18,7 +23,7 @@
   芯片板卡测试仅需低成本适配即可接入
 - **报告分析引擎**：Allure 结果解析、通过率/耗时 P95/失败明细统计、模块与优先级分布、
   趋势数据入库；质量度量（覆盖率趋势/缺陷密度/执行效率，Day23 已交付 API）
-- **Web 可视化平台（骨架已完成）**：Dashboard（统计卡片/趋势折线/模块饼图/失败 Top，Day35-37 已交付）、用例管理、执行记录（批次列表/失败堆栈/SSE 实时日志）三页面收尾规划中（Day41-44）
+- **Web 可视化平台（三页面已交付）**：Dashboard（统计卡片/趋势折线/模块环图/优先级柱图/失败 Top，Day35-44 已交付）、用例管理（列表/筛选/CRUD/批量导入，Day42 交付）、执行记录（批次列表/详情/触发/SSE 实时日志，Day43 交付）
 - **多渠道通知推送**：邮件 HTML 报告（内联 CSS）+ 企微 markdown 摘要、失败@负责人、
   分级通知策略、失败重试（指数退避）+ 死信记录
 - **真实 pytest 执行（规划中）**：subprocess 封装、pytest 钩子与自定义插件、
@@ -120,7 +125,7 @@ TestMatrix/
 │   ├── common/             # 公共底层封装（HTTP/串口/Telnet/日志/断言/环境配置）
 │   ├── db/                 # 数据持久层（ORM模型 + 会话管理，SQLite/MySQL双模式）
 │   ├── core/               # 平台核心逻辑（数据驱动/用例调度/报告解析/通知推送）
-│   └── web/                # Flask Web可视化平台（骨架已完成，三页面收尾 Day41-44）
+│   └── web/                # Flask Web可视化平台（三页面已交付，Day41-44）
 ├── tests/                  # pytest测试用例
 │   ├── api_demo/           # HTTP接口测试Demo（登录/用户查询/健康检查）
 │   └── chip_demo/          # 芯片板卡测试Demo（预留）
@@ -141,7 +146,14 @@ TestMatrix/
 | --- | --- | --- |
 | 第一阶段 | 架构基座：目录骨架、common封装层、数据持久层、pytest体系、Demo验证 | ✅ 已完成 |
 | 第二阶段 | 核心能力：数据驱动引擎、用例调度、报告解析、通知推送、Flask+Redis后端、Web三页面骨架 | ✅ 已完成（Day1-37） |
-| 第三阶段 | 深度能力：真实pytest执行引擎（Day45-64）、Flaky用例治理（Day115-119）、AST精准回归脚本（Day94-95） | 🔄 开发中（Day38 起） |
-| 第四阶段 | 工程化交付：CI/CD（Day38-40）、Docker三服务编排+Jenkins+k6（Day65-78）、MySQL深度优化（Day90-93）、质量打磨+重构（Day79-89）、演示+博客+交付（Day101-119） | ⏳ 规划中 |
+| 第三阶段 | 前端交付：Dashboard四图表、用例管理、执行记录三页面 | ✅ 已完成（Day38-44） |
+| 第四阶段 | 深度能力：真实pytest执行引擎（Day45-64）、Flaky用例治理（Day115-119）、AST精准回归脚本（Day94-95） | 🔄 开发中（Day45 起） |
+| 第五阶段 | 工程化交付：CI/CD（✅ Day38-40 已完成）、Docker三服务编排+Jenkins+k6（Day65-78）、MySQL深度优化（Day90-93）、质量打磨+重构（Day79-89）、演示+博客+交付（Day101-119） | ⏳ 规划中 |
+
+> 阶段表说明（Day44 P3-22 修正）：此前本表把 CI/CD 同时列在"第四阶段内容"
+> 与"⏳ 规划中"状态里，且缺少已交付的三页面阶段——同一张表内自相矛盾，
+> 会让新读者与评审者对项目进度得出错误结论。CI/CD 已于 Day38-40 交付
+> （`.github/workflows/ci.yml` 六步门禁，双 job：3.11 主 + 3.12 探测），
+> 三页面于 Day41-44 交付。
 
 详细需求基准见 [PROJECT_SPEC.md](PROJECT_SPEC.md)，core 层架构设计见 [docs/core_architecture.md](docs/core_architecture.md)。

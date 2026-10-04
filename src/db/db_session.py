@@ -34,7 +34,7 @@ from urllib.parse import quote
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.common.env_manager import env_manager
@@ -285,11 +285,13 @@ class DatabaseSession:
             yield session
             session.commit()
         except SQLAlchemyError as exc:
+            # 事务异常：记录带 SQLAlchemy 上下文的错误日志后原样抛出，
+            # 保留其 __cause__ 链供上层 CaseManagerError 定位
             session.rollback()
             logger.error(f"数据库事务异常，已回滚 | {exc}")
             raise
         except Exception:
-            # 非SQL异常同样回滚，防止会话残留脏状态
+            # 非 SQL 异常同样回滚，防止会话残留脏状态
             session.rollback()
             raise
         finally:
@@ -343,7 +345,10 @@ class DatabaseSession:
                 conn.execute(text("SELECT 1"))
             logger.debug("数据库健康检查通过")
             return True
-        except (OperationalError, SQLAlchemyError, ValueError) as exc:
+        except (SQLAlchemyError, ValueError) as exc:
+            # OperationalError 是 SQLAlchemyError 的子类，单独列出属冗余
+            # （Day44 P3-16）：元组里写不写它捕获范围完全相同，却会让读者
+            # 误以为存在一条"只捕 OperationalError"的独立处理路径。
             logger.error(f"数据库健康检查失败 | {exc}")
             return False
 

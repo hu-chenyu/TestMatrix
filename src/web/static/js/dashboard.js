@@ -70,7 +70,13 @@ function setSummaryError(hasError) {
 async function loadCaseTotal() {
     try {
         // 经统一封装请求（自动拼接 /api 前缀并解包 {code,message,data}）
-        const casesData = await window.api.get("/cases/?page=1&page_size=1");
+        // 显式带 status=all（Day44 P3-18）：后端对 status 的缺省值是
+        // "active"，修复前不传该参数拿到的是**启用用例数**而非总数，
+        // 卡片却标着"用例总数"——存在 disabled 用例时两个数字对不上，
+        // 标签与实际口径矛盾。后端已支持 status=all 全量口径。
+        const casesData = await window.api.get(
+            "/cases/?page=1&page_size=1&status=all"
+        );
         // total 为用例总数；契约缺失时按 null 降级，避免渲染 undefined
         return typeof casesData.total === "number" ? casesData.total : null;
     } catch (error) {
@@ -251,12 +257,49 @@ async function loadHealthStatus() {
  * @returns {void}
  */
 function initDashboardCharts() {
+    // ECharts 资源存在性守卫（Day44 P2-19）
+    // 为什么需要：initChart 内部直接调 echarts.init(el)，而 initDashboard
+    // 是本页唯一的初始化入口、四个加载器（统计卡片 + 三图表 + Top 表）
+    // 全部由它串联。ECharts 是 vendored 静态资源（echarts.min.js），一旦
+    // 该文件缺失、404、被 CSP 拦下或部署漏拷，echarts 就是 undefined，
+    // ReferenceError 会一路逃出 initDashboard() —— 结果是**整页数据都不
+    // 加载**，卡片与 Top 表也跟着停在占位状态，排查成本远高于"图表没画出来"。
+    // 这里提前判存在：资源缺失时只放弃图表，给出可读提示，其余内容照常渲染。
+    if (typeof echarts === "undefined" || !window.chartHelper) {
+        showToast("图表资源加载失败，看板图表不可用（统计数据不受影响）", "warning");
+        renderChartResourceMissing();
+        return;
+    }
     // 三个容器 id 与 dashboard.html 逐一对应
     const chartIds = ["trendChart", "modulePieChart", "priorityBarChart"];
     chartIds.forEach(function (chartId) {
         // initChart 幂等；拿到实例后立即绘制空态（Day41 数据返回后被 setOption 替换）
         const chart = window.chartHelper.initChart(chartId);
         window.chartHelper.renderChartEmpty(chart);
+    });
+}
+
+/**
+ * ECharts 资源缺失时在三个图表容器内绘制占位文案（Day44 P2-19）
+ *
+ * 不走 chart-helper（它内部依赖 echarts），直接用 DOM API 写文本，
+ * 与 renderChartEmpty 的视觉口径保持一致（灰色居中）。
+ *
+ * @returns {void}
+ */
+function renderChartResourceMissing() {
+    const notice = "图表资源未加载";
+    ["trendChart", "modulePieChart", "priorityBarChart"].forEach(function (chartId) {
+        const el = document.getElementById(chartId);
+        if (!el) {
+            return;
+        }
+        el.textContent = notice;
+        el.style.display = "flex";
+        el.style.alignItems = "center";
+        el.style.justifyContent = "center";
+        el.style.color = "#6c757d";
+        el.style.fontSize = "14px";
     });
 }
 

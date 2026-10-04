@@ -82,20 +82,20 @@ class TestValidationGuards:
     def test_list_cases_paged_page_zero(self, temp_db):
         with pytest.raises(CaseManagerError) as exc:
             CaseManager.list_cases_paged(page=0)
-        assert "page必须为大于等于1的整数" in str(exc.value)
+        assert "page必须为1到" in str(exc.value) and "之间的整数" in str(exc.value)
         assert exc.value.context["operation"] == "list_cases_paged"
 
     @allure.story("list_cases_paged page 传bool（int子类陷阱）")
     def test_list_cases_paged_page_bool(self, temp_db):
         with pytest.raises(CaseManagerError) as exc:
             CaseManager.list_cases_paged(page=True)
-        assert "page必须为大于等于1的整数" in str(exc.value)
+        assert "page必须为1到" in str(exc.value) and "之间的整数" in str(exc.value)
 
     @allure.story("list_cases_paged page 传非整数")
     def test_list_cases_paged_page_not_int(self, temp_db):
         with pytest.raises(CaseManagerError) as exc:
             CaseManager.list_cases_paged(page="abc")
-        assert "page必须为大于等于1的整数" in str(exc.value)
+        assert "page必须为1到" in str(exc.value) and "之间的整数" in str(exc.value)
 
     @allure.story("list_cases_paged page_size 超上限")
     def test_list_cases_paged_size_too_large(self, temp_db):
@@ -169,7 +169,7 @@ class TestValidationGuards:
     def test_list_executions_paged_bad_page(self, temp_db, bad_page):
         with pytest.raises(CaseManagerError) as exc:
             CaseManager.list_executions_paged(page=bad_page)
-        assert "page必须为大于等于1的整数" in str(exc.value)
+        assert "page必须为1到" in str(exc.value) and "之间的整数" in str(exc.value)
         assert exc.value.context["operation"] == "list_executions_paged"
 
     @allure.story("list_executions_paged page_size 越界")

@@ -2,13 +2,18 @@
 
 > **基础地址**：`http://host:5000`（本机调试为 `http://127.0.0.1:5000`）
 > **当前版本**：平台版本 v1.0.0，API 版本 v1
-> **文档更新**：2026-10-01（Day41 Dashboard 四图表），对应 5 个蓝图共 22 个 HTTP 接口
+> **文档更新**：2026-10-04（Day44 收尾），对应 6 个蓝图共 25 个 HTTP 接口
 > **鉴权说明**：当前版本无认证，仅内网/本机使用，禁止暴露公网。
 
 本文覆盖 TestMatrix Web 后端全部 HTTP 接口，按蓝图（blueprint）组织：
-基础接口（base_bp）、用例管理（cases_bp）、执行管理（executions_bp）、
-报告统计（reports_bp）、通知查询（notifications_bp）。所有字段名、枚举值、
-默认值均与源码逐字一致。
+基础接口（base_bp）、页面路由（pages_bp）、用例管理（cases_bp）、
+执行管理（executions_bp）、报告统计（reports_bp）、通知查询（notifications_bp）。
+所有字段名、枚举值、默认值均与源码逐字一致。
+
+> **接口计数说明**（Day44 P3-21 修正）：此前本文头部声明"5 个蓝图共 22 个
+> HTTP 接口"且第 8 行称覆盖"全部 HTTP 接口"，但实际有 6 个蓝图 25 条路由——
+> `pages_bp` 的 3 条页面路由（`/dashboard`、`/cases`、`/executions`）从未被
+> 文档收录。页面路由返回 HTML 而非统一 JSON 封装体，单独列在 1.5 节。
 
 ---
 
@@ -129,9 +134,14 @@
 
 - **字符编码**：所有请求与响应统一使用 UTF-8；响应 `Content-Type` 为
   `application/json`（SSE 接口除外）。
-- **时间字段**：统一为 ISO 8601 字符串，如 `2026-09-20T10:30:45`；
-  健康检查的 timestamp 带 UTC 时区，如
-  `2026-09-20T02:30:45.123456+00:00`；可空时间字段未产生时为 `null`。
+- **时间字段**：统一为**带时区标识**的 ISO 8601 字符串，如
+  `2026-09-20T10:30:45+00:00`；健康检查的 timestamp 带微秒精度，
+  如 `2026-09-20T02:30:45.123456+00:00`；可空时间字段未产生时为 `null`。
+  说明（Day44 P3-19 修正）：后端时间列有**两种来源**——UTC 来源
+  （`server_default=func.now()`）补 `+00:00` 标识，数值不动；本地来源
+  （`datetime.now()` 显式写入）换算成 UTC 后同样带 `+00:00`。因此**所有**
+  响应中的时间都是 UTC，客户端需自行按本地时区渲染。本文档此前示例写的
+  `2026-09-20T10:30:45`（无时区标识）与实现不符，已更正。
 - **SSE 接口**：响应类型为 `text/event-stream`，帧格式为
   `event: 事件类型\nid: 序号\ndata: JSON载荷\n\n`；客户端断线重连时可通过
   `Last-Event-ID` 请求头携带最后收到的事件 id，服务端只回放该 id 之后的事件
@@ -245,7 +255,27 @@ curl.exe "http://127.0.0.1:5000/api/version"
 
 ---
 
-## 3. 用例管理接口（cases_bp，前缀 /api/cases）
+## 3. 页面路由（pages_bp，无前缀）
+
+> 本节为 Day44 P3-21 新增。这 3 条路由返回 **HTML 页面**而非统一
+> `{code, message, data}` JSON 封装体，故不适用第 1 章的通用约定；
+> 它们是浏览器导航入口（前端三页面的入口地址），不走 fetch/XHR。
+> 本文此前只覆盖 5 个 JSON 蓝图，导致头部"覆盖全部 HTTP 接口"的声明
+> 与实际不符，本次一并补齐。
+
+| 方法 | 路径 | 说明 | 渲染模板 |
+| --- | --- | --- | --- |
+| GET | `/dashboard` | 质量看板页 | `pages/dashboard.html` |
+| GET | `/cases` | 用例管理页 | `pages/cases.html` |
+| GET | `/executions` | 执行记录页 | `pages/executions.html` |
+
+三页均无路径参数、无查询参数、不访问数据库（数据一律由页内 JS 异步请求
+`/api/*` 获取），因此响应恒为 200，失败模式仅剩模板渲染异常（此时由 Flask
+默认 500 处理）。三页共用 `base.html` 基模板提供的导航、健康状态与 toast 容器。
+
+---
+
+## 4. 用例管理接口（cases_bp，前缀 /api/cases）
 
 ### 3.1 GET /api/cases/
 
@@ -598,7 +628,7 @@ curl.exe -X POST "http://127.0.0.1:5000/api/cases/import" -F "file=@cases.yaml"
 
 ---
 
-## 4. 执行管理接口（executions_bp，前缀 /api/executions）
+## 5. 执行管理接口（executions_bp，前缀 /api/executions）
 
 ### 4.1 GET /api/executions/
 
@@ -620,6 +650,13 @@ curl.exe "http://127.0.0.1:5000/api/executions/?page=1&page_size=20"
 
 **成功响应**（200，items 元素为批次汇总对象）：
 
+> `status` 字段说明（Day44 P3-19 新增）：列表口径只查 `defect_statistics`
+> 汇总表，而核心层 `finish_execution`（写汇总行）与 `_update_batch_status`
+> （更新批次行）是**两步非原子**写入——前者成功后者失败会留下"有汇总行
+> 但批次行非终态"的孤儿批次。服务端为此在列表查询后批量补查批次元信息行
+> 写入 `status`，批次行缺失时兜底 `finished`。取值域：
+> `finished` / `failed` / `running` / `pending`。前端状态列读该字段。
+
 ```json
 {
   "code": 200,
@@ -634,7 +671,8 @@ curl.exe "http://127.0.0.1:5000/api/executions/?page=1&page_size=20"
         "error": 0,
         "skipped": 0,
         "pass_rate": 0.5,
-        "created_at": "2026-09-20T10:30:46"
+        "status": "finished",
+        "created_at": "2026-09-20T10:30:46+00:00"
       }
     ],
     "total": 1,
@@ -936,7 +974,7 @@ data: {"total": 4, "passed": 2, "failed": 2, "error": 0, "skipped": 0, "pass_rat
 
 ---
 
-## 5. 报告统计接口（reports_bp，前缀 /api/reports）
+## 6. 报告统计接口（reports_bp，前缀 /api/reports）
 
 ### 5.1 GET /api/reports/summary
 
@@ -1223,7 +1261,7 @@ curl.exe "http://127.0.0.1:5000/api/reports/quality-metrics"
 
 ---
 
-## 6. 通知查询接口（notifications_bp，前缀 /api/notifications）
+## 7. 通知查询接口（notifications_bp，前缀 /api/notifications）
 
 通知模块的只读可观测性接口（Day41 新增）。通知发送有两张留痕表：
 

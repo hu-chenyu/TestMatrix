@@ -287,8 +287,18 @@ class DefectStatistic(Base):
     # 单列索引: created_at 是批次列表分页与趋势图的默认排序键
     # （list_executions_paged 的 order_by(created_at.desc())），
     # 数据量上万后无索引会全表扫描线性劣化（Day44 M3 补齐）
+    #
+    # 复合索引（Day44 P2-17）: 实际查询的排序键是**两段**——
+    # created_at DESC 之后跟一个二级键（get_latest_statistics 用 id.desc()、
+    # list_executions_paged 用 execution_id.desc()），目的是在同秒创建的
+    # 多个批次之间给出确定次序（SQLite 的 created_at 来自 CURRENT_TIMESTAMP，
+    # 只有秒级精度，同秒记录必然同值）。单列索引只能覆盖首段，命中后仍要
+    # 额外排一次 id；复合索引把整条排序键装进索引，可直接按序扫描。
+    # 保留 idx_ds_created_at 不删：单列前缀仍被 equality 过滤条件复用，
+    # 且既有 tests/test_models_index_demo.py 锁定了它的存在与列定义。
     __table_args__ = (
         Index("idx_ds_created_at", "created_at"),
+        Index("idx_ds_created_id", "created_at", "id"),
         {"comment": "批次级执行汇总指标表"},
     )
 

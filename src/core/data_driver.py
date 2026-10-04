@@ -6,7 +6,11 @@ YAML/Excel数据驱动引擎模块
     - YAML解析: 支持顶层列表（parametrize直用格式）与顶层字典（唯一列表键）两种组织形式，
       嵌套结构字段原样保留
     - Excel解析: 基于openpyxl，支持指定sheet，首行作为字段名，自动跳过空行
-    - 标准字段校验: case_id/name/module/priority/tags五字段强校验，
+    - 标准字段校验: case_id/name/module 三字段必填（缺失或为空即失败）；
+      priority 值域强校验（P0-P3，大小写容错）；tags 可选，接受列表或
+      逗号分隔字符串，显式 None 视同空列表（Day44 P3-10 修正：本条原先
+      写"五字段强校验"与实现不符）；case_id 额外做字符集校验
+      （Day44 P2-18，与创建接口同一正则）。
       错误提示携带行号（或用例序号）与字段名的中文定位信息
     - 用例筛选: filter_cases支持module（模块）/priority（优先级P0-P3）/tags（标签）三维过滤
     - 全链路日志: 加载、解析、校验、筛选每个环节均输出对应级别日志
@@ -29,6 +33,7 @@ YAML/Excel数据驱动引擎模块
     def test_demo(case): ...
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +55,11 @@ EXCEL_SUFFIXES = (".xlsx",)
 REQUIRED_FIELDS = ("case_id", "name", "module")
 # 合法优先级取值
 VALID_PRIORITIES = ("P0", "P1", "P2", "P3")
+# 用例编号字符集（Day44 P2-18）：与创建接口
+# src/web/routes/cases.py 的 CaseCreateSchema 保持同一口径——导入通道
+# 原先只校验"非空字符串"，导致含 "/" 或 ".." 的编号能进库，而
+# PytestRunner 会把 case_id 直接当 pytest 路径使用。
+CASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _normalize_scalar(value: Any) -> Any:
@@ -441,6 +451,25 @@ class DataDriver:
                     f"当前值: {value!r}",
                     file_path=file_path,
                 )
+        case_id = str(validated["case_id"])
+        validated["case_id"] = case_id.strip()
+
+        # 用例编号字符集校验（Day44 P2-18）：创建接口
+        # （src/web/routes/cases.py 的 CaseCreateSchema）已限定
+        # ^[A-Za-z0-9][A-Za-z0-9._-]*$，而导入通道原先只校验"非空字符串"。
+        # 两通道口径分叉带来一个真实面：PytestRunner 的
+        # `path = case.get("script_path") or case.get("case_id", "")` 会把
+        # 导入的 case_id 直接当 pytest 路径使用，配合 executor=pytest 时，
+        # 一个含 "/" 或 ".." 的编号就能让服务端去执行它能读到的任意 .py
+        # 文件（不是 RCE——无 shell=True，且 case_id 正则本就为防选项注入
+        # 而保留在 build_command 里——但确属受限的文件包含/数据污染面）。
+        # 这里与创建接口用同一条正则，把口子收在数据入口。
+        if not CASE_ID_PATTERN.match(case_id):
+            raise DataDriverError(
+                f"{where}字段'case_id'非法: {case_id!r}，"
+                f"要求以字母或数字开头，其后仅可含字母/数字/点/下划线/连字符",
+                file_path=file_path,
+            )
 
         # 优先级校验: 必须为P0-P3（大小写容错，统一大写回写）
         priority = _normalize_scalar(validated.get("priority"))
@@ -453,8 +482,15 @@ class DataDriver:
 
         # 标签校验: 列表或逗号分隔字符串，统一规范化为列表
         # 数字标签（如 123）先归一为字符串再走逗号分隔路径
+        #
+        # 显式 None 与空列表同义（Day44 P3-11）：YAML 里写 `tags:`（留空）
+        # 解析出的是 None，而写 `tags: []` 是空列表——两者语义都是"无标签"，
+        # 修复前只有后者合法，前者会抛"tags 非法"，报错信息还把"无标签"
+        # 描述成"非法"，用户必须猜哪一种写法才被接受。
         tags = _normalize_scalar(validated.get("tags", []))
-        if isinstance(tags, str):
+        if tags is None:
+            tags = []
+        elif isinstance(tags, str):
             tags = [item.strip() for item in tags.split(",") if item.strip()]
         elif isinstance(tags, list):
             tags = [str(item).strip() for item in tags if str(item).strip()]

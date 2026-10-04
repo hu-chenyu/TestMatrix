@@ -1,0 +1,51 @@
+# ==============================================================================
+# Docker 构建上下文排除清单（Day44 P3-24）
+# 背景：docker-compose.yml 使用 context: ..（项目根），若不排除，
+#   每次 docker build 都会把 .git 全量历史、.venv 虚拟环境、output/ 运行
+#   产物与 .env 一并送进构建上下文——既拖慢构建、抵消 Dockerfile 的分层
+#   缓存收益，也构成凭据外传通道（用远端 builder / buildx 时 .env 会被
+#   上传到构建服务）。
+# ==============================================================================
+
+# 版本控制与虚拟环境
+.git
+.gitignore
+.venv
+venv
+env
+
+# 敏感配置（本机生成、绝不进镜像）
+.env
+.env.local
+.env.dev
+.env.test
+.env.prod
+
+# 运行时产物（挂载卷提供，无需进镜像）
+output
+*.log
+.coverage
+.coverage.*
+htmlcov
+coverage.xml
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Python 缓存
+__pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+
+# 文档与 IDE（镜像只需要 src/tests/testdata/配置）
+docs
+.idea
+.vscode
+*.swp
+.DS_Store
+Thumbs.db
+
+# 版本控制工具链的忽略文件本身无需进镜像
+.gitattributes

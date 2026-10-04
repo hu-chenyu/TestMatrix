@@ -408,18 +408,22 @@ class TestDataDriverCaseValidation:
 
     @pytest.mark.parametrize(
         "bad_tags",
-        [None, {"a": "b"}],
-        ids=["none", "dict"],
+        [{"a": "b"}],
+        ids=["dict"],
     )
     def test_invalid_tags_type_rejected(
         self, tmp_path: Path, bad_tags: object
     ) -> None:
         """
-        tags 归一后仍非 str/非 list 时报错（行449）
+        tags 归一后仍非 str/非 list 时报错
 
-        真正能走到这条 else 分支的只有 None 与复合字典：
-        int/float 会被 _normalize_scalar 先归一成字符串（见下一条用例），
-        list 走 elif 分支。
+        变更说明（Day44 P3-11）: 显式 `None` 已从本用例的非法集合中**移出**。
+        YAML 里写 `tags:`（留空）解析出的是 None，语义与 `tags: []` 完全
+        相同——都是"无标签"；修复前只有后者合法，前者会抛"'tags'非法"，
+        报错信息还把"无标签"描述成"非法"，用户必须猜哪一种写法才被接受。
+        现已把 None 与空列表同等归一为 []（见 test_tags_none_accepted）。
+        真正走 else 分支的只剩复合字典这类既非 str 也非 list 的值。
+        行为已变，按验收铁律 2 适配断言而非删除该测试。
         """
         yaml_file = _write_yaml(
             tmp_path / "cases.yaml",
@@ -428,6 +432,28 @@ class TestDataDriverCaseValidation:
 
         with pytest.raises(DataDriverError, match="'tags'非法"):
             DataDriver.load_cases(yaml_file)
+
+    def test_tags_none_normalized_to_empty_list(self, tmp_path: Path) -> None:
+        """
+        显式 None 的 tags 归一为空列表而非报错（Day44 P3-11，**有意设计**）
+
+        YAML 留空 `tags:` 与显式 `tags: []` 语义相同，行为也必须相同：
+        否则用户要靠试错才知道该用哪种写法。锁定这一口径，防止后来者
+        把它当 bug 改回"None 即非法"。
+        """
+        yaml_file = _write_yaml(
+            tmp_path / "cases.yaml",
+            [
+                {**_VALID_CASE, "case_id": "TM-VD-TAGS-1", "priority": "P1",
+                 "tags": None},
+                {**_VALID_CASE, "case_id": "TM-VD-TAGS-2", "priority": "P1",
+                 "tags": []},
+            ],
+        )
+
+        loaded = DataDriver.load_cases(yaml_file)
+
+        assert [case["tags"] for case in loaded] == [[], []]
 
     def test_numeric_tags_normalized_to_string(self, tmp_path: Path) -> None:
         """

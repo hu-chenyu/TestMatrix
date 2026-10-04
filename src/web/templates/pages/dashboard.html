@@ -7,6 +7,15 @@
 {% block title %}质量看板 - TestMatrix{% endblock %}
 
 {% block content %}
+<!-- ====== 0. 无脚本降级提示（Day44 P3-20） ======
+     四张统计卡、三个图表与失败 Top 表全部由 JS 异步填充，HTML 里直出的是
+     数值占位符与"暂无数据"。JS 未执行时页面停在占位状态，与"后端慢"不可区分。 -->
+<noscript>
+    <div class="alert alert-warning" role="alert">
+        <i class="bi bi-exclamation-triangle me-1"></i>
+        本页的质量看板数据需要 JavaScript 才能加载，请先在浏览器中启用 JavaScript 后刷新页面。
+    </div>
+</noscript>
 <!-- ========== 1. 页头行：标题 + 最后更新时间 + 手动刷新 ========== -->
 <div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
     <h1 class="h3 mb-0">
