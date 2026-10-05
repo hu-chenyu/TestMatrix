@@ -51,6 +51,7 @@ import redis
 
 from src.common.env_manager import env_manager
 from src.common.logger import LogManager
+from src.common.security import mask_url
 
 logger = LogManager.get_logger()
 
@@ -318,12 +319,19 @@ class CacheClient:
                 except (ValueError, TypeError, redis.RedisError) as exc:
                     # 不缓存异常对象: _backend保持None, 下次访问会重新尝试
                     # 构建, 配置修好后可自愈, 无需重启进程
+                    # URL 必须脱敏：redis://user:password@host 的口令在
+                    # userinfo 段，http_client 的 query 脱敏覆盖不到，
+                    # 原样打日志等于把 Redis 口令写进日志文件（Day45
+                    # 全量审查 P2-4 / 批次 2 P2）。构建失败恰是运维翻日志
+                    # 最频繁的时刻，口令泄露概率最高。
                     logger.warning(
-                        f"缓存后端构建失败，缓存降级no-op | URL: {url} | "
+                        f"缓存后端构建失败，缓存降级no-op | URL: {mask_url(url)} | "
                         f"异常: {type(exc).__name__}: {exc}"
                     )
                     return None
-                logger.debug(f"缓存后端已构建 | 类型: redis | URL: {url}")
+                logger.debug(
+                    f"缓存后端已构建 | 类型: redis | URL: {mask_url(url)}"
+                )
         return self._backend
 
     def reset_backend(self) -> None:

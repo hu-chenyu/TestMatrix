@@ -23,6 +23,8 @@ from typing import Any
 
 from loguru import logger
 
+from src.common.env_manager import env_manager
+
 # 项目根目录: 本文件 logger.py 位于 src/common/ 下，向上两级即为项目根
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -172,7 +174,29 @@ class LogManager:
     @classmethod
     def get_logger(cls) -> Any:
         """
-        获取全局logger对象
+        获取全局logger对象（**首次调用时惰性完成 setup**）
+
+        **Day45 全量审查第 2 批修复的缺陷**：修复前本方法直接
+        `return logger`，而配置动作全在 `setup()` 里，全仓 `setup()`
+        的调用点只有 `tests/conftest.py` 与测试文件——**src/ 内零调用、
+        run.py 零调用、scripts/start_worker.py 零调用**。实测 loguru 0.7.2
+        默认值是 `LOGURU_LEVEL="DEBUG"` / `LOGURU_BACKTRACE=True` /
+        `LOGURU_DIAGNOSE=True` 且导入即预置 stderr handler，于是生产
+        实际跑的是 loguru 默认 handler：(a) 不产生任何日志文件，
+        `output/logs/*.log` 与 `bind_trace_id()` 全链路追踪只在 pytest 下
+        成立；(b) TM_LOG_LEVEL 完全惰性；(c) `setup()` 里"diagnose=False
+        是当前拦住敏感变量值打印的那道屏障"在生产不存在——属防御纵深失效。
+
+        改法：把 setup 挂到 get_logger 的惰性初始化分支上，由
+        `_initialized` 守卫使初始化只发生一次。**"取 logger 即完成配置"**，
+        从根上消除漏调用这一类缺陷——依赖调用方记得初始化，是把
+        正确性寄托在"每个入口都记得写一行"的约定上。
+
+        惰性初始化也不能反噬测试：`setup()` 自身已带 `_initialized`
+        守卫，conftest 显式调用后再取 logger 不会重复配置；
+        `setup()` 抛错时（目录无权限/级别非法）本方法**吞掉异常并
+        记 warning 后继续返回 logger**——日志系统不可用不应让业务
+        链路跟着崩，这与"通知是旁路能力"是同一条铁律。
 
         返回类型标注为 Any 而非 loguru 的具体类型：loguru 0.7 未导出
         公开的 Logger 类型（实际类是私有的 loguru._logger.Logger），标注
@@ -189,8 +213,17 @@ class LogManager:
             loguru.logger: 配置完成的全局logger实例，可直接调用info/debug/error等方法
 
         异常:
-            无（若未调用setup，返回的logger仅使用Loguru默认配置）
+            无（若 setup 失败，降级为 loguru 默认 handler 并记 warning，
+               不让日志系统不可用阻断业务链路）
         """
+        if not cls._initialized:
+            try:
+                cls.setup(
+                    log_level=env_manager.log_level,
+                    log_dir=env_manager.log_dir,
+                )
+            except Exception as exc:  # noqa: BLE001 日志是旁路能力，不阻断业务
+                logger.warning(f"日志自动初始化失败，降级为默认handler | {exc}")
         return logger
 
     @classmethod

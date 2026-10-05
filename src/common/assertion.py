@@ -22,6 +22,12 @@ from typing import Any
 import requests
 
 from src.common.logger import LogManager
+from src.common.security import (
+    MASK,
+    SENSITIVE_HEADERS,
+    mask_headers,
+    mask_url,
+)
 
 logger = LogManager.get_logger()
 
@@ -120,13 +126,18 @@ def assert_status_code(
     """
     expected_list = [expected] if isinstance(expected, int) else list(expected)
     if response.status_code not in expected_list:
+        # URL 走公共脱敏：query 里的 ?token=/?key= 与 userinfo 段口令
+        # 都会被打码（Day45 全量审查 P3-9）。断言失败信息会进 pytest
+        # stdout 与 Allure 报告，而这两者常被归档并在团队间共享，
+        # 泄露寿命远长于日志文件。
+        safe_url = mask_url(getattr(response, "url", "") or "")
         logger.error(
             f"断言失败[状态码] | 实际: {response.status_code} | 期望: {expected_list} | "
-            f"URL: {response.url}"
+            f"URL: {safe_url}"
         )
         raise AssertionError(
             f"状态码断言失败: 实际 {response.status_code}，期望 {expected_list}，"
-            f"URL: {response.url}，响应片段: {response.text[:200]}"
+            f"URL: {safe_url}，响应片段: {response.text[:200]}"
         )
     logger.debug(f"断言通过[状态码] | 实际: {response.status_code}")
 
@@ -179,11 +190,31 @@ def assert_header(
     """
     actual = response.headers.get(header_name)
     if actual is None:
+        # 响应头整体 dump 必须脱敏：Set-Cookie / Authorization 等头里
+        # 就是凭据本身，原样写进断言失败信息 = 凭据进测试报告
+        # （Day45 全量审查 P3-9）。
         logger.error(f"断言失败[响应头] | 响应头'{header_name}'不存在")
-        raise AssertionError(f"响应头断言失败: '{header_name}'不存在，实际响应头: {dict(response.headers)}")
+        safe_headers = mask_headers(dict(getattr(response, "headers", {}) or {}))
+        raise AssertionError(
+            f"响应头断言失败: '{header_name}'不存在，实际响应头: {safe_headers}"
+        )
     if expected is not None and actual != expected:
-        logger.error(f"断言失败[响应头] | '{header_name}'实际: {actual} | 期望: {expected}")
-        raise AssertionError(f"响应头断言失败: '{header_name}'实际值 '{actual}'，期望 '{expected}'")
+        # 被断言的这一个头若是敏感头（Authorization 等），比较值本身
+        # 也不能原样回显——"期望值"同样可能写着真实凭据
+        shown_actual = (
+            MASK if str(header_name).lower() in SENSITIVE_HEADERS else actual
+        )
+        shown_expected = (
+            MASK if str(header_name).lower() in SENSITIVE_HEADERS else expected
+        )
+        logger.error(
+            f"断言失败[响应头] | '{header_name}'实际: {shown_actual} | "
+            f"期望: {shown_expected}"
+        )
+        raise AssertionError(
+            f"响应头断言失败: '{header_name}'实际值 '{shown_actual}'，"
+            f"期望 '{shown_expected}'"
+        )
     logger.debug(f"断言通过[响应头] | {header_name}: {actual}")
 
 

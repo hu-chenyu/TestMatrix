@@ -17,9 +17,9 @@ HTTP请求统一封装模块
     resp = client.post("/post", json={"name": "TestMatrix"})
 """
 
+import json
 import time
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -27,57 +27,26 @@ from urllib3.util.retry import Retry
 
 from src.common.logger import LogManager
 
+# 脱敏原语与字段表已收敛到 src/common/security.py（Day45 第 2 批方案 A）。
+# 此处按名字再导出，是为了让既有调用方/测试继续从 http_client 取到它们——
+# 收敛的是实现的单点性，不是模块 API 面（6.33 决策）。
+from src.common.security import (  # noqa: F401
+    MASK as QUERY_MASK,
+)
+from src.common.security import (
+    SENSITIVE_BODY_FIELDS,
+    SENSITIVE_QUERY_FIELDS,
+    mask_data,
+    mask_headers,
+    mask_url,
+)
+
 logger = LogManager.get_logger()
 
 # 请求与响应体在日志中的最大打印长度（字符），超出部分截断，防止大报文刷爆日志
 MAX_LOG_BODY_LENGTH = 2048
-# 需要脱敏的请求头字段（小写匹配）
-SENSITIVE_HEADERS = ("authorization", "token", "cookie", "set-cookie", "api-key")
-# 请求体中需要脱敏的字段名（小写匹配）
-# 口径对齐 SENSITIVE_QUERY_FIELDS 的凭据类字段：历史上本元组漏收
-# access_token / api_key / apikey，而查询串侧已收录——同一份凭据放在
-# JSON body 里（OAuth 风格接口的标准做法）就会原样进日志，与阶段2
-# 修复的 P1 凭据泄露同属一类缺口。
-# 刻意不收裸 "key"：查询串侧的 key 是为 ?key=xxx 这类回调凭据而设，
-# 而请求体里名为 key 的字段通常是业务数据（如字典键、分片键），
-# 误打码会显著削弱排障能力，收益与风险不成正比。
-SENSITIVE_BODY_FIELDS = (
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "access_token",
-    "api_key",
-    "apikey",
-    "access_key",
-)
-# URL 查询串中需要脱敏的参数名（小写匹配）。常见于 token 走 query 的 OAuth
-# 风格接口、以及 webhook key 这类把凭据放在 ?key= 的回调地址。
-#
-# 与 SENSITIVE_BODY_FIELDS 的口径关系（v3 修复）:
-#   本元组 ⊇ SENSITIVE_BODY_FIELDS。两张表各自独立维护时曾出现双向缺口：
-#     - access_token 只在 query 侧 -> 放 JSON body 里明文进日志（v1 已修）
-#     - access_key    只在 body 侧 -> 放 ?access_key= 里明文进日志（v3 修）
-#   现把"请求体凭据集合 ⊆ 查询串凭据集合"写成测试里的结构不变量，
-#   今后新增任一凭据名只改一侧，CI 立刻变红。
-#   两表允许的差异只有"裸 key"：查询串侧的 ?key=xxx 是回调凭据（企微
-#   webhook 形态），请求体里名为 key 的字段通常是业务数据，故只进 query 表。
-SENSITIVE_QUERY_FIELDS = (
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "access_token",
-    "key",
-    "apikey",
-    "api_key",
-    "access_key",
-)
-# 查询串脱敏后的占位值
-QUERY_MASK = "***"
 # 日志中展示 URL 的最大长度（字符），超出部分截断，防止长签名串刷爆日志
 MAX_LOG_URL_LENGTH = 512
-
 # 允许自动重试的 HTTP 方法（幂等且无副作用的只读语义）。
 # POST/PUT/PATCH/DELETE 一律不自动重试：本项目是测试平台，重试打到被测
 # 系统的写请求会重复产生副作用（重复建资源/重复提交），令测试结论失真。
@@ -400,91 +369,66 @@ class HttpClient:
         """
         请求头脱敏（敏感字段的值替换为***）
 
+        实现已收敛到 src/common/security.py（Day45 第 2 批方案 A），
+        本方法保留为兼容入口：既有测试与调用方引用的是 HttpClient 上的
+        私有名，收敛的是实现的单点性，不是模块 API 面（6.33 决策）。
+
         参数:
             headers (dict | None): 原始请求头
 
         返回:
             dict | str: 脱敏后的请求头副本；入参为None时返回'-'
         """
-        if headers is None:
-            return "-"
-        masked = {}
-        for key, value in headers.items():
-            masked[key] = "***" if str(key).lower() in SENSITIVE_HEADERS else value
-        return masked
+        return mask_headers(headers)
 
     @staticmethod
     def _mask_data(
         data: Any, fields: tuple[str, ...] = SENSITIVE_BODY_FIELDS
     ) -> Any:
         """
-        请求数据脱敏（password/token等字段值替换为***）
+        请求数据脱敏（password/token 等字段值替换为***，**递归**）
+
+        **Day45 第 2 批修复的缺陷**：修复前 dict 分支只判断顶层键、
+        value 原样返回，而 list 分支却递归——两者不一致，导致
+        {user:{password:x}} 与 {items:[{token:y}]}
+        这类嵌套凭据明文进日志。现统一由 security.mask_data 递归处理
+        （含深度上限与循环引用保护）。签名与默认值保持不变。
 
         参数:
-            data (Any): 原始数据（dict/list/其他类型）
-            fields (tuple[str, ...]): 该数据位置的敏感字段名集合。
-                默认按请求体口径；查询串位置须传 SENSITIVE_QUERY_FIELDS。
+            data (Any): 原始数据（dict/list/标量）
+            fields (tuple[str, ...]): 该数据位置适用的敏感字段名集合
 
         返回:
-            Any: 脱敏后的数据副本；入参为None时返回'-'
-
-        异常:
-            无（非dict/list类型原样返回，不递归深度处理）
+            Any: 脱敏后的副本；None 返回 -
         """
-        if data is None:
-            return "-"
-        if isinstance(data, dict):
-            return {
-                key: ("***" if str(key).lower() in fields else value)
-                for key, value in data.items()
-            }
-        if isinstance(data, list):
-            return [HttpClient._mask_data(item, fields) for item in data]
-        return data
+        return mask_data(data, fields)
 
     @staticmethod
     def _safe_url(url: str) -> str:
         """
-        构造可安全写入日志的 URL（查询串敏感参数脱敏 + 长度截断）
+        构造可安全写入日志的 URL（userinfo 与查询串凭据双重脱敏）
 
-        背景: 本模块已对 Authorization/Token 请求头与 password/token 请求体
-        字段做脱敏，但 URL 本身此前原样进日志与异常消息。而凭据走 query 的
-        接口极常见（?token=xxx / ?key=xxx），且 requests 的连接层异常文本
-        自带完整 URL，会二次绕过脱敏。本方法补齐该缺口。
+        背景：本模块已对 Authorization/Token 请求头与 password/token
+        请求体字段做脱敏，但 URL 本身此前原样进日志；凭据走 query 的接口
+        极常见（?token=xxx / ?key=xxx），且 requests 连接层异常文本自带
+        完整 URL 会二次绕过脱敏。Day45 第 2 批再补上 userinfo 段
+        （redis://user:pass@host 这类，query 脱敏覆盖不到）。
+
+        实现已收敛到 src/common/security.py，本方法保留为兼容入口
+        （6.33 决策：收敛实现单点性，不动模块 API 面）。
 
         参数:
             url (str): 原始 URL
 
         返回:
-            str: 脱敏并截断后的 URL，可安全落日志/进异常消息
+            str: 凭据均已打码、fragment 已剥离、且截断到
+                 MAX_LOG_URL_LENGTH 的 URL
+
+        注: 截断在本方法内完成（与修复前一致，既有测试锁定该行为）。
+        security.mask_url 是纯脱敏函数、不含截断，便于 cache 等调用方
+        自行选择长度上限。
         """
-        try:
-            parts = urlsplit(str(url))
-        except ValueError:
-            # 极端畸形 URL 连解析都失败时，直接按纯文本截断，不因脱敏而抛错
-            return HttpClient._truncate(url, MAX_LOG_URL_LENGTH)
-
-        if not parts.query:
-            return HttpClient._truncate(
-                urlunsplit((parts.scheme, parts.netloc, parts.path, "", "")),
-                MAX_LOG_URL_LENGTH,
-            )
-
-        pairs = parse_qsl(parts.query, keep_blank_values=True)
-        masked_pairs = [
-            (name, QUERY_MASK if name.lower() in SENSITIVE_QUERY_FIELDS else value)
-            for name, value in pairs
-        ]
-        safe_url = urlunsplit(
-            (
-                parts.scheme,
-                parts.netloc,
-                parts.path,
-                urlencode(masked_pairs),
-                "",
-            )
-        )
-        return HttpClient._truncate(safe_url, MAX_LOG_URL_LENGTH)
+        return HttpClient._truncate(mask_url(url), MAX_LOG_URL_LENGTH)
 
     @staticmethod
     def _truncate(text: Any, limit: int = MAX_LOG_BODY_LENGTH) -> str:
@@ -506,18 +450,58 @@ class HttpClient:
     @staticmethod
     def _safe_body(response: requests.Response) -> str:
         """
-        安全读取响应体（避免二进制/解压异常导致日志逻辑崩溃）
+        安全读取并脱敏响应体（二进制/解压异常兜底 + 凭据打码）
+
+        **Day45 第 2 批修复的缺陷**：修复前本方法只做 `response.text`
+        原样返回，**完全不过脱敏**——而模块 docstring 明写"请求与响应
+        自动脱敏记录"。实测 `{"code":0,"data":{"access_token":"X"}}`
+        原样进日志。请求侧有 `_mask_data` 三层打码、响应侧一点没有，
+        而 API 返回的凭据恰恰**都在响应里**（OAuth token、登录后的
+        会话密钥），这是漏检面最大的一处。
+
+        处理顺序（有意的取舍）:
+            1. 先按 JSON 解析 → 走 `mask_data` 递归脱敏 → 再序列化
+               （结构化脱敏比正则替换可靠：嵌套键、深层结构都能覆盖）
+            2. 非 JSON（HTML/纯文本/二进制）→ **原样返回**，
+               绝不为了"脱敏"去正则硬解一个非 JSON 报文
+               （实测过 `extract_zipped_paths` 式的正则脱敏不可靠：
+               官方公告明确"标准用法不受影响"，即误伤与漏伤并存）
+            3. 读取异常（编码/解压）→ 沿用既有占位文案
 
         参数:
             response (requests.Response): 响应对象
 
         返回:
-            str: 响应体文本；读取失败时返回错误占位描述
+            str: 脱敏后的响应体文本；非 JSON 时为原文；
+                 读取失败时返回错误占位描述
         """
         try:
-            return response.text
+            # 显式标注 str：requests 未提供 py.typed，mypy 把
+            # response.text 当 Any，直接 return 会触发 no-any-return
+            raw: str = response.text
         except Exception as exc:  # noqa: BLE001 二进制/编码异常统一兜底
             return f"<响应体读取失败: {exc}>"
+
+        # 非 JSON 不做解析：保持原文，避免正则脱敏的误伤
+        content_type = ""
+        headers = getattr(response, "headers", None)
+        if isinstance(headers, dict):
+            content_type = str(headers.get("Content-Type") or headers.get("content-type") or "")
+        looks_json = "json" in content_type.lower()
+        if not looks_json:
+            stripped = raw.lstrip()
+            if stripped[:1] in ("{", "["):
+                looks_json = True
+        if not looks_json:
+            return raw
+
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            # 声称是 JSON 却解析失败（截断的报文、代理改写的 body）：
+            # 按非 JSON 处理返回原文，不因脱敏而抛错
+            return raw
+        return json.dumps(mask_data(parsed), ensure_ascii=False)
 
     def close(self) -> None:
         """

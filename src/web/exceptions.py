@@ -36,6 +36,7 @@ from flask import Flask
 from werkzeug.exceptions import HTTPException
 
 from src.common.logger import LogManager
+from src.common.security import mask_sql_parameters
 from src.web.response import error
 
 logger = LogManager.get_logger()
@@ -163,7 +164,17 @@ def register_error_handlers(app: Flask) -> None:
         original = getattr(exc, "original_exception", None)
         logger.error(f"服务器内部错误 | 原始异常: {original or exc}")
         if app.config.get("TESTING") and original is not None:
-            return error(str(original), 500)
+            # TESTING 档位保留异常文本供排障，但**必须抹掉 SQL 参数值**：
+            # SQLAlchemy 的 DBAPIError.__str__ 形如
+            #   [SQL: SELECT ... WHERE case_id = ?]
+            #   [parameters: ('TM-SECRET-0001', 1, 0)]
+            # 第三行是参数值，可能正是用例编号/文件名等业务输入，
+            # 原样回显进 HTTP 响应体即构成信息泄露——`test` 档位常被当作
+            # 预发环境用，预发用真密钥时异常响应会把密钥吐出来
+            # （Day45 全量审查 P2-3 实测确认）。SQL 语句本身保留：
+            # 它是排障最关键的线索且不含具体取值；完整信息仍在上面
+            # 的 logger.error 里。
+            return error(mask_sql_parameters(str(original)), 500)
         return error("服务器内部错误", 500)
 
     @app.errorhandler(HTTPException)
@@ -207,5 +218,7 @@ def register_error_handlers(app: Flask) -> None:
             f"{traceback.format_exception(type(exc), exc, exc.__traceback__)}"
         )
         if app.config.get("TESTING"):
-            return error(str(exc), 500)
+            # 同 handle_500：TESTING 保留可排障的异常文本，但 SQL 参数值
+            # 必须抹除（Day45 全量审查 P2-3 实测参数值曾完整出现在响应体）
+            return error(mask_sql_parameters(str(exc)), 500)
         return error("服务器内部错误", 500)
