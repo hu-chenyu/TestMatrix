@@ -31,8 +31,14 @@
       （竞争消费deque）的**有意行为变更**
     - 历史环有界（maxlen=1000）超容量自动淘汰最旧事件
       （best-effort回放窗口）: 断线客户端Last-Event-ID早于最旧
-      存活事件时从最旧开始回放不报错；超出回放窗口的客户端由
-      路由层走数据库重建分支兜底，不能指望历史环无限保留
+      存活事件时从最旧开始回放不报错
+    - **缺口必须显式告知**（Day45 第 4 批 P1-5 修正）: 原文此处写的是
+      "超出回放窗口的客户端由路由层走数据库重建分支兜底"，而该分支以
+      `status in ("finished","failed")` 为前提，**运行中批次根本走不到**。
+      批次超过 999 条用例时重连会静默丢掉约 950 条 case_finished，
+      且 event_id 连续递增看起来完全正常，排障会误判为"用例没被执行"。
+      现由 `subscribe` 在首帧发 `stream_reset` 事件告知缺失区间；
+      终态批次仍由路由层数据库重建兜底（那条路径是通的）
     - 事件通道故障绝不影响真实执行: publish/close内部
       try/except兜底只记error日志（日志通道不能搞挂真实
       执行主流程）
@@ -84,9 +90,26 @@ VALID_EVENT_TYPES = (
 SUBSCRIBE_WAIT_TIMEOUT_SECONDS = 0.5
 
 # 历史环容量上限: 单批次最多保留的近期事件数，超容量自动淘汰
-# 最旧事件（best-effort回放窗口，超出窗口的断线客户端由路由层
-# 走数据库重建分支兜底）
+# 最旧事件（best-effort回放窗口）
+#
+# 超出窗口的断线客户端如何兜底（Day45 第 4 批 P1-5 修正）：
+#   - **终态批次**（finished/failed）：路由层走数据库重建分支，用
+#     `db:` 编号体系全量重发，客户端能补齐全部历史
+#   - **运行中批次**：路由层的数据库重建分支以
+#     `status in ("finished", "failed")` 为前提，运行中批次走不到那里。
+#     故由本模块在 subscribe 首帧显式发出 `stream_reset` 事件告知
+#     "历史有缺口、别把序号当连续"，由客户端决定重新拉取。
+#     旧版 docstring 在这里承诺"由路由层走数据库重建分支兜底"，对运行中
+#     批次而言是一句**兑现不了的承诺**——批次用 999 条以上用例时，
+#     重连会静默丢掉约 950 条 case_finished，且序号连续递增看起来完全正常。
 HISTORY_RING_MAXLEN = 1000
+
+# 缺口告知事件类型（Day45 第 4 批 P1-5 新增）
+#
+# **刻意不放进 VALID_EVENT_TYPES**：那个元组是 `publish` 的入参白名单，
+# 而 stream_reset 由 `subscribe` 在检测到缺口时**合成**，不经过 publish
+# 校验；放进去等于允许外部伪造一个不占 event_id 的伪事件。
+STREAM_RESET_EVENT_TYPE = "stream_reset"
 
 
 @dataclass
@@ -145,8 +168,10 @@ class EventChannel:
     回放窗口（best-effort边界）:
         - 历史环超容量自动淘汰最旧事件，last_event_id早于最旧
           存活事件时从最旧开始回放，不报错
-        - 被淘汰的事件无法找回，超出窗口的客户端由路由层走
-          数据库重建分支兜底
+        - 被淘汰的事件无法找回。**运行中批次拿不到数据库重建兜底**
+          （路由层重建分支以终态为前提），故 `subscribe` 在检测到
+          缺口时先 yield 一帧 `stream_reset`（携带缺失区间），
+          序号不连续这件事必须让客户端看得见，不能静默丢
     """
 
     def __init__(self) -> None:
@@ -219,6 +244,35 @@ class EventChannel:
                 f"类型: {event.event_type} | {exc}"
             )
 
+    def detect_gap(self, last_event_id: int | None) -> tuple[int, int] | None:
+        """
+        检测订阅游标与历史环之间的缺口（Day45 第 4 批 P1-5）
+
+        判定口径：游标 `last_event_id` 早于历史环最旧存活事件时，
+        `[last_event_id+1, oldest_id-1]` 这段事件已被淘汰、无法找回。
+        游标恰好等于 `oldest_id-1`（下一条就是最旧存活事件）**不算缺口**。
+
+        参数:
+            last_event_id (int | None): 客户端 Last-Event-ID；
+                None 表示全量回放（客户端本就没有连续性预期，不算缺口）
+
+        返回:
+            tuple[int, int] | None: (missing_from, missing_to) 闭区间；
+            无缺口时返回 None
+
+        异常:
+            无
+        """
+        if last_event_id is None:
+            return None
+        with self._condition:
+            if not self._history:
+                return None
+            oldest_id = self._history[0].event_id
+            if last_event_id >= oldest_id - 1:
+                return None
+            return (last_event_id + 1, oldest_id - 1)
+
     def subscribe(
         self,
         last_event_id: int | None = None,
@@ -260,6 +314,27 @@ class EventChannel:
         # 本订阅者的独立游标: 已读到的最后一条event_id（None按0
         # 处理，从最旧存活事件开始全量回放）
         cursor = last_event_id if last_event_id is not None else 0
+        # 缺口检测（Day45 第 4 批 P1-5）：游标早于历史环最旧存活事件时，
+        # 中间那段事件已被淘汰且**无法找回**。修复前直接 start_index 夹到
+        # 0 从最旧续传，序号连续递增、客户端与前端都看不出异常——
+        # 丢事件这件事没有任何信号。改为先发一帧 stream_reset 明说。
+        gap = self.detect_gap(last_event_id)
+        if gap is not None:
+            yield ExecutionEvent(
+                event_type=STREAM_RESET_EVENT_TYPE,
+                data={
+                    "reason": "history_ring_overflow",
+                    "missing_from": gap[0],
+                    "missing_to": gap[1],
+                    "missing_count": gap[1] - gap[0] + 1,
+                    "oldest_available_id": gap[1] + 1,
+                    "message": (
+                        f"事件历史存在缺口：{gap[0]}~{gap[1]} 共"
+                        f"{gap[1] - gap[0] + 1}条已被淘汰，本流从"
+                        f"{gap[1] + 1}起续传，序号不再连续"
+                    ),
+                },
+            )
         while True:
             event: ExecutionEvent | None = None
             wait_timed_out = False

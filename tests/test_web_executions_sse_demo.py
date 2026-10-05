@@ -85,6 +85,7 @@ from src.core import event_bus
 from src.core.case_manager import CaseManager
 from src.core.event_bus import (
     HISTORY_RING_MAXLEN,
+    STREAM_RESET_EVENT_TYPE,
     EventChannel,
     ExecutionEvent,
     get_channel,
@@ -559,11 +560,25 @@ class TestEventBusUnit:
         assert received[-1].event_id == total, "最新事件id应为总数"
 
         # 极旧游标（早于最旧存活事件）: 不报错，同样从最旧开始
+        #
+        # Day45 第 4 批 P1-5 修正后，极旧游标会**先收到一帧 stream_reset**
+        # 告知缺失区间——修复前这段是静默丢弃、序号还连续递增，看着完全正常。
+        # 该帧不占 event_id、不推进游标，故「真实事件条数」仍是 maxlen，
+        # 这里把两类事件分开断言而不是把总数改成 maxlen+1（放宽总数会
+        # 让"淘汰条数"这个原有判据失去意义）。
         received_old = list(channel.subscribe(last_event_id=2))
-        assert len(received_old) == HISTORY_RING_MAXLEN, (
-            "极旧断点回放长度应为maxlen（从最旧存活开始）"
+        reset_frames = [
+            e for e in received_old
+            if e.event_type == STREAM_RESET_EVENT_TYPE
+        ]
+        replayed = [e for e in received_old if e.event_type != STREAM_RESET_EVENT_TYPE]
+        assert len(replayed) == HISTORY_RING_MAXLEN, (
+            "极旧断点回放的**真实事件**长度应为maxlen（从最旧存活开始）"
         )
-        assert received_old[0].event_id == received[0].event_id, (
+        assert len(reset_frames) == 1, (
+            f"极旧断点应恰好收到1帧stream_reset告知缺口，实得{len(reset_frames)}"
+        )
+        assert replayed[0].event_id == received[0].event_id, (
             "极旧断点应从最旧存活事件开始回放"
         )
 

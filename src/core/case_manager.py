@@ -1213,6 +1213,38 @@ class CaseManager:
         )
         return cases
 
+    @staticmethod
+    def _normalize_batch_id(execution_id: object, operation: str) -> str:
+        """
+        批次号归一（所有批次号入口的统一口径）
+
+        修复前只有 `record_execution` 做 strip，其余入口各写各的：
+        `finish_execution` / `get_execution_detail` / `get_execution_status`
+        只校验"非空白"却**仍用带空白的原值**去 filter_by，
+        `_update_batch_status` / `build_notification_statistics` 连校验都没有。
+        于是 `" TM-0001 "` 能通过空值守卫，却按带空格值查询——明细按干净
+        号落库、状态更新按带空格号查不到（只 warning 返回 None，静默丢失），
+        最后 `finish_execution` 抛"批次不存在"、整批判 failed。
+        根因与 7.45 同源：同一口径散落多处即多处漂移。
+
+        参数:
+            execution_id (object): 原始批次号（允许非 str 入参）
+            operation (str): 调用方操作名，写入异常 context 便于定位
+
+        返回:
+            str: strip 后的批次号；空值已在上一行被拒
+
+        异常:
+            CaseManagerError: 批次号为空或全是空白时抛出（统一转 400）
+        """
+        normalized = str(execution_id or "").strip()
+        if not normalized:
+            raise CaseManagerError(
+                "执行批次号不能为空",
+                context={"operation": operation},
+            )
+        return normalized
+
     @classmethod
     def record_execution(
         cls,
@@ -1264,12 +1296,9 @@ class CaseManager:
         # strip 归一化（Day44 P3-12）：原先只判空、查询/写入用原值，
         # 传入 " TM-0001 " 会让守卫放行但按带空格值查询/落库——写进去的
         # 批次号带空格，后续按干净批次号聚合时查不到明细。
-        if not execution_id or not str(execution_id).strip():
-            raise CaseManagerError(
-                "执行批次号不能为空",
-                context={"operation": "record_execution", "case_id": case_id},
-            )
-        execution_id = str(execution_id).strip()
+        # 批次号归一走统一口径（Day45 第 4 批 P3-1）：守卫与落库值必须
+        # 是同一个字符串，否则明细按干净号写、后续按带空格号查不到
+        execution_id = cls._normalize_batch_id(execution_id, "record_execution")
         if not case_id or not str(case_id).strip():
             raise CaseManagerError(
                 "用例编号不能为空",
@@ -1376,36 +1405,34 @@ class CaseManager:
         )
 
     @classmethod
-    def finish_execution(cls, execution_id: str) -> dict:
+    def _aggregate_execution_results(
+        cls, execution_id: str, operation: str
+    ) -> dict[str, Any] | None:
         """
-        完成执行批次并生成汇总统计
+        聚合批次执行明细并 upsert 到 defect_statistics（内部方法）
 
-        执行流程:
-            1. 查询该execution_id下全部test_executions记录
-            2. 无任何记录视为批次不存在，抛CaseManagerError
-            3. 统计total/passed/failed/error/skipped及通过率
-               （pass_rate=passed/total，保留4位小数）
-            4. upsert到defect_statistics表: execution_id存在则更新指标，
-               不存在则插入（重复finish同一批次时指标幂等刷新）
-            5. 返回统计字典
+        提取自 `finish_execution`（Day45 第 4 批 P2-1）。修复前聚合逻辑
+        只长在"正常完成"路径里，failed 分支仅改状态不聚合，于是
+        `defect_statistics` 缺行——而 `list_executions_paged` 只读该表，
+        结果是**批次从列表彻底消失**，而 `get_execution_status` 仍显示
+        failed + 计数全 0。同一套聚合口径散在两条路径上，就是这种
+        "一条路径补齐、另一条路径漏掉"的温床（7.45 同源）。
+
+        与 `finish_execution` 的差别只有一处：**无记录时返回 None 而不是
+        抛错**。finished 路径据此报"批次不存在"，failed 路径据此降级为
+        "无明细可聚合"（异常可能发生在第一条用例执行之前）。
 
         参数:
-            execution_id (str): 执行批次号
+            execution_id (str): 执行批次号（调用方须已归一）
+            operation (str): 操作名，写入异常 context 与日志
 
         返回:
-            dict: {"execution_id", "total", "passed", "failed", "error",
-                   "skipped", "pass_rate"}
+            dict[str, Any] | None: {"execution_id", "total", "passed", "failed",
+            "error", "skipped", "pass_rate"}；无任何执行记录时返回 None
 
         异常:
-            CaseManagerError: 批次号为空 / 批次不存在（无执行记录） /
-                              数据库操作异常时抛出，context携带operation定位
+            CaseManagerError: 数据库操作异常时抛出（context 携带 operation）
         """
-        if not execution_id or not str(execution_id).strip():
-            raise CaseManagerError(
-                "执行批次号不能为空",
-                context={"operation": "finish_execution"},
-            )
-
         try:
             with DatabaseSession.session_scope() as session:
                 records = (
@@ -1414,17 +1441,11 @@ class CaseManager:
                     .all()
                 )
                 if not records:
-                    raise CaseNotFoundError(
-                        f"执行批次不存在或无任何执行记录: {execution_id}",
-                        context={
-                            "operation": "finish_execution",
-                            "execution_id": execution_id,
-                        },
-                    )
+                    return None
 
                 # 结果计数聚合
-                # total 恒 > 0：上一步已对空 records 抛 CaseNotFoundError，
-                # 故除零不变量由该 raise 保证。此处直接相除即可（Day44 P3-08：
+                # total 恒 > 0：上一步已对空 records 返回 None，故除零
+                # 不变量由该 early-return 保证。此处直接相除即可（Day44 P3-08：
                 # 原先写的是 `if total else 0.0`，else 分支永不可达，会误导
                 # 后续维护者以为空批次能走到这里、并掩盖"空批次已在上一行
                 # 被拒"这一真实契约）。
@@ -1464,7 +1485,7 @@ class CaseManager:
             logger.error(f"批次汇总数据库异常 | 批次: {execution_id} | {exc}")
             raise CaseManagerError(
                 f"批次汇总数据库异常: {exc}",
-                context={"operation": "finish_execution", "execution_id": execution_id},
+                context={"operation": operation, "execution_id": execution_id},
             ) from exc
 
         summary = {
@@ -1481,6 +1502,40 @@ class CaseManager:
             f"通过: {passed} | 失败: {failed} | 错误: {error} | "
             f"跳过: {skipped} | 通过率: {pass_rate:.2%}"
         )
+        return summary
+
+    @classmethod
+    def finish_execution(cls, execution_id: str) -> dict[str, Any]:
+        """
+        完成执行批次并生成汇总统计
+
+        执行流程:
+            1. 批次号归一（strip + 空值拒绝）
+            2. 委托 `_aggregate_execution_results` 完成查询/聚合/upsert
+            3. 无任何执行记录视为批次不存在，抛CaseNotFoundError
+            4. 返回统计字典
+
+        参数:
+            execution_id (str): 执行批次号
+
+        返回:
+            dict: {"execution_id", "total", "passed", "failed", "error",
+                   "skipped", "pass_rate"}
+
+        异常:
+            CaseManagerError: 批次号为空 / 批次不存在（无执行记录） /
+                              数据库操作异常时抛出，context携带operation定位
+        """
+        execution_id = cls._normalize_batch_id(execution_id, "finish_execution")
+        summary = cls._aggregate_execution_results(execution_id, "finish_execution")
+        if summary is None:
+            raise CaseNotFoundError(
+                f"执行批次不存在或无任何执行记录: {execution_id}",
+                context={
+                    "operation": "finish_execution",
+                    "execution_id": execution_id,
+                },
+            )
         return summary
 
     # ------------------------------------------------------------------
@@ -1640,12 +1695,10 @@ class CaseManager:
             CaseManagerError: 批次号为空 / 数据库查询异常时抛出，
                               context携带operation定位信息
         """
-        # 批次号基础校验（空字符串/空白串直接拒绝）
-        if not execution_id or not str(execution_id).strip():
-            raise CaseManagerError(
-                "执行批次号不能为空",
-                context={"operation": "get_execution_detail"},
-            )
+        # 批次号基础校验（空字符串/空白串直接拒绝）+ 归一
+        execution_id = cls._normalize_batch_id(
+            execution_id, "get_execution_detail"
+        )
 
         try:
             session = DatabaseSession.get_session()
@@ -1884,6 +1937,8 @@ class CaseManager:
         异常:
             无（全部内部消化，只记error日志）
         """
+        # 通道注册表以批次号为键，不归一会与 DB 侧分叉出两个通道
+        execution_id = str(execution_id or "").strip()
         try:
             channel = get_channel(execution_id, create=True)
             if channel is None:
@@ -1918,6 +1973,7 @@ class CaseManager:
         异常:
             无（全部内部消化，只记error日志）
         """
+        execution_id = str(execution_id or "").strip()
         try:
             close_channel(execution_id, reason=reason)
         except Exception as exc:
@@ -2136,12 +2192,51 @@ class CaseManager:
                 f"{type(exc).__name__}: {exc}"
             )
             error_summary = f"{type(exc).__name__}: {exc}"
+            # 失败批次同样要聚合（Day45 第 4 批 P2-1）
+            #
+            # 修复前本分支只 `_update_batch_status(status="failed")` 改状态，
+            # 不写 defect_statistics。而 `list_executions_paged` 只读该表，
+            # 于是"第 k 条用例抛异常"的批次——前 k-1 条明细已落库、统计完全
+            # 可算——在批次列表里**彻底不可见**，`get_execution_status` 却显示
+            # failed + 计数全 0。排障时表现为"批次凭空消失"。
+            #
+            # 异常可能发生在第一条用例执行之前（records 为空），此时无明细
+            # 可聚合，属正常降级：记 warning 后继续收尾，不影响终态落库。
+            failed_summary: dict[str, Any] | None = None
+            try:
+                failed_summary = cls._aggregate_execution_results(
+                    execution_id, "aggregate_failed_batch"
+                )
+            except Exception as agg_exc:
+                # 聚合失败不得吞掉 failed 状态本身：本行位于外层 except 块内，
+                # 裸抛会杀死 daemon 线程并连带跳过终态事件与失败通知
+                logger.error(
+                    f"失败批次聚合异常（不影响failed状态落库） | "
+                    f"批次: {execution_id} | "
+                    f"{type(agg_exc).__name__}: {agg_exc}"
+                )
+            if failed_summary is None:
+                logger.warning(
+                    f"失败批次无执行明细可聚合，不写汇总行 | 批次: {execution_id}"
+                )
+            # 冗余统计回写批次行：get_execution_status 直查批次行，
+            # 不聚合，故不写这里它仍显示 failed + 全 0
+            stat_fields: dict[str, Any] = {}
+            if failed_summary is not None:
+                stat_fields = {
+                    "passed": failed_summary["passed"],
+                    "failed": failed_summary["failed"],
+                    "error": failed_summary["error"],
+                    "skipped": failed_summary["skipped"],
+                    "pass_rate": failed_summary["pass_rate"],
+                }
             try:
                 cls._update_batch_status(
                     execution_id,
                     status="failed",
                     error_message=error_summary,
                     finished_at=datetime.now(),
+                    **stat_fields,
                 )
             except Exception as mark_exc:
                 # failed状态落库也失败（如库不可用）: 仅记日志，
@@ -2215,12 +2310,10 @@ class CaseManager:
             CaseManagerError: 批次号为空 / 数据库查询异常时抛出，
                               context携带operation定位
         """
-        # 批次号基础校验（空字符串/空白串直接拒绝）
-        if not execution_id or not str(execution_id).strip():
-            raise CaseManagerError(
-                "执行批次号不能为空",
-                context={"operation": "get_execution_status"},
-            )
+        # 批次号基础校验（空字符串/空白串直接拒绝）+ 归一
+        execution_id = cls._normalize_batch_id(
+            execution_id, "get_execution_status"
+        )
 
         try:
             session = DatabaseSession.get_session()
@@ -2306,6 +2399,9 @@ class CaseManager:
                               （由调用方决定兜底策略）
         """
         meta: dict[str, Any] | None = None
+        # 归一：带空白的批次号此前查不到批次行，只 warning 返回 None——
+        # 状态更新被静默丢弃，而明细已按干净号落库，两边就此分叉
+        execution_id = str(execution_id or "").strip()
         try:
             with DatabaseSession.session_scope() as session:
                 batch_row = (
@@ -2390,6 +2486,8 @@ class CaseManager:
             无（数据库异常由session记录后向上抛出，调用方notify_execution_result消化）
         """
         session = DatabaseSession.get_session()
+        # 归一但不抛：本方法契约是"异常: 无"，空白号与"无记录"同义返回 None
+        execution_id = str(execution_id or "").strip()
         try:
             records = (
                 session.query(TestExecution)

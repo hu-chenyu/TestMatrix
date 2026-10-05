@@ -90,6 +90,11 @@ DEFAULT_PAGE_SIZE = 20
 # 批次终态事件类型（流式接口收到后立即关闭流的信号）
 TERMINAL_EVENT_TYPES = ("batch_finished", "batch_failed")
 
+# 历史环缺口告知事件类型（Day45 第 4 批 P1-5）
+# 由 EventChannel.subscribe 在检测到游标早于最旧存活事件时合成，
+# 不占 event_id、不推进客户端游标，也不关闭流
+STREAM_RESET_EVENT_TYPE = "stream_reset"
+
 # SSE 帧id的编号体系标识（防跨体系错误比较，详见 _format_sse_frame）
 #   live: 实时流分支，用通道内单调递增的 event_id
 #   db:   DB重建分支，用"从1起重新分配"的合成序号
@@ -954,6 +959,13 @@ def stream_execution_events(execution_id: str):
         # （本线程持有channel引用，即使批次此刻终态且close_channel
         # 从注册表移除，残余事件仍能被读完，不丢终态事件）
         #
+        # **断点回放的缺口如实告知**（Day45 第 4 批 P1-5）: 本分支拿不到
+        # 数据库重建兜底——分支一/二都以 `status in ("finished","failed")`
+        # 为前提，运行中批次根本走不到。修复前客户端游标早于历史环最旧
+        # 事件时，服务端直接从最旧续传，序号连续递增、**丢事件这件事
+        # 没有任何信号**，排障会误判为"用例没被执行"。现由
+        # EventChannel.subscribe 首帧发 stream_reset 告知缺失区间。
+        #
         # 存活时间与连接数上界（Day44 P2-08）：修复前本循环唯一的退出路径
         # 是终态事件，批次处于 pending/running 时连接可无限存活——而心跳帧
         # 反而保证反向代理不会掐断它，于是一个卡死或超长批次会长期钉住一个
@@ -1002,6 +1014,20 @@ def stream_execution_events(execution_id: str):
                     return
                 continue
             # 真实事件转发（透传通道event_id）并刷新活动时间
+            if event.event_type == STREAM_RESET_EVENT_TYPE:
+                # 历史环缺口告知帧（Day45 第 4 批 P1-5）：event_id 为 None
+                # 故不输出 id 行、不推进客户端游标——它不对应真实序列中的
+                # 任何位置。**不因它 break**：缺口之后的实时事件仍然有效，
+                # 客户端拿到告知后自行决定要不要重新拉取，连接继续可用。
+                logger.warning(
+                    f"SSE订阅存在历史缺口，已发stream_reset告知客户端 | "
+                    f"批次: {execution_id} | "
+                    f"缺失区间: {event.data.get('missing_from')}~"
+                    f"{event.data.get('missing_to')}"
+                )
+                yield _format_sse_frame(event.event_type, event.data)
+                last_activity = time.monotonic()
+                continue
             yield _format_sse_frame(
                 event.event_type, event.data, event_id=event.event_id
             )
