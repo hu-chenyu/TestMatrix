@@ -72,6 +72,11 @@ def seed_cases() -> None:
         - TM-OD-0001 模块"订单中心" active
         - TM-DIS-0001 模块"停用模块" disabled（验证覆盖率分母只算active）
 
+    注: 需要"第三条用户中心明细"的用例在各自方法内**就地**补造用例
+    （reports_client 为 function 级 fixture，每条用例独立库），不在
+    此处加全局种子——加进来会改动 quality-metrics 的 active 分母，
+    把 3/3=1.0 变成 3/4=0.75，波及无关断言。
+
     参数:
         无
 
@@ -326,10 +331,28 @@ class TestReportsApi:
         模块分布: 用户中心2过1失败、订单中心1过，两模块分组计数与
         pass_rate正确，排序total降序（用户中心在前）
         """
+        # Day45 全量审查 问题2 起，同一 (execution_id, case_id) 的明细
+        # 只允许一条（record_execution 去重，防双跑污染明细）。原夹具
+        # 复用 TM-UC-0001 造第二条"失败"记录，真实执行链路上不会发生
+        # （一批次内每个用例只执行一次），改用独立编号表达同一断言意图。
+        # 该用例就地补造而不进 seed_cases()：全局种子会改动
+        # quality-metrics 的 active 分母（3/3 → 3/4），波及无关断言。
+        with DatabaseSession.session_scope() as session:
+            session.add(
+                models.TestCase(
+                    case_id="TM-UC-0003",
+                    name="用户会话超时校验",
+                    module="用户中心",
+                    priority="P1",
+                    case_type="api",
+                    status="active",
+                    description="模块分布测试专用第三条用户中心用例",
+                )
+            )
         _create_finished_batch([
             ("TM-UC-0001", "用户登录成功校验", "passed", None, 0.5),
             ("TM-UC-0002", "用户登录密码错误校验", "passed", None, 0.5),
-            ("TM-UC-0001", "用户登录成功校验", "failed", FAILED_STACK, 0.5),
+            ("TM-UC-0003", "用户会话超时校验", "failed", FAILED_STACK, 0.5),
             ("TM-OD-0001", "订单创建校验", "passed", None, 0.5),
         ])
 

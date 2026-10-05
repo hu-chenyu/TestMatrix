@@ -342,8 +342,17 @@ class TestTaskQueueClientUnit:
                 raise redis.ConnectionError("模拟宕机: lpush失败")
 
             def brpop(self, key: str, timeout: float = 0):
-                """出队命令抛连接异常"""
+                """出队命令抛连接异常（Day45 问题4 起实现已改用 brpoplpush，
+                保留此方法仅为双核对老实现的兼容性，不应再被调用"""
                 raise redis.ConnectionError("模拟宕机: brpop失败")
+
+            def brpoplpush(self, src: str, dest: str, timeout: float = 0):
+                """出队入在途命令抛连接异常（Day45 问题4 后的实际出队命令）"""
+                raise redis.ConnectionError("模拟宕机: brpoplpush失败")
+
+            def lrem(self, key: str, count: int, value: str) -> int:
+                """在途移除命令抛连接异常"""
+                raise redis.ConnectionError("模拟宕机: lrem失败")
 
             def hset(self, name: str, mapping: dict | None = None,
                      **kwargs) -> None:
@@ -362,6 +371,12 @@ class TestTaskQueueClientUnit:
         assert client.enqueue("RUN-DOWN", {"execution_id": "RUN-DOWN"}) is False
         assert client.dequeue(timeout=0.1) is None, "出队异常也应返回None"
         client.set_status("RUN-DOWN", "pending")  # 静默no-op不抛异常
+        # Day45 问题1：出队故障必须被记录下来，worker 才能退避。
+        # 修复前 dequeue 对故障与"队列空"一视同仁地返回 None，worker 的
+        # 判据 `_backend is None` 在"后端已构建但连接断开"时为假，
+        # 形成零延时热转（实测 2 秒 21124 次空转）。
+        assert client.has_recent_failure() is True, "出队故障必须被标记"
+        assert client.get_failure_backoff() > 0, "故障后应给出正的退避秒数"
 
 
 # ===========================================================================

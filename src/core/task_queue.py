@@ -91,6 +91,50 @@ BACKEND_FAILURE_COOLDOWN_SECONDS = 5.0
 # 不会因为加了退避而让正常情况下的消费变慢（正常路径不进入该分支）。
 WORKER_IDLE_BACKOFF_SECONDS = 1.0
 
+# BRPOP 阻塞超时的**最小有效值**（Day45 全量审查 问题3）。
+#
+# 事实校准：redis-py 5.0.8 的 `Redis.brpop(keys, timeout: int = 0)`，
+# 其 docstring 原文为 "If timeout is 0, then block indefinitely."——
+# **0 的语义是永久阻塞，不是"不阻塞立即返回"**（修复前本方法的 docstring
+# 写的恰好相反）。于是 `TM_TASK_BRPOP_TIMEOUT=0` 会让 worker 永久卡在
+# brpop 上，`stop_event` 始终得不到检查，优雅停止失效。
+#
+# 处置：把 <= 0 的取值一律夹到本常量（0.1s），既保住"近似立即返回"的原意，
+# 又让 stop 能在最迟 0.1s 粒度内被响应。不抛 ValueError 是因为
+# 配置文件写错不应让 worker 线程直接死掉。
+MIN_BRPOP_TIMEOUT_SECONDS = 0.1
+
+# 消费侧故障的指数退避（Day45 全量审查 问题1）。
+#
+# Day44 热修只给"后端构建失败"加了冷却与退避，漏掉了"后端已构建成功、
+# 但运行期连接断开"这条路径：此时 `_backend` 非 None，worker 的退避判据
+# `if self.queue_client._backend is None` 为假，直接 continue 形成零延时
+# 热转（实测 2 秒 21124 次空转，每轮一条 WARNING）。本组常量把退避依据
+# 从"后端是否为 None"换成"本轮 dequeue 是否发生故障"，并按连续失败次数
+# 指数递增，单轮上限 30 秒。
+WORKER_FAILURE_BACKOFF_BASE_SECONDS = 1.0
+WORKER_FAILURE_BACKOFF_CEILING_SECONDS = 30.0
+
+# 幂等抢占 claim 的存活秒数（Day45 全量审查 问题2）。
+#
+# 场景：enqueue 的 lpush 已在 Redis 生效，但应答因 socket_timeout 超时
+# 抛错 → enqueue 返回 False → 路由用同一 execution_id 起裸线程；此时
+# 消息仍在队列里等 worker 消费 → 同一批次被执行两次，明细双写、
+# 计数翻倍、通过率被污染。以 execution_id 做 SETNX 抢占，后到者直接放弃。
+# 取 3600 秒的依据：覆盖最长的单批次执行时长（Day45 设计文档 L1 批次
+# 超时同为 3600s），既不误伤同批次的正常重试，又能让崩溃后的批次在
+# 一小时后可被重新抢占。
+CLAIM_TTL_SECONDS = 3600
+
+# 在途任务（processing list）的最大停留秒数（Day45 全量审查 问题4）。
+#
+# 无 ack 的后果：BRPOP 弹出即从队列删除，进程被 kill（OOM/部署重启）时
+# 批次永久停在 pending/running，无任何补偿路径。改用 BRPOPLPUSH 后任务
+# 同时落在 processing list，超过本时长的在途任务会被重新投回任务队列。
+# 取 300 秒的依据：模拟执行 0.01s/条，真实执行（Day48 起）单批分钟级，
+# 300 秒足以覆盖绝大多数正常批次，同时让崩溃恢复足够快。
+STALE_PROCESSING_SECONDS = 300
+
 
 def task_status_key(execution_id: str) -> str:
     """
@@ -106,6 +150,48 @@ def task_status_key(execution_id: str) -> str:
         无
     """
     return f"tm:task:{execution_id}"
+
+
+def task_claim_key(execution_id: str) -> str:
+    """
+    构造幂等抢占的Redis key（纯函数）
+
+    参数:
+        execution_id (str): 执行批次号
+
+    返回:
+        str: "tm:claim:{execution_id}"
+
+    异常:
+        无
+    """
+    return f"tm:claim:{execution_id}"
+
+
+def failure_backoff_seconds(consecutive_failures: int) -> float:
+    """
+    按连续失败次数计算退避秒数（纯函数，指数递增 + 封顶）
+
+    1 次→1s，2 次→2s，3 次→4s，…… 上限
+    WORKER_FAILURE_BACKOFF_CEILING_SECONDS（30s）。
+    封顶的理由：退避过久会让 Redis 短暂抖动后恢复时消费延迟过大，
+    30 秒与 Day44 的 BACKEND_FAILURE_COOLDOWN_SECONDS 同量级，
+    既止住热转又不显著拖慢自愈。
+
+    参数:
+        consecutive_failures (int): 已连续失败的轮数（<=0 时返回 0）
+
+    返回:
+        float: 本轮应退避的秒数（0 表示无需退避）
+    """
+    if consecutive_failures <= 0:
+        return 0.0
+    exponent = min(consecutive_failures - 1, 10)
+    # 显式 float()：mypy 把 `int ** int` 推断为 Any（int.__pow__ 的
+    # 返回类型是 Any），不显式转换会让整个乘法退化为 Any，
+    # 在 strict 下触发 no-any-return 判红。
+    backoff = WORKER_FAILURE_BACKOFF_BASE_SECONDS * float(2**exponent)
+    return min(backoff, WORKER_FAILURE_BACKOFF_CEILING_SECONDS)
 
 
 class TaskQueueClient:
@@ -147,6 +233,85 @@ class TaskQueueClient:
         # 单独一个属性而非复用 _backend，是为了与"后端实例缓存"解耦——
         # 冷却期结束后仍必须能正常重建并自愈。
         self._failed_until: float = 0.0
+        # 连续故障轮数（Day45 问题1）：dequeue 因 Redis 异常失败时 +1，
+        # 成功（含"队列空"这种正常无任务）时归零。worker 据此退避。
+        self._consecutive_failures: int = 0
+        # 最近一次 dequeue 是否因故障失败（Day45 问题1 的退避判据）。
+        # 与 `_backend is None` 的区别：后端已构建但连接断开时后者为假、
+        # 前者为真，正是热转的漏网路径。
+        self._last_dequeue_failed: bool = False
+        # 最近一次成功 dequeue 到的原始报文（Day45 问题4 的 ack 用）：
+        # BRPOPLPUSH 把任务移入 processing list 后，需在执行完成后用
+        # 同一报文串 LREM 掉。保留 dequeue 的 dict | None 签名不变。
+        self._last_dequeued_raw: str | None = None
+
+    # ------------------------------------------------------------------
+    # 消费侧故障状态（worker 退避判据，Day45 问题1）
+    # ------------------------------------------------------------------
+    def has_recent_failure(self) -> bool:
+        """
+        最近一次 dequeue 是否因故障失败（而非"队列空"）
+
+        用途：worker 主循环的退避判据。**不能**用 `_backend is None`
+        代替——后端已构建成功但运行期连接断开时该判断为假，worker 会
+        零延时 continue 形成热转（Day45 实测 2 秒 21124 次空转）。
+
+        参数:
+            无
+
+        返回:
+            bool: 最近一次 dequeue 因 Redis/传输故障失败时为 True；
+                  "队列空"（BRPOP 正常超时）返回 False
+        """
+        return self._last_dequeue_failed
+
+    def get_failure_backoff(self) -> float:
+        """
+        本轮应退避的秒数（按连续失败次数指数递增）
+
+        参数:
+            无
+
+        返回:
+            float: 退避秒数；无连续失败时返回 0.0
+        """
+        return failure_backoff_seconds(self._consecutive_failures)
+
+    @property
+    def consecutive_failures(self) -> int:
+        """
+        当前连续故障轮数（测试与日志观测用）
+
+        返回:
+            int: 连续失败次数；成功一次即归零
+        """
+        return self._consecutive_failures
+
+    def _record_dequeue_failure(self) -> None:
+        """
+        记录一次 dequeue 故障（内部方法）
+
+        参数:
+            无
+
+        返回:
+            None
+        """
+        self._consecutive_failures += 1
+        self._last_dequeue_failed = True
+
+    def _clear_dequeue_failure(self) -> None:
+        """
+        清除故障标记（dequeue 恢复正常时调用，内部方法）
+
+        参数:
+            无
+
+        返回:
+            None
+        """
+        self._consecutive_failures = 0
+        self._last_dequeue_failed = False
 
     # ------------------------------------------------------------------
     # 配置属性（实时读env_manager，monkeypatch可热替换）
@@ -195,6 +360,23 @@ class TaskQueueClient:
             str: 队列key，默认"tm:queue:tasks"
         """
         return env_manager.get("TM_TASK_QUEUE_KEY", "tm:queue:tasks")
+
+    @property
+    def processing_key(self) -> str:
+        """
+        在途任务list的key（BRPOPLPUSH 的目标，Day45 问题4）
+
+        可靠性机制：任务被取出时同时落入本 list，执行成功后由 ack()
+        移除。worker 崩溃时任务仍在，requeue_stale() 按停留时长重新投回
+        任务队列——这正是旧 BRPOP"弹出即删"缺失的确认语义。
+
+        参数:
+            无
+
+        返回:
+            str: 在途list key，默认"{queue_key}:processing"
+        """
+        return f"{self.queue_key}:processing"
 
     @property
     def brpop_timeout(self) -> float:
@@ -384,16 +566,29 @@ class TaskQueueClient:
 
     def dequeue(self, timeout: float | None = None) -> dict | None:
         """
-        阻塞式取出任务（消费者调用，BRPOP队列list尾部，FIFO）
+        阻塞式取出任务（消费者调用，BRPOPLPUSH 队列尾→在途，FIFO）
 
-        LPUSH头部 + BRPOP尾部构成先入先出；超时无任务返回None。
+        LPUSH头部 + BRPOPLPUSH尾部构成先入先出；超时无任务返回None。
         任何Redis/反序列化异常返回None（worker循环继续，
         不因单条坏消息或瞬时故障退出）。
 
+        **与修复前的三处语义变化**（Day45 全量审查 问题3/问题1/问题4）：
+
+        1. **timeout=0 不再是"永久阻塞"**：redis-py 5.0.8 的 brpop 文档
+           明确 "If timeout is 0, then block indefinitely."，而本方法
+           旧 docstring 写的是"0表示不阻塞立即返回"——语义正好写反。
+           现把 <=0 的取值夹到 MIN_BRPOP_TIMEOUT_SECONDS(0.1s)。
+        2. **BRPOP → BRPOPLPUSH**：弹出后同时落入在途 list
+           (processing_key)，执行完成后由 ack() 移除。worker 崩溃时
+           任务仍在在途 list，可由 requeue_stale() 重新投回。
+        3. **故障可观测**：Redis 异常时记 `_last_dequeue_failed=True`
+           并累加连续失败计数，供 worker 指数退避（has_recent_failure /
+           get_failure_backoff）；"队列空"不算故障，立即清零。
+
         参数:
-            timeout (float | None): BRPOP阻塞超时秒数；None时用
-                                    TM_TASK_BRPOP_TIMEOUT配置值；
-                                    0表示不阻塞立即返回
+            timeout (float | None): 阻塞超时秒数；None 时用
+                TM_TASK_BRPOP_TIMEOUT 配置值；<=0 会被夹到
+                MIN_BRPOP_TIMEOUT_SECONDS（不永久阻塞）
 
         返回:
             dict | None: 任务payload字典；超时/未启用/反序列化失败/
@@ -405,24 +600,39 @@ class TaskQueueClient:
         """
         backend = self._get_backend()
         if backend is None:
+            # 后端不可用属"故障"，与"队列空"区分开，才能触发 worker 退避
+            self._record_dequeue_failure()
             return None
         effective_timeout = (
             timeout if isinstance(timeout, (int, float)) else self.brpop_timeout
         )
+        # 夹逼：redis-py 的 0 语义是永久阻塞，会让 stop_event 失效
+        if effective_timeout is None or effective_timeout <= 0:
+            effective_timeout = MIN_BRPOP_TIMEOUT_SECONDS
         try:
-            # BRPOP返回(key, value)元组；超时返回None
-            result = backend.brpop(self.queue_key, timeout=effective_timeout)
+            # BRPOPLPUSH：原子地把任务从队列尾移入在途 list，返回报文串
+            # （超时返回 None）。在途 list 的存在使 worker 崩溃后任务可恢复。
+            raw_payload = backend.brpoplpush(
+                self.queue_key, self.processing_key, timeout=effective_timeout
+            )
         except redis.RedisError as exc:
             logger.warning(f"任务出队异常，本轮跳过 | {exc}")
+            self._record_dequeue_failure()
             return None
-        if result is None:
+        # 通信成功（含"队列空"）即恢复：清零故障标记，避免一次抖动
+        # 之后的正常消费仍背着退避
+        self._clear_dequeue_failure()
+        if raw_payload is None:
             return None
+        self._last_dequeued_raw = raw_payload
         try:
-            _, raw_payload = result
             payload = json.loads(raw_payload)
         except (ValueError, TypeError) as exc:
-            # 坏消息不卡死worker: 记warning后跳过（消息已被BRPOP移除）
+            # 坏消息不卡死worker: 记warning后跳过。
+            # 此时它已在在途 list 里，必须就地 LREM，否则会被
+            # requeue_stale 当作"在途超时"无限重投（永动循环）。
             logger.warning(f"任务载荷反序列化失败，消息已丢弃 | {exc}")
+            self._discard_from_processing(raw_payload)
             return None
         # 结构校验: json.loads 对合法JSON数组/标量也成功，但返回的不是
         # 载荷字典。TaskWorker.run 在 try 块**之前**执行
@@ -435,8 +645,146 @@ class TaskQueueClient:
                 f"任务载荷结构非法（期望JSON对象），消息已丢弃 | "
                 f"实际类型: {type(payload).__name__}"
             )
+            self._discard_from_processing(raw_payload)
             return None
         return payload
+
+    def ack(self) -> bool:
+        """
+        确认最近一次 dequeue 的任务已完成（从在途 list 移除）
+
+        与 dequeue 配套：任务成功执行（或终态收尾）后调用，使在途 list
+        不再持有它。执行崩溃时不会调用，任务留在在途 list 等
+        requeue_stale 回收。
+
+        参数:
+            无
+
+        返回:
+            bool: 成功从在途 list 移除返回 True；无待确认任务/后端不可用/
+                  Redis 异常返回 False（不影响执行结果）
+        """
+        raw = self._last_dequeued_raw
+        if raw is None:
+            return False
+        removed = self._discard_from_processing(raw)
+        if removed:
+            self._last_dequeued_raw = None
+        return removed
+
+    def _discard_from_processing(self, raw_payload: str) -> bool:
+        """
+        从在途 list 移除指定报文（内部方法）
+
+        参数:
+            raw_payload (str): dequeue 返回过的原始报文串
+
+        返回:
+            bool: 移除成功 True；后端不可用/异常 False
+        """
+        backend = self._get_backend()
+        if backend is None:
+            return False
+        try:
+            backend.lrem(self.processing_key, 1, raw_payload)
+            return True
+        except redis.RedisError as exc:
+            logger.warning(f"在途任务移除失败 | {exc}")
+            return False
+
+    def requeue_stale(self, max_age_seconds: float = STALE_PROCESSING_SECONDS) -> int:
+        """
+        把在途 list 中停留过久的任务重新投回任务队列（崩溃补偿）
+
+        无 ack 的后果（Day45 问题4）：旧的 BRPOP 弹出即删，进程被 kill
+        时批次永久停在 pending/running，状态 hash 24h 后过期，无任何
+        补偿路径。改 BRPOPLPUSH 后任务同时留在在途 list，本方法在
+        worker 每轮空闲时调用，把超过 max_age_seconds 的在途任务重投。
+
+        判定"停留过久"用调度状态 hash 的 started_at/queued_at 时间戳，
+        缺失则视为陈旧（宁可重投一次，也不要永久丢任务——重复执行由
+        execution_id 幂等抢占与明细去重兜住）。
+
+        参数:
+            max_age_seconds (float): 在途最大停留秒数，默认
+                                      STALE_PROCESSING_SECONDS
+
+        返回:
+            int: 成功重新投回的任务条数
+        """
+        backend = self._get_backend()
+        if backend is None:
+            return 0
+        try:
+            in_flight = backend.lrange(self.processing_key, 0, -1) or []
+        except redis.RedisError as exc:
+            logger.warning(f"在途任务扫描失败 | {exc}")
+            return 0
+        if not in_flight:
+            return 0
+
+        requeued = 0
+        for raw in in_flight:
+            try:
+                payload = json.loads(raw)
+            except (ValueError, TypeError):
+                # 坏消息无人认领，直接丢弃以免永动重投
+                self._discard_from_processing(raw)
+                continue
+            if not isinstance(payload, dict):
+                self._discard_from_processing(raw)
+                continue
+            execution_id = str(payload.get("execution_id") or "").strip()
+            if not execution_id:
+                self._discard_from_processing(raw)
+                continue
+            if not self._is_stale_in_flight(execution_id, max_age_seconds):
+                continue
+            # 先移出在途再入队：顺序反了会在本轮 requeue_stale 里
+            # 再次扫到自己，形成同轮自环
+            self._discard_from_processing(raw)
+            try:
+                backend.lpush(self.queue_key, raw)
+            except redis.RedisError as exc:
+                logger.warning(f"陈旧任务重新入队失败 | {exc}")
+                continue
+            requeued += 1
+            logger.warning(
+                f"在途任务超时已重新入队（worker 崩溃补偿） | "
+                f"execution_id={execution_id} | 阈值: {max_age_seconds}s"
+            )
+        return requeued
+
+    def _is_stale_in_flight(self, execution_id: str, max_age_seconds: float) -> bool:
+        """
+        判定在途任务是否已停留过久（内部方法）
+
+        参数:
+            execution_id (str): 执行批次号
+            max_age_seconds (float): 阈值秒数
+
+        返回:
+            bool: 超过阈值返回 True；状态 hash 缺失/时间不可解析也返回
+                  True（宁可重投，重复执行由幂等抢占兜住）
+        """
+        status = self.get_status(execution_id)
+        if not status:
+            return True
+        started = status.get("started_at") or status.get("queued_at")
+        if not started:
+            return True
+        try:
+            stamp = datetime.fromisoformat(str(started))
+        except (ValueError, TypeError):
+            return True
+        # 时间戳可能带时区标识（tz-aware），而 datetime.now() 是 naive：
+        # 两者直接相减会抛 TypeError（不是 ValueError），故先归一到 naive。
+        # 队列状态 hash 由本模块写入（naive isoformat），带时区只可能是
+        # 外部写入的异常数据；按"无法判定即视为陈旧"处理，避免反复重投。
+        if stamp.tzinfo is not None:
+            return True
+        elapsed = (datetime.now() - stamp).total_seconds()
+        return elapsed > max_age_seconds
 
     # ------------------------------------------------------------------
     # 任务状态hash（调度层快查，权威状态仍在SQLite批次表）
@@ -506,6 +854,73 @@ class TaskQueueClient:
             )
             return None
 
+    # ------------------------------------------------------------------
+    # 幂等抢占（Day45 全量审查 问题2）
+    # ------------------------------------------------------------------
+    def claim(self, execution_id: str, ttl_seconds: int = CLAIM_TTL_SECONDS) -> bool:
+        """
+        以批次号做幂等抢占（SETNX + TTL），防同一批次被双跑
+
+        要解决的场景：enqueue 的 lpush 已在 Redis 生效，但应答因
+        socket_timeout 超时抛错 → enqueue 返回 False → 路由用**同一
+        execution_id** 起裸线程；此时消息仍在队列里等 worker 消费 →
+        同一批次被执行两次，明细双写、计数翻倍、通过率被污染。
+        两条链路谁先抢到 claim 谁执行，后到者直接放弃。
+
+        队列未启用（后端不可用）时**一律返回 True**：此时只有路由的裸线程
+        一条路径，不存在双跑；用"抢不到就不执行"去阻断默认链路会
+        直接让平台的核心功能失效——幂等保护不能反过来变成可用性风险。
+
+        参数:
+            execution_id (str): 执行批次号
+            ttl_seconds (int): claim 存活秒数，默认 CLAIM_TTL_SECONDS
+
+        返回:
+            bool: 抢到（此前无人持有）返回 True；已被他人持有返回 False；
+                  后端不可用时返回 True（不阻断执行）
+        """
+        if not execution_id:
+            return False
+        backend = self._get_backend()
+        if backend is None:
+            return True
+        try:
+            acquired = backend.set(
+                task_claim_key(execution_id), "1", nx=True, ex=ttl_seconds
+            )
+        except redis.RedisError as exc:
+            # 抢占本身故障：按"放行"处理并在日志留痕。理由同上——
+            # 保护机制不可用时宁可短暂失去幂等，也不能让执行链路停摆
+            # （明细去重是第二道防线，不依赖本方法）
+            logger.warning(
+                f"任务幂等抢占异常，按放行处理（明细去重为第二道防线） | "
+                f"execution_id={execution_id} | {exc}"
+            )
+            return True
+        return bool(acquired)
+
+    def release_claim(self, execution_id: str) -> bool:
+        """
+        释放幂等抢占（批次进入终态后调用，允许同批次被重新执行）
+
+        参数:
+            execution_id (str): 执行批次号
+
+        返回:
+            bool: 释放成功 True；后端不可用/异常 False
+        """
+        if not execution_id:
+            return False
+        backend = self._get_backend()
+        if backend is None:
+            return False
+        try:
+            backend.delete(task_claim_key(execution_id))
+            return True
+        except redis.RedisError as exc:
+            logger.warning(f"释放幂等抢占失败 | execution_id={execution_id} | {exc}")
+            return False
+
 
 class TaskWorker:
     """
@@ -520,11 +935,18 @@ class TaskWorker:
             finally按批次DB终态set_status(finished/failed)
 
     健壮性:
-        - BRPOP必须有限超时，stop_event才能在超时粒度内被响应，
-          禁止永久阻塞
+        - BRPOPLPUSH必须有限超时，stop_event才能在超时粒度内被响应，
+          禁止永久阻塞（redis-py 的 timeout=0 是"永久阻塞"而非"不阻塞"，
+          故 <=0 一律夹到 MIN_BRPOP_TIMEOUT_SECONDS）
         - 单个任务的任何异常都被捕获，worker线程绝不因任务失败
           而退出循环（_execute_batch_async内部已把批次异常兜成
           failed状态，外层再做双保险）
+        - 故障退避（Day45 问题1）：dequeue 因故障失败时按连续次数指数
+          退避（1/2/4/8/16/30 秒封顶），不再出现"后端已构建但连接断开"
+          的零延时热转
+        - 崩溃补偿（Day45 问题4）：任务执行完 ack() 移出在途 list；
+          worker 崩溃时任务留在在途 list，空闲轮次由 requeue_stale()
+          按停留时长重新投回
 
     属性:
         queue_client (TaskQueueClient): 队列客户端
@@ -584,16 +1006,37 @@ class TaskWorker:
                 # 检查stop_event，保证停止信号最迟一个超时周期生效
                 payload = self.queue_client.dequeue()
                 if payload is None:
-                    # 退避闸（Day44 热修 P1-1）：后端不可用时 dequeue **不阻塞**
-                    # 直接返回 None，此处若直接 continue 就是零延时热转。
-                    # wait() 而非 sleep() 的理由：它同时监听 stop_event，
-                    # 因此退避不会让 stop_worker() 的响应变慢一个退避周期。
-                    # 正常后端下 payload 为 None 是"队列空"，此时 dequeue
-                    # 已在 BRPOP 上阻塞了 brpop_timeout 秒，再多等
-                    # WORKER_IDLE_BACKOFF_SECONDS 属于无谓延迟，故只在
-                    # 后端确实不可用时才退避。
+                    # 退避闸（Day44 热修 P1-1 + Day45 问题1 重写）：
+                    #
+                    # 修复前判据是 `self.queue_client._backend is None`，
+                    # 只覆盖"后端未构建"；Day45 全量审查实测发现
+                    # **后端已构建成功、运行期连接断开**时该判据为假，
+                    # dequeue 立即返回 None（且不阻塞），于是直接 continue
+                    # 形成零延时热转——实测 2 秒 21124 次空转、每轮一条
+                    # WARNING（外推 1 小时约 3800 万条，CPU 占满一核 +
+                    # 磁盘写满），与 Day44 修掉的症状完全同类。
+                    #
+                    # 现改用 dequeue 自己记录的故障状态：它区分
+                    # "队列空"（BRPOP 正常超时，通信成功）与"故障"
+                    # （Redis 异常或后端不可用），并按连续失败次数指数
+                    # 退避（1/2/4/8/16/30 秒封顶），恢复后计数归零。
+                    # wait() 而非 sleep()：它同时监听 stop_event，
+                    # 因此退避不会让 stop_worker() 响应变慢。
+                    if self.queue_client.has_recent_failure():
+                        backoff = self.queue_client.get_failure_backoff()
+                        if backoff > 0:
+                            self.stop_event.wait(backoff)
+                        continue
+                    # 队列空：正常后端下 dequeue 已在 BRPOPLPUSH 上阻塞了
+                    # brpop_timeout 秒，再多等 WORKER_IDLE_BACKOFF_SECONDS
+                    # 属于无谓延迟，仅在后端确实不可用时才退避。
                     if self.queue_client._backend is None:
                         self.stop_event.wait(WORKER_IDLE_BACKOFF_SECONDS)
+                    # 崩溃补偿（Day45 问题4）：队列空闲时把在途 list 中停留
+                    # 过久的任务重新投回队列。只在"队列空且无故障"时做——
+                    # 故障期扫在途 list 只会徒增 Redis 压力。
+                    else:
+                        self.queue_client.requeue_stale()
                     continue
 
                 # execution_id 显式为 null 时 .get(key, "") 的默认值取不到，
@@ -605,10 +1048,13 @@ class TaskWorker:
                 )
                 if not execution_id:
                     # 防御: 畸形消息（缺字段 / null / 纯空白）直接跳过
-                    # （dequeue已验JSON）
+                    # （dequeue已验JSON）。必须在此 ack：任务此刻躺在
+                    # 在途 list 里，不确认移除会被 requeue_stale 当作
+                    # "崩溃残留"反复重投（永动循环）。
                     logger.warning(
                         f"任务缺少有效execution_id字段，已跳过 | payload={payload}"
                     )
+                    self.queue_client.ack()
                     continue
 
                 # 调度状态置running并记开始时间
@@ -668,6 +1114,15 @@ class TaskWorker:
                 finished_at=datetime.now().isoformat(),
                 error=terminal_error,
             )
+            # 确认在途任务（Day45 问题4）：执行已收尾（无论终态是
+            # finished 还是 failed，任务都不会再被重投），把它从在途 list
+            # 移除。不 ack 的话它会一直留在那里，直到超过
+            # STALE_PROCESSING_SECONDS 被 requeue_stale 当成"崩溃残留"
+            # 重投一次——等于每批任务都白跑第二遍。
+            self.queue_client.ack()
+            # 释放幂等抢占（Day45 问题2）：批次已终态，允许同批次被
+            # 重新执行（如失败后人工重跑），否则 claim 会把重试也挡住。
+            self.queue_client.release_claim(execution_id)
             logger.info(
                 f"worker任务结束 | execution_id={execution_id} | "
                 f"终态={terminal_status}"

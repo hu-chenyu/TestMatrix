@@ -651,7 +651,19 @@ class TestP3QueueRobustness:
 
     @allure.story("execution_id 显式为 null 时跳过而非当成 'None' 批次号")
     def test_null_execution_id_skipped(self, monkeypatch):
-        """str(None)=='None' 会让 not 判断为假，绕过畸形消息防御"""
+        """str(None)=='None' 会让 not 判断为假，绕过畸形消息防御
+
+        **原实现是空转的**（Day45 全量审查 P1-8 实测发现）：先
+        `stop_event.set()` 再 `worker.run()`，而 run() 的循环条件是
+        `while not self.stop_event.is_set():` → 循环体一次都不进，
+        dequeue 桩从未被调用（实测调用次数 0），用例又无任何断言，
+        于是"不抛异常即通过"。把被测的 null 守卫改回修复前的
+        `str(payload.get("execution_id", ""))`，1210 条用例仍全绿。
+
+        现改为**真正驱动循环体**：桩在首轮调用返回畸形载荷、
+        第二次返回 None 触发 stop_event，并用负向断言确认
+        `_execute_batch_async` 从未被调用。
+        """
         import threading
 
         from src.core import task_queue as tq_mod
@@ -660,17 +672,40 @@ class TestP3QueueRobustness:
         monkeypatch.setenv("TM_REDIS_URL", "fake://")
         client = tq_mod.TaskQueueClient()
         stop_event = threading.Event()
-        stop_event.set()  # 让 while 条件首次即假，不进入任何执行分支
+        calls = {"dequeue": 0, "executed": 0}
+
+        def fake_dequeue():
+            """首轮给畸形载荷，次轮置停止信号让循环退出"""
+            calls["dequeue"] += 1
+            if calls["dequeue"] == 1:
+                return {"execution_id": None, "cases": []}
+            stop_event.set()
+            return None
+
+        client.dequeue = fake_dequeue
         worker = tq_mod.TaskWorker(queue_client=client, stop_event=stop_event)
         try:
-            client.dequeue = lambda: {"execution_id": None, "cases": []}
-            # 不抛异常即通过：修复前 str(None) 会得到字面串 "None"
+            monkeypatch.setattr(
+                CaseManager,
+                "_execute_batch_async",
+                staticmethod(
+                    lambda **kwargs: calls.__setitem__("executed", calls["executed"] + 1)
+                ),
+            )
             worker.run()
         finally:
             client.reset_backend()
+
+        assert calls["dequeue"] > 0, "循环体必须真实执行（否则本用例是空转）"
+        assert calls["executed"] == 0, "execution_id 为 null 的载荷不得进入执行体"
+        # 字面串 "None" 绝不能被当作批次号写进调度状态。
+        # 注意 get_status 对不存在的 hash 返回的是空 dict（HGETALL 的
+        # 真实语义），不是 None，故判据是"为空"。
+        assert not client.get_status("None"), "不得以字面串'None'落调度状态"
 
     @allure.story("纯空白批次号同样被跳过")
     def test_blank_execution_id_skipped(self, monkeypatch):
+        """空白批次号必须被跳过（同样要求真实驱动循环体，见上一条的说明）"""
         import threading
 
         from src.core import task_queue as tq_mod
@@ -679,13 +714,32 @@ class TestP3QueueRobustness:
         monkeypatch.setenv("TM_REDIS_URL", "fake://")
         client = tq_mod.TaskQueueClient()
         stop_event = threading.Event()
-        stop_event.set()
+        calls = {"dequeue": 0, "executed": 0}
+
+        def fake_dequeue():
+            """首轮给空白批次号载荷，次轮置停止信号"""
+            calls["dequeue"] += 1
+            if calls["dequeue"] == 1:
+                return {"execution_id": "   ", "cases": []}
+            stop_event.set()
+            return None
+
+        client.dequeue = fake_dequeue
         worker = tq_mod.TaskWorker(queue_client=client, stop_event=stop_event)
         try:
-            client.dequeue = lambda: {"execution_id": "   ", "cases": []}
+            monkeypatch.setattr(
+                CaseManager,
+                "_execute_batch_async",
+                staticmethod(
+                    lambda **kwargs: calls.__setitem__("executed", calls["executed"] + 1)
+                ),
+            )
             worker.run()
         finally:
             client.reset_backend()
+
+        assert calls["dequeue"] > 0, "循环体必须真实执行（否则本用例是空转）"
+        assert calls["executed"] == 0, "纯空白批次号不得进入执行体"
 
 
 # ==============================================================================

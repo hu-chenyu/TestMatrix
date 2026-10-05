@@ -119,6 +119,7 @@ from src.core.report_analyzer import (
     ReportStatistics,
     StatisticsResult,
 )
+from src.core.task_queue import task_queue_client
 from src.db.db_session import DatabaseSession
 from src.db.models import (
     DefectStatistic,
@@ -1276,6 +1277,27 @@ class CaseManager:
 
         try:
             with DatabaseSession.session_scope() as session:
+                # 明细去重（Day45 全量审查 问题2 第二道防线）：同一
+                # (execution_id, case_id) 只允许一条明细。
+                #
+                # 幂等抢占是首道防线，但它是"尽力而为"——抢占本身故障时
+                # 会按放行处理（保护机制不可用时不能让执行链路停摆）。
+                # 没有第二道防线时，一次抢占失效就会让明细双写，
+                # finish_execution 按 execution_id 聚合**全部**明细，
+                # 计数翻倍、通过率被污染，且这种污染在库表里不可逆。
+                # 放在写入前查一次，代价是一行 SELECT，换来明细不可重复。
+                existing = (
+                    session.query(TestExecution.id)
+                    .filter_by(execution_id=execution_id, case_id=case_id)
+                    .first()
+                )
+                if existing is not None:
+                    logger.warning(
+                        f"执行明细已存在，跳过重复写入（防同一批次双跑污染明细） | "
+                        f"批次: {execution_id} | 用例: {case_id} | "
+                        f"结果: {result} | 既有明细id: {existing.id}"
+                    )
+                    return
                 # environment/executor 缺省时从批次行取真实值（Day44 P2-03）。
                 # 批次行也不存在（历史/CLI 直调路径）则留 None，交给 ORM 的
                 # 列默认值，与修复前的行为保持一致，不制造新的数据缺口。
@@ -1940,6 +1962,26 @@ class CaseManager:
             无（全部异常内部消化为批次failed状态）
         """
         try:
+            # 幂等抢占（Day45 全量审查 问题2）：enqueue 的 lpush 可能在
+            # Redis 已生效、但应答因 socket_timeout 超时抛错，此时路由会
+            # 用同一 execution_id 起裸线程兜底，而消息仍在队列里等 worker
+            # 消费——两条链路同时执行同一批次，明细双写、计数翻倍、
+            # 通过率被污染。以批次号做 SETNX 抢占，后到者直接放弃。
+            #
+            # 导入方向说明：task_queue 只在 run() 内**延迟** import
+            # case_manager，模块级不反向依赖，故本模块顶层 import 它
+            # 不构成循环依赖。
+            #
+            # 队列未启用时 task_queue_client.claim() 恒返回 True
+            # （后端不可用时只有裸线程一条路径，不存在双跑），
+            # 因此本段对默认链路零影响。
+            if not task_queue_client.claim(execution_id):
+                logger.warning(
+                    f"批次已被其他执行链路抢占，本次放弃（防同一批次双跑） | "
+                    f"批次: {execution_id}"
+                )
+                return
+
             # a. 置running + 记录批次开始时间
             # 顺带取回批次元信息（Day44 热修 P2-1）：_update_batch_status
             # 本来就要 SELECT 这一行，返回值里多带了 environment/executor，

@@ -52,6 +52,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # 项目根目录（scripts/的上一级）必须在import src.*之前确定并加入
 # sys.path，保证"直接脚本运行"与"-m模块运行"两种方式均可导入
@@ -74,6 +75,19 @@ logger = LogManager.get_logger()
 
 # BM-前缀: 基准数据统一标识，造量与cleanup都按此前缀过滤
 BM_CASE_PREFIX = "BM-"
+
+# 基准专用Redis默认URL（Day45 全量审查 问题5）
+#
+# 修复前默认与应用同为 redis://127.0.0.1:6379/0，而每个场景的
+# _configure() 都执行 backend.flushdb() —— 按默认参数跑一次基准会把
+# 应用的 tm:cases:list:* / tm:reports:* 缓存以及**任务队列 list
+# tm:queue:tasks** 一并清空，已入队任务静默丢失（无任何报错）。
+#
+# 为什么不能改成"只删 benchmark 自己的前缀"：本基准测的是
+# src/core/cache.py 的真实缓存行为，key 前缀与应用**完全相同**
+# （tm:cases:list:* 等），按前缀删无法与应用隔离——隔离只能落在
+# DB index 上。故默认切到 5 号库（应用仍用 0 号）。
+DEFAULT_BENCHMARK_REDIS_URL = "redis://127.0.0.1:6379/5"
 
 # 五个报告接口的轮询路径（reports-all场景模拟Dashboard首屏）
 REPORTS_ALL_PATHS = (
@@ -550,13 +564,17 @@ class CacheBenchmarkRunner:
         client (FlaskClient): 主测试客户端（并发场景按线程另建）
     """
 
-    def __init__(self, app: Flask, redis_url: str) -> None:
+    def __init__(
+        self, app: Flask, redis_url: str, allow_shared_db: bool = False
+    ) -> None:
         """
         初始化执行器并创建测试客户端
 
         参数:
             app (Flask): Flask应用实例
             redis_url (str): 真实Redis URL（缓存开启时使用）
+            allow_shared_db (bool): 是否允许对与应用共享的DB执行
+                flushdb（Day45 问题5 安全闸的显式放行开关，默认False）
 
         返回:
             无
@@ -566,6 +584,7 @@ class CacheBenchmarkRunner:
         """
         self.app = app
         self.redis_url = redis_url
+        self.allow_shared_db = allow_shared_db
         self.client = app.test_client()
 
     def _configure(self, cache_enabled: bool) -> None:
@@ -590,8 +609,76 @@ class CacheBenchmarkRunner:
         if cache_enabled:
             backend = cache_client._get_backend()
             if backend is not None:
-                # 每场景开启前清空Redis，保证首次请求是冷miss
-                backend.flushdb()
+                # 每场景开启前清空Redis，让首轮请求为冷miss。
+                #
+                # 安全闸（Day45 全量审查 问题5）：flushdb() 清的是**整个
+                # DB**，而本脚本默认 URL 与应用（src/core/cache.py 的
+                # TM_REDIS_URL）同为 redis://127.0.0.1:6379/0 —— 按默认
+                # 参数跑一次基准，会把应用的全部 tm:* 缓存以及任务队列
+                # list tm:queue:tasks 一并清空，已入队任务静默丢失
+                # （无任何报错，属"假绿式丢失"）。因此改为：默认只在
+                # 独立库上清空；检测到目标与应用共享同一 DB 时拒绝
+                # 清空并要求显式 --allow-shared-db 确认。
+                self._safe_flush(backend)
+
+    def _safe_flush(self, backend) -> None:
+        """
+        清空Redis前先做共享库安全闸（Day45 问题5）
+
+        背景：flushdb() 清整个DB。本脚本的缓存key前缀与应用**完全相同**
+        （都走 src/core/cache.py 的 tm:cases:list:*/tm:reports:*），按前缀
+        删无法与应用隔离，故隔离只能落在**DB index** 上。默认参数已改为
+        独立库（6379/5），此闸是第二道防线：万一用户显式传回共享库，
+        在未确认前不执行清空，避免"跑个基准把应用的缓存和任务队列清了"。
+
+        参数:
+            backend: 已构建的Redis客户端
+
+        返回:
+            None
+
+        异常:
+            无（闸门判定失败时只告警不中断基准，保证脚本仍能跑出数据）
+        """
+        target_db = self._url_db_index(self.redis_url)
+        app_db = self._url_db_index(
+            os.environ.get("TM_REDIS_URL", "redis://127.0.0.1:6379/0")
+        )
+        shared = target_db is not None and target_db == app_db
+        if shared and not self.allow_shared_db:
+            print(
+                f"  [安全闸] 跳过 flushdb：目标 DB {target_db} 与应用 TM_REDIS_URL "
+                f"共享同一库，清空会删掉应用缓存与任务队列 tm:queue:tasks"
+            )
+            print(
+                "  [安全闸] 如确认可清（如该库仅用于基准），加 --allow-shared-db 放行"
+            )
+            return
+        if shared:
+            print(
+                f"  [安全闸] 已确认 --allow-shared-db：对共享 DB {target_db} 执行 flushdb"
+            )
+        backend.flushdb()
+
+    @staticmethod
+    def _url_db_index(url: str) -> int | None:
+        """
+        从Redis URL解析DB index（内部静态方法）
+
+        参数:
+            url (str): Redis连接URL
+
+        返回:
+            int | None: DB序号；URL无路径段或不可解析时返回None
+        """
+        try:
+            path = urlsplit(url).path or ""
+        except ValueError:
+            return None
+        trimmed = path.lstrip("/")
+        if not trimmed.isdigit():
+            return None
+        return int(trimmed)
 
     def _time_get(self, path: str) -> float:
         """
@@ -1207,8 +1294,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--redis-url",
-        default="redis://127.0.0.1:6379/0",
-        help="真实Redis连接URL，默认redis://127.0.0.1:6379/0",
+        default=DEFAULT_BENCHMARK_REDIS_URL,
+        help=(
+            "真实Redis连接URL，默认"
+            + DEFAULT_BENCHMARK_REDIS_URL
+            + "（**独立于应用库的 5 号库**，避免 flushdb 清掉应用缓存与任务队列）"
+        ),
     )
     parser.add_argument(
         "--scenario",
@@ -1230,6 +1321,13 @@ def main() -> None:
     parser.add_argument(
         "--no-cleanup", action="store_true", default=False,
         help="执行后保留BM-造数数据（默认自动清理）",
+    )
+    parser.add_argument(
+        "--allow-shared-db", action="store_true", default=False,
+        help=(
+            "显式放行对与应用共享的DB执行flushdb（Day45问题5安全闸）。"
+            "默认拒绝：清空共享库会删掉应用缓存与任务队列 tm:queue:tasks"
+        ),
     )
     parser.add_argument(
         "--output",
@@ -1260,7 +1358,7 @@ def main() -> None:
         seeder.seed_cases(count=1000)
         seeder.seed_executions(batch_count=100)
 
-        runner = CacheBenchmarkRunner(app, args.redis_url)
+        runner = CacheBenchmarkRunner(app, args.redis_url, args.allow_shared_db)
         # 按--scenario组装results（all时全部；单场景时只跑该场景，
         # 但报告结构仍需其他场景占位，故单场景直接打印指标不写全报告）
         if args.scenario == "all":
