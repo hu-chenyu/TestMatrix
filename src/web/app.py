@@ -44,6 +44,7 @@ from src.web.routes import (
     pages_bp,
     reports_bp,
 )
+from src.web.utils import sanitize_log_field
 
 logger = LogManager.get_logger()
 
@@ -146,8 +147,10 @@ def _register_request_hooks(app: Flask) -> None:
             仅用于同请求内的耗时差值计算，不携带墙钟语义
         """
         # 入口日志保持既有格式不变（历史日志检索口径不被破坏）
+        # request.path 需单行化（Day45 全量审查第 3 批 P2-5）：按 PEP 3333
+        # 它已被 URL 解码，%0d%0a 会变成真实换行符，可凭空伪造一行审计记录。
         logger.info(
-            f"请求: {request.method} {request.path} "
+            f"请求: {request.method} {sanitize_log_field(request.path)} "
             f"from {request.remote_addr}"
         )
         # 开始时间挂到g上: g为单请求生命周期对象，after_request可直接读取
@@ -200,8 +203,11 @@ def _register_request_hooks(app: Flask) -> None:
             duration_text = f"{duration_ms:.1f}ms"
 
         # 3. 响应配对日志: 与"请求:"日志同method/path，额外携带状态码与耗时
+        #    request.path 同样要单行化（Day45 第 3 批 P2-5）：配对检索口径
+        #    要求两行 method+path 完全一致，任一侧留原始换行都会凭空多出
+        #    一行伪造的"响应:"记录，反而比只改入口那侧更隐蔽
         logger.info(
-            f"响应: {request.method} {request.path} "
+            f"响应: {request.method} {sanitize_log_field(request.path)} "
             f"-> {response.status_code}, 耗时 {duration_text} "
             f"from {request.remote_addr}"
         )

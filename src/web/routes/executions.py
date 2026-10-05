@@ -77,6 +77,7 @@ from src.web.response import success
 
 # case_type合法枚举复用cases.py常量（单一事实来源，防两处定义漂移）
 from src.web.routes.cases import VALID_CASE_TYPES
+from src.web.utils import sanitize_log_field
 
 logger = LogManager.get_logger()
 
@@ -248,6 +249,73 @@ def _parse_optional_body_str(body: dict, name: str) -> str | None:
     return stripped if stripped else None
 
 
+# 优先级合法取值（与 case_manager 的 PRIORITY_ORDER / P0-P3 口径一致）
+VALID_CASE_PRIORITIES = ("P0", "P1", "P2", "P3")
+
+
+def _parse_filter_value(
+    body: dict[str, Any],
+    name: str,
+    choices: tuple[str, ...] | None = None,
+) -> str | list[str] | None:
+    """
+    解析 trigger 的筛选维度字段（module/priority/tags）
+
+    Day45 全量审查第 3 批 P2-1 新增：这三个维度此前 `body.get()` 原值透传，
+    核心层 `_normalize_values` 对非 str/list 返 `[]` 并 warning，导致
+    **筛选条件被静默忽略、实际跑全量回归**，接口仍回 202。
+
+    这里的取舍是"宁可 400 也不静默降级"：调用方传了一个自己以为是
+    筛选条件的值，而平台把它丢了——这比直接报错更难发现（响应仍是 202，
+    只是批次范围不对）。
+
+    参数:
+        body (dict): JSON请求体字典
+        name (str): 字段名（module/priority/tags）
+        choices (tuple[str, ...] | None): 枚举白名单，None 表示不校验取值
+
+    返回:
+        str | list[str] | None: 解析后的筛选值；未传入（None/空白串）返回 None
+
+    异常:
+        ValidationError: 类型不是 str/list、列表元素非字符串、
+                          或取值不在 choices 白名单时抛出（统一转 400）
+
+    说明:
+        三个维度一律接受 `str` 与 `list[str]` 两种形态——核心层
+        `_normalize_values` 本就两者通吃，判其中之一非法等于凭空收紧
+        合法输入。裸字符串（如 `tags="smoke"`）是合法单值筛选。
+    """
+    raw_value = body.get(name)
+    if raw_value is None:
+        return None
+
+    def _check_one(item: object) -> str:
+        if not isinstance(item, str):
+            raise ValidationError(
+                f"{name}必须是字符串或字符串列表，收到元素类型: {type(item).__name__}"
+            )
+        value = item.strip()
+        if choices is not None and value and value.upper() not in choices:
+            raise ValidationError(
+                f"{name}取值非法: {item!r}，合法取值: {list(choices)}"
+            )
+        return value
+
+    if isinstance(raw_value, str):
+        stripped = _check_one(raw_value)
+        return stripped if stripped else None
+    if isinstance(raw_value, list):
+        values = [_check_one(item) for item in raw_value]
+        # 不做 upper() 归一：核心层 list_cases 查询侧本就按 upper() 处理，
+        # 路由层再归一会让"合法输入行为"发生变化（且受理埋点会记到与
+        # 调用方原值不同的字符串）。这里只校验、只透传。
+        return [v for v in values if v] or None
+    raise ValidationError(
+        f"{name}必须是字符串或字符串列表，收到类型: {type(raw_value).__name__}"
+    )
+
+
 @executions_bp.route("/trigger", methods=["POST"])
 def trigger_execution():
     """
@@ -309,9 +377,16 @@ def trigger_execution():
 
     # 四维筛选条件先解析到局部变量（供核心层透传与受理埋点共用，
     # 避免日志与实际入参因两次解析发生漂移）
-    module_filter = body.get("module")
-    priority_filter = body.get("priority")
-    tags_filter = body.get("tags")
+    #
+    # Day45 全量审查第 3 批 P2-1：原先三个筛选维度直接 `body.get()` 原值透传，
+    # 而核心层 `_normalize_values` 对**非 str/list** 类型返回 `[]` 并记 warning
+    # —— 传 `{"module":{"a":1}}` 时筛选条件被**静默忽略**，接口仍返 202，
+    # 实际执行了全量回归。调用方以为按模块收敛、实际跑了全量，且无从察觉。
+    # 同一函数内 executor/case_type 都有枚举校验，这三个维度却没有，口径不一致。
+    # 处置：类型/枚举不合即 400，不让"筛选条件被忽略"成为静默失败面。
+    module_filter = _parse_filter_value(body, "module")
+    priority_filter = _parse_filter_value(body, "priority", VALID_CASE_PRIORITIES)
+    tags_filter = _parse_filter_value(body, "tags")
     # case_type缺省归一化为api（Day29前非法值静默走默认，此处补齐枚举校验）
     case_type = _parse_optional_body_str(body, "case_type") or "api"
     if case_type not in VALID_CASE_TYPES:
@@ -373,9 +448,15 @@ def trigger_execution():
     # executor/四维筛选条件，便于后台批次检索与问题定位；未传入
     # （None）的字段统一打"-"，executor未显式指定同样打"-"（实际
     # 执行器由工厂按TM_EXECUTOR环境变量裁定，默认simulated）
-    module_text = module_filter if module_filter is not None else "-"
-    priority_text = priority_filter if priority_filter is not None else "-"
-    tags_text = tags_filter if tags_filter is not None else "-"
+    #
+    # 三个筛选值经 sanitize_log_field 单行化（Day45 第 3 批 P2-5）：
+    # 它们直接来自请求体，夹带换行即可在日志里伪造一整行"批次已受理"
+    # 记录（列表形参数还要把 list 整体 str() 后一并收敛）。
+    module_text = sanitize_log_field(module_filter) if module_filter is not None else "-"
+    priority_text = (
+        sanitize_log_field(priority_filter) if priority_filter is not None else "-"
+    )
+    tags_text = sanitize_log_field(tags_filter) if tags_filter is not None else "-"
     executor_text = executor_kind if executor_kind is not None else "-"
     logger.info(
         f"批次已受理 | execution_id={result['execution_id']} | "
@@ -426,6 +507,64 @@ def get_execution_status(execution_id: str):
             "执行批次不存在", detail={"execution_id": execution_id}
         )
     return success(data=status_data)
+
+
+
+class _SseSlotLease:
+    """
+    单次 SSE 并发订阅名额的持有凭证（幂等释放）
+
+    存在理由（Day45 全量审查第 3 批 P2-1）：名额原先**只在流式生成器的
+    finally 里归还**，而流式生成器并非总会被启动。Werkzeug 对 HEAD 请求
+    直接丢弃响应体，`stream_with_context` 包装出的外层生成器停在哨兵
+    `yield None` 上永不推进，内层 `event_generator` 的函数体从未执行，
+    其 finally 永不运行。于是 `HEAD /api/executions/<批次号>/events`
+    连发 5 次即可把某 IP 的 5 个名额永久占死，此后该 IP（同一 NAT 出口
+    即整个团队）所有 `GET .../events` 一律 429，且没有任何自愈路径。
+
+    幂等性由本对象自己的 `_released` 标志承担，**不挂在 flask.g 上**：
+    生成器运行在 `stream_with_context` 重入的请求上下文里，`g` 是不是
+    同一个对象取决于框架内部实现——Flask 2.3 的 `stream_with_context`
+    会在视图执行期间对同一个 `RequestContext` 二次 `push`，使
+    `_cv_tokens` 长度为 2，`RequestContext.pop` 里
+    `clear_request = len(self._cv_tokens) == 1` 为假，**teardown_request
+    会被整个跳过**。既不能靠 `g` 传状态，更不能指望 teardown 钩子兜底。
+    凭证是闭包里的普通对象，释放行为不随框架内部结构变化。
+    """
+
+    __slots__ = ("client_key", "_released")
+
+    def __init__(self, client_key: str) -> None:
+        self.client_key = client_key
+        self._released = False
+
+    def release(self) -> None:
+        """
+        归还本凭证占用的名额；重复调用是无副作用的空操作
+
+        入参:
+            无
+
+        返回:
+            None
+
+        说明:
+            归零时删除键而非留 0，避免 IP 集合随客户端数量无界增长
+            （与 `_SSE_ACTIVE_CONNECTIONS` 的既有口径一致）
+        """
+        if self._released:
+            return
+        self._released = True
+        with _SSE_CONNECTIONS_LOCK:
+            remaining = _SSE_ACTIVE_CONNECTIONS.get(self.client_key, 0) - 1
+            if remaining > 0:
+                _SSE_ACTIVE_CONNECTIONS[self.client_key] = remaining
+            else:
+                _SSE_ACTIVE_CONNECTIONS.pop(self.client_key, None)
+        logger.debug(
+            f"SSE并发订阅名额已释放 | 客户端: {self.client_key} | "
+            f"剩余: {max(remaining, 0)}"
+        )
 
 
 def _format_sse_frame(
@@ -672,20 +811,20 @@ def stream_execution_events(execution_id: str):
                 ),
             )
         _SSE_ACTIVE_CONNECTIONS[client_key] = current_count + 1
+    lease = _SseSlotLease(client_key)
 
     def _release_sse_slot() -> None:
-        """释放本请求占用的并发订阅名额（幂等，计数不会降到负数）。"""
-        with _SSE_CONNECTIONS_LOCK:
-            remaining = _SSE_ACTIVE_CONNECTIONS.get(client_key, 0) - 1
-            if remaining > 0:
-                _SSE_ACTIVE_CONNECTIONS[client_key] = remaining
-            else:
-                # 归零即移除键：否则 IP 集合会随客户端基数无界增长
-                _SSE_ACTIVE_CONNECTIONS.pop(client_key, None)
+        """释放本请求占用的 SSE 名额（委托幂等凭证）。"""
+        lease.release()
 
     # 4. 流式生成器（三分支: 降级快照 / 终态补发 / 实时订阅）
-    @stream_with_context
     def event_generator() -> Iterator[str]:
+        # 请求上下文由下方 `stream_with_context(event_generator())` 统一挂载，
+        # 不写成 `@stream_with_context` 装饰器：Flask 的类型桩把该函数的
+        # 返回值一律标成 `Iterator`，于是装饰后的 `event_generator` 在
+        # mypy 眼里是迭代器而非可调用对象，`event_generator()` 直接报
+        # `"Iterator[str]" not callable`。改为「传生成器」的官方写法后
+        # 类型与运行时都诚实（装饰器内部走的也是这条分支）。
         try:
             yield from _dispatch_events()
         finally:
@@ -828,6 +967,18 @@ def stream_execution_events(execution_id: str):
         #      直接返回 429，不进入流式响应。
         last_activity = time.monotonic()
         stream_started = time.monotonic()
+
+        def _lifetime_exceeded() -> bool:
+            """
+            单流存活上界判定（Day45 第 3 批 P2-2）
+
+            修复前该判定**只写在心跳分支**（`if event is None:` 内），
+            而大批次下事件间隔 < 0.5s，tick 根本不触发 → 1800s 护闸
+            形同虚设（且原注释恰好声称"不会漏判"，与实现相反）。
+            现由主循环每轮统一调用，与事件到达与否无关。
+            """
+            return time.monotonic() - stream_started >= SSE_MAX_LIFETIME_SECONDS
+
         for event in channel.subscribe(
             last_event_id=resume_live or None, tick=True
         ):
@@ -838,9 +989,7 @@ def stream_execution_events(execution_id: str):
                 if now - last_activity >= HEARTBEAT_INTERVAL_SECONDS:
                     yield ": heartbeat\n\n"
                     last_activity = now
-                # 存活超时判定放在心跳分支内：tick=True 保证每 0.5s
-                # 至少醒一次，不会因为批次长时间无事件而漏判超时
-                if now - stream_started >= SSE_MAX_LIFETIME_SECONDS:
+                if _lifetime_exceeded():
                     yield (
                         ": stream-lifetime-exceeded "
                         f"{SSE_MAX_LIFETIME_SECONDS}s\n\n"
@@ -848,7 +997,7 @@ def stream_execution_events(execution_id: str):
                     logger.info(
                         f"SSE流达到最长存活时间，主动收流 | "
                         f"批次: {execution_id} | "
-                        f"存活: {now - stream_started:.1f}s"
+                        f"存活: {time.monotonic() - stream_started:.1f}s"
                     )
                     return
                 continue
@@ -859,7 +1008,34 @@ def stream_execution_events(execution_id: str):
             last_activity = time.monotonic()
             if event.event_type in TERMINAL_EVENT_TYPES:
                 break
+            # 存活上界必须**每轮都判**：只在心跳分支判时，事件持续到达
+            # 的长批次根本走不到这里，上界形同虚设（Day45 第 3 批 P2-2）
+            if _lifetime_exceeded():
+                yield (
+                    ": stream-lifetime-exceeded "
+                    f"{SSE_MAX_LIFETIME_SECONDS}s\n\n"
+                )
+                logger.info(
+                    f"SSE流达到最长存活时间，主动收流（事件持续到达分支）| "
+                    f"批次: {execution_id} | "
+                    f"存活: {time.monotonic() - stream_started:.1f}s"
+                )
+                return
             # 帧间短暂让出GIL，防开发服务器流式被缓冲
             time.sleep(FRAME_INTERVAL_SECONDS)
 
-    return Response(event_generator(), mimetype="text/event-stream")
+    response = Response(
+        stream_with_context(event_generator()), mimetype="text/event-stream"
+    )
+    # 名额归还共三条路径，`_SseSlotLease` 保证幂等，任意一条先到即生效，
+    # 其余为空操作，计数不会变负（Day45 第 3 批 P2-1）：
+    #   ① 上面生成器的 finally：覆盖 GET 的正常收流、提前 break、
+    #      客户端断开抛 GeneratorExit、服务器收流后 close()
+    #   ② call_on_close：覆盖"生成器尚未被启动就被服务器关闭"
+    #   ③ HEAD 即时归还：Werkzeug 对 HEAD 丢弃响应体，①② 都不会触发
+    if request.method == "HEAD":
+        lease.release()
+    else:
+        response.call_on_close(lease.release)
+    return response
+

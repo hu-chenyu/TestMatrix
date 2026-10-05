@@ -280,6 +280,33 @@ def _safe_invalidate(operation: str, invalidate: Any) -> None:
         )
 
 
+def _invalidate_case_related_caches(operation: str) -> None:
+    """
+    用例写操作后的**统一**缓存失效（Day45 全量审查第 3 批 P1-4）
+
+    为什么必须同时清两个前缀：报告类统计**硬依赖 test_cases 表**——
+        - report_analyzer.py `get_module_distribution`：
+          `TestExecution LEFT OUTER JOIN TestCase` 后按 `TestCase.module` 分组
+        - `get_priority_distribution`：同构，按 `TestCase.priority` 分组
+        - `get_quality_metrics`：以 `TestCase.status == "active"` 计数作分母
+    而 module / priority / status 三者全在可更新白名单内。修复前
+    `invalidate_cases_list` 有 4 处调用而 `invalidate_reports` 仅 2 处
+    （都在 `_execute_batch_async` 内），于是**改用例的 module/priority/status
+    或删用例后，报告统计在 TTL（默认 300s）内持续返回与库不一致的聚合值**。
+    聚合指标出错比明细出错更难察觉（用户看到"模块通过率 87%"，库里口径已变）。
+
+    `delete_case` 是物理删除，删除后用例数必须下降，同样依赖本函数。
+
+    参数:
+        operation (str): 操作名，仅用于日志定位（create/update/delete/批量导入）
+
+    返回:
+        None
+    """
+    _safe_invalidate(operation, cache_client.invalidate_cases_list)
+    _safe_invalidate(operation, cache_client.invalidate_reports)
+
+
 # --------------------------------------------------------------------------
 # 业务语义异常子类（路由层异常翻译的类型锚点）
 # --------------------------------------------------------------------------
@@ -502,7 +529,7 @@ class CaseManager:
         )
         # Day31: 用例数据变更后失效列表缓存（统一走_safe_invalidate，
         # 缓存故障不影响导入主流程）
-        _safe_invalidate("批量导入", cache_client.invalidate_cases_list)
+        _invalidate_case_related_caches("批量导入")
         return result
 
     # ------------------------------------------------------------------
@@ -946,7 +973,7 @@ class CaseManager:
             f"优先级: {payload['priority']}"
         )
         # Day31: 创建成功后失效用例列表缓存（统一_safe_invalidate兜底）
-        _safe_invalidate("用例创建", cache_client.invalidate_cases_list)
+        _invalidate_case_related_caches("用例创建")
         return result
 
     @classmethod
@@ -1035,7 +1062,7 @@ class CaseManager:
             f"用例已更新 | 编号: {case_id} | 更新字段: {sorted(payload.keys())}"
         )
         # Day31: 更新成功后失效用例列表缓存（统一_safe_invalidate兜底）
-        _safe_invalidate("用例更新", cache_client.invalidate_cases_list)
+        _invalidate_case_related_caches("用例更新")
         return result
 
     @classmethod
@@ -1087,7 +1114,7 @@ class CaseManager:
 
         logger.info(f"用例已删除 | 编号: {case_id}")
         # Day31: 删除成功后失效用例列表缓存（统一_safe_invalidate兜底）
-        _safe_invalidate("用例删除", cache_client.invalidate_cases_list)
+        _invalidate_case_related_caches("用例删除")
         return True
 
     # ------------------------------------------------------------------
@@ -2763,6 +2790,12 @@ def run_batch(
 
     # 6. 批次汇总统计
     summary = CaseManager.finish_execution(execution_id)
+
+    # 6.1 报告统计缓存失效（Day45 第 3 批 P1-4）：本 CLI 路径直接调
+    #     record_execution + finish_execution，**不经过 _execute_batch_async**，
+    #     而报告缓存失效此前只挂在 _execute_batch_async 内部 → 走 CLI 执行后
+    #     Web 报告页在 TTL 内一直是旧值。新明细已落库，聚合口径已变，必须失效。
+    _safe_invalidate("CLI批次执行", cache_client.invalidate_reports)
 
     # 7. 控制台汇总报告
     print(f"\n===== 批量执行汇总报告 | 批次号: {execution_id} =====")
