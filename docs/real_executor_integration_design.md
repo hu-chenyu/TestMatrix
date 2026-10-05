@@ -51,7 +51,9 @@ path = str(case.get("script_path") or case.get("case_id", ""))
 `src/db/models.py` 的 `TestCase` 没有该列，`CaseManager._to_dict()`
 （`case_manager.py:2601-2626`）也不产出该键。也就是说：
 
-- 生产链路里 `case["script_path"]` **恒为 `KeyError → None`**，永远回落到 `case_id`；
+- 生产链路里 `case.get("script_path")` **恒返回 `None`**（`TestCase` 无此字段、
+  `_to_dict` 也不产出，字典取不到键时 `.get` 不会抛 `KeyError`），
+  于是 `or` 表达式永远回落到 `case_id`；
 - 于是命令变成 `pytest -q --tb=short -- TM-API-0001`；
 - pytest 报 `file or directory not found: TM-API-0001`，退出码 **4**；
 - 退出码 4 落在 `run_one()` 的"其他退出码 → error"分支（`executors.py:291-302`）。
@@ -274,7 +276,11 @@ Day50 引入批次隔离目录后风险面进一步扩大，必须 L1/L3 都杀�
 proc = subprocess.Popen(
     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     text=True, encoding="utf-8", errors="replace", bufsize=1,
-    cwd=str(batch_dir), env=child_env, creationflags=NEW_PROCESS_GROUP,
+    # cwd 必须是**项目根**，不是批次目录（3.6 表格 + ADR 决策 4 的唯一口径）：
+    # pytest 依赖项目根的 pytest.ini（testpaths/pythonpath=.）与 conftest.py，
+    # 改 cwd 会让 pythonpath=. 失效、用例 import 不到 src。隔离靠 batch_dir
+    # 承载产物（alluredir/junit/日志/tmp），不靠工作目录。
+    cwd=str(PROJECT_ROOT), env=child_env, creationflags=NEW_PROCESS_GROUP,
 )
 for line in proc.stdout:          # 逐行，天然流式
     ring.append(line)             # 环形缓冲（留尾部 N 行）

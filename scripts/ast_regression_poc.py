@@ -4,7 +4,7 @@ AST 精准回归最小 POC 脚本（Day45）
 定位:
     为 Day94-95「基于覆盖率映射 + AST import 拓扑的精准回归用例选择」
     工程化打地基，验证三件事在真实数据上成立:
-        (a) 解析 coverage.py 的 .coverage（SQLite）建立「用例↔源码文件」映射
+        (a) 解析 coverage.py 的 .coverage（SQLite）建立「用例与源码文件」映射
         (b) 用标准库 ast 解析 src/ 的 import 关系建立反向影响面
         (c) 对若干代表性 src 文件输出「选中比例 / 漏检率」双指标
 
@@ -14,7 +14,7 @@ AST 精准回归最小 POC 脚本（Day45）
     .coverage 默认**没有**每用例上下文。pytest-cov 4.x 的
     `--cov-context` 默认不开启，必须显式加 `--cov-context=test`，
     否则 context 表里只有一行空串（收集期/导入期覆盖），
-    「用例↔文件」映射根本无从谈起。生成命令:
+    「用例与文件」映射根本无从谈起。生成命令:
         py -m pytest --cov=src --cov-context=test --cov-report= -q
     开启后 context 名形如:
         tests/api_demo/test_x.py::TestC::test_y[参数]|setup
@@ -45,6 +45,7 @@ import sqlite3
 import sys
 from collections import deque
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -57,9 +58,8 @@ logger = LogManager.get_logger()
 # .coverage 默认位置候选（coverage.py 的默认 data_file 就是项目根 .coverage）
 DEFAULT_COVERAGE_CANDIDATES = (".coverage", "output/.coverage")
 
-# 默认源码目录 / 测试目录（相对项目根）
+# 默认源码目录（相对项目根）
 DEFAULT_SRC_DIR = "src"
-DEFAULT_TESTS_DIR = "tests"
 
 # coverage 上下文的阶段分隔符：context 名形如 "<node id>|run"
 PHASE_SEPARATOR = "|"
@@ -197,7 +197,7 @@ def numbits_to_lines(blob: bytes) -> list[int]:
 
 class CoverageMapper:
     """
-    .coverage 解析器：用例 ↔ 源码文件双向映射
+    .coverage 解析器：用例与源码文件双向映射
 
     职责边界（只做解析与查询，不做任何选择决策）:
         - 读 coverage.py 的 SQLite 存储（file/context/line_bits 三表）
@@ -490,7 +490,7 @@ class CoverageMapper:
         """
         return set(self._tests_by_file)
 
-    def get_statistics(self) -> dict:
+    def get_statistics(self) -> dict[str, Any]:
         """
         映射表统计信息
 
@@ -524,15 +524,25 @@ class CoverageMapper:
         """
         统计被测量但没有任何用例到达的源码文件数
 
+        **口径必须与 _load_file_table 一致**（Day45-fix2 P3-3）：
+        两者都读同一张 `file` 表，若此处不过滤库外文件，
+        零覆盖数会把 site-packages/标准库也算进来，与"库外文件数"
+        诊断项自相矛盾（当前数据集库外数为 0 故看不出问题，
+        一旦 coverage 测到库外路径，两个数字就对不上）。
+        因此复用同一个 is_out_of_project 判据，不另写一份。
+
         返回:
-            int: 文件数量（读 file 表全量与已索引集合求差）
+            int: 项目内零覆盖文件数量
         """
         connection = sqlite3.connect(f"file:{self.coverage_path}?mode=ro", uri=True)
         try:
             cursor = connection.execute("SELECT path FROM file")
             all_relative = {
-                normalize_rel_path(row[0], self.project_root)
-                for row in cursor.fetchall()
+                relative
+                for relative in (
+                    normalize_rel_path(row[0], self.project_root) for row in cursor.fetchall()
+                )
+                if not is_out_of_project(relative)
             }
         finally:
             connection.close()
@@ -792,7 +802,7 @@ class ImportGraph:
             visited.discard(module_name)
         return visited
 
-    def get_statistics(self) -> dict:
+    def get_statistics(self) -> dict[str, Any]:
         """
         依赖图统计信息
 
@@ -911,7 +921,7 @@ class RegressionSelector:
         module_name = ImportGraph.module_name_for(relative_path)
         return module_name if module_name in self.graph.modules else ""
 
-    def select_for_file(self, relative_path: str) -> dict:
+    def select_for_file(self, relative_path: str) -> dict[str, Any]:
         """
         计算单个修改文件的选中用例集与双指标
 
@@ -963,7 +973,7 @@ class RegressionSelector:
             "仅靠import的召回率": round(import_only_recall, 4),
         }
 
-    def select(self, modified_files: list[str]) -> dict:
+    def select(self, modified_files: list[str]) -> dict[str, Any]:
         """
         对多个修改文件做选择并汇总
 
@@ -1082,7 +1092,10 @@ def pick_representative_files(
 
 
 def render_text_report(
-    result: dict, mapper: CoverageMapper, graph: ImportGraph, cycles: list
+    result: dict[str, Any],
+    mapper: CoverageMapper,
+    graph: ImportGraph,
+    cycles: list[list[str]],
 ) -> None:
     """
     打印实验结果（text 输出格式）
@@ -1103,7 +1116,7 @@ def render_text_report(
     print("TestMatrix AST 精准回归最小 POC（Day45）")
     print("=" * 78)
 
-    print("\n【一】覆盖率映射表统计（.coverage → 用例↔源码文件）")
+    print("\n【一】覆盖率映射表统计（.coverage → 用例与源码文件）")
     for key, value in mapper.get_statistics().items():
         print(f"  {key}: {value}")
 
@@ -1194,7 +1207,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ast_regression_poc",
         description=(
-            "AST 精准回归最小 POC：解析 .coverage 建立用例↔源码文件映射、"
+            "AST 精准回归最小 POC：解析 .coverage 建立用例与源码文件映射、"
             "用 AST import 拓扑算反向影响面、输出选中比例与漏检率"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1213,10 +1226,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--src-dir", default=DEFAULT_SRC_DIR,
         help=f"源码目录（默认 {DEFAULT_SRC_DIR}/）",
-    )
-    parser.add_argument(
-        "--tests-dir", default=DEFAULT_TESTS_DIR,
-        help=f"测试目录（默认 {DEFAULT_TESTS_DIR}/，仅用于展示与自检）",
     )
     parser.add_argument(
         "--modified-files", default=None,

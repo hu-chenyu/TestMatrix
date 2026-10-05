@@ -2,7 +2,7 @@
 AST 精准回归最小 POC 脚本单元测试（Day45）
 
 测试对象: scripts/ast_regression_poc.py 的三类能力 + CLI
-    1. CoverageMapper: 解析 .coverage（SQLite）建立「用例↔源码文件」映射
+    1. CoverageMapper: 解析 .coverage（SQLite）建立「用例与源码文件」映射
     2. ImportGraph:     AST 解析 import 关系、建立反向影响面、检测循环依赖
     3. RegressionSelector: 直接覆盖 ∪ import 影响面的并集选择与双指标
 
@@ -23,6 +23,9 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# 被测脚本路径（GBK 守卫测试需要读它的源码文本）
+SCRIPT_PATH = PROJECT_ROOT / "scripts" / "ast_regression_poc.py"
 
 from scripts.ast_regression_poc import (  # noqa: E402
     CoverageMapper,
@@ -362,6 +365,29 @@ def test_coverage_空上下文_不计入用例维度但计入零覆盖统计(cov
     assert mapper.get_statistics()["诊断"]["库外文件数"] == 1
 
 
+def test_coverage_零覆盖统计_与库外过滤口径一致(coverage_fixture):
+    """零覆盖文件数不得把库外文件算进来（Day45-fix2 P3-3 回归守卫）
+
+    夹具刻意放了 1 个库外文件（tmp 外层的 site-packages/third.py）。
+    all 阶段下 4 个项目内文件全部有覆盖，所以：
+        口径一致 → 零覆盖 = 0（库外文件已被排除）
+        口径不一致 → 零覆盖 = 1（库外文件被当成"测了但没跑到"）
+    改动前后差值恰为 1，本断言可证伪。
+    """
+    project_root, coverage_path = coverage_fixture
+    mapper = CoverageMapper(coverage_path, project_root=project_root, phase="all")
+    mapper.load()
+    stats = mapper.get_statistics()
+
+    assert stats["诊断"]["库外文件数"] == 1
+    assert stats["零覆盖文件数"] == 0
+
+    # run 阶段下 conftest_helper.py 只在 setup 被覆盖，是真实的零覆盖文件
+    run_mapper = CoverageMapper(coverage_path, project_root=project_root, phase="run")
+    run_mapper.load()
+    assert run_mapper.get_statistics()["零覆盖文件数"] == 1
+
+
 def test_coverage_统计信息_平均值与用例数可手算核对(coverage_fixture):
     """映射表统计应与逐条查询结果自洽"""
     project_root, coverage_path = coverage_fixture
@@ -616,6 +642,43 @@ def test_代表文件挑选_按形态规则产出指定数量且不重复(graph_
 
 
 # ===========================================================================
+# GBK 控制台可编码性守卫（Day45-fix2 P1-1 回归守卫）
+# ===========================================================================
+
+
+def test_源码全字符可被GBK编码_中文Windows控制台不崩():
+    """本文件与被测脚本的每个非 ASCII 字符都必须能被 GBK 编码
+
+    **为什么需要这条守卫**：P1-1 的双向箭头（U+2194）不在 GBK 字符集内，
+    中文 Windows 默认 GBK 控制台执行 `--help` 时 argparse 打印帮助触发
+    `UnicodeEncodeError`，退出码 1、报告正文完全不可用。
+    当时 28 条单测全绿——因为 pytest 的 capsys 以 UTF-8 捕获输出，
+    **根本没有走控制台编码路径**，形成"本地绿 / 真实环境红"的盲区。
+
+    本守卫从源码文本层面判定，不依赖控制台编码，因此在任何平台都能钉住
+    规则："本项目脚本/测试源码中的中文与符号一律选用 GBK 可编码字符"。
+
+    **本测试自身也受该规则约束**：它的 docstring 里不能出现 U+2194 本身，
+    只能用码位指代——否则守卫会把自己判为违规（首轮确实如此）。
+    """
+    offenders: dict[str, list[str]] = {}
+    for target in (Path(__file__), SCRIPT_PATH):
+        source = target.read_text(encoding="utf-8")
+        for char in source:
+            if ord(char) < 128:
+                continue
+            try:
+                char.encode("gbk")
+            except UnicodeEncodeError:
+                line = source[: source.index(char)].count("\n") + 1
+                offenders.setdefault(f"U+{ord(char):04X} {char!r}", []).append(
+                    f"{target.name}:{line}"
+                )
+
+    assert not offenders, f"以下字符无法用 GBK 编码，会在中文 Windows 控制台崩溃: {offenders}"
+
+
+# ===========================================================================
 # CLI
 # ===========================================================================
 
@@ -625,11 +688,14 @@ def test_cli_参数解析_默认值与显式覆盖均正确():
     defaults = parse_args([])
     assert defaults.coverage is None
     assert defaults.src_dir == "src"
-    assert defaults.tests_dir == "tests"
     assert defaults.phase == "run"
     assert defaults.output == "text"
     assert defaults.modified_files is None
     assert defaults.stats_only is False
+    # P3-4 回归守卫：--tests-dir 是从未被读取的死参数，已删除。
+    # 断言"属性不存在"而不是"值为某个串"，删除与改默认值两种实现都能钉住。
+    assert not hasattr(defaults, "tests_dir")
+    assert "--tests-dir" not in SCRIPT_PATH.read_text(encoding="utf-8")
 
     explicit = parse_args(
         [
