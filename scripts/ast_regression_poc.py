@@ -44,7 +44,7 @@ import json
 import sqlite3
 import sys
 from collections import deque
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -110,6 +110,39 @@ def normalize_rel_path(path: str | Path, project_root: Path) -> str:
         # ValueError: 不在 project_root 之下（如 site-packages 里的文件）
         # OSError: Windows 上跨盘符 resolve 失败
         return raw.replace("\\", "/")
+
+
+def is_out_of_project(relative_path: str) -> bool:
+    """
+    判断归一后的路径是否落在项目根之外（库外文件）
+
+    **为什么不能用「首段含冒号」判盘符**（Day45 CI Run #56 实测教训）：
+    初版写的是 `":" in path.split("/")[0]`，这在 Windows 上成立
+    （首段是 `C:`），在 Linux 上恒为假——`/tmp/.../mod.py` 的
+    `split("/")[0]` 是**空串**，于是 site-packages/标准库文件被当成
+    项目内文件收进反向索引。单测在 Windows 上全绿，CI 的
+    ubuntu-24.04 上变红：判据写死了平台，而 CI 跑的是另一个平台。
+
+    修法不是"换成 `Path.is_absolute()`"（那仍依赖**运行**平台，
+    导致单测在本机无法证伪——变异退回旧判据本地依然全绿），
+    而是**按两种路径形态各自判断绝对性**：工具无论在 Windows 还是
+    Linux 上跑，都既认盘符路径也认 POSIX 绝对路径。
+    这样判据本身不含平台假设，单测在任意平台都能钉住它。
+
+    参数:
+        relative_path (str): normalize_rel_path 归一后的路径
+
+    返回:
+        bool: True 表示库外（两种形态任一为绝对路径 / 以 .. 上跳 / 空串）
+    """
+    if not relative_path:
+        return True
+    if relative_path.startswith(".."):
+        return True
+    return (
+        PureWindowsPath(relative_path).is_absolute()
+        or PurePosixPath(relative_path).is_absolute()
+    )
 
 
 def lines_to_numbits(lines: list[int]) -> bytes:
@@ -344,7 +377,7 @@ class CoverageMapper:
         path_by_id: dict[int, str] = {}
         for file_id, raw_path in cursor.fetchall():
             relative = normalize_rel_path(raw_path, self.project_root)
-            if relative.startswith("..") or ":" in relative.split("/")[0]:
+            if is_out_of_project(relative):
                 # 库外文件（site-packages/标准库）：与回归选择无关，
                 # 收录只会让"文件→用例"反向索引失真
                 self.diagnostics["库外文件数"] += 1

@@ -16,7 +16,7 @@ AST 精准回归最小 POC 脚本单元测试（Day45）
 
 import sqlite3
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -28,6 +28,7 @@ from scripts.ast_regression_poc import (  # noqa: E402
     CoverageMapper,
     ImportGraph,
     RegressionSelector,
+    is_out_of_project,
     lines_to_numbits,
     main,
     normalize_rel_path,
@@ -233,7 +234,7 @@ def test_numbits_重复与乱序行号_去重后按升序返回():
 
 
 def test_normalize_相对路径与反斜杠_归一为正斜杠相对路径(tmp_path):
-    """两种来源形态（相对 posix / 绝对反斜杠）应归一到同一个键"""
+    """两种来源形态（相对 posix 路径 / 平台各自的绝对路径）应归一到同一个键"""
     project_root = tmp_path / "proj"
     target = project_root / "src" / "core" / "executors.py"
     target.parent.mkdir(parents=True)
@@ -246,9 +247,9 @@ def test_normalize_相对路径与反斜杠_归一为正斜杠相对路径(tmp_p
 def test_normalize_项目根之外的文件_原样返回不抛异常(tmp_path):
     """库外文件归一化不应抛 ValueError（回归守卫：7.2 同类问题）
 
-    库外路径返回**反斜杠已转正斜杠**的绝对路径：此时无法做相对化，
-    统一分隔符仍能让调用方用 startswith/endswith 做库外判定，
-    且与库内记录的路径形态保持一致。
+    库外路径返回**分隔符已归一的绝对路径**：此时无法做相对化，
+    但调用方仍需能判定它"不在项目内"——该判定交给
+    is_out_of_project，不能靠字符串里有无冒号（跨平台，见该函数说明）。
     """
     project_root = tmp_path / "proj"
     project_root.mkdir()
@@ -260,8 +261,42 @@ def test_normalize_项目根之外的文件_原样返回不抛异常(tmp_path):
 
     assert normalized == str(outside).replace("\\", "/")
     assert "\\" not in normalized
-    # 库外判定依据：首段含盘符冒号
-    assert ":" in normalized.split("/")[0]
+    # 跨平台判据：用 Path 自己的绝对性判断，不写死盘符形态
+    assert Path(normalized).is_absolute()
+    assert is_out_of_project(normalized) is True
+    assert is_out_of_project("src/core/executors.py") is False
+
+
+def test_is_out_of_project_三类判据跨平台一致(tmp_path):
+    """库外判定不得依赖平台相关的字符串形态
+
+    这是 CI Run #56 的直接教训：初版用"首段含冒号"判盘符，
+    在 Windows 全绿、在 ubuntu-24.04 上失效。此处对**当前平台**的
+    绝对路径做断言——在 Linux 上跑就是 /tmp/... 形态，
+    两种平台都应判为库外。
+    """
+    # 项目内相对路径
+    assert is_out_of_project("src/a.py") is False
+    assert is_out_of_project("src/common/../core/a.py") is False
+    # 以 .. 上跳
+    assert is_out_of_project("../outside/mod.py") is True
+    assert is_out_of_project("..") is True
+    # 当前平台的绝对路径（Windows 为盘符路径，Linux 为 / 前导）
+    assert is_out_of_project(str(tmp_path / "site-packages" / "third.py")) is True
+    # 空串视为库外（不收录），避免空键污染反向索引
+    assert is_out_of_project("") is True
+
+    # 精确复现旧判据漏掉的形态：POSIX 绝对路径首段为空串、不含冒号，
+    # 旧写法 `":" in p.split("/")[0]` 对它恒为假。Pure*Path 在任意平台
+    # 都可用，因此这两条断言在 Windows 本地与 Linux CI 上同样成立，
+    # 且能在本机变异验证（旧判据退回即变红）。
+    posix_abs = "/tmp/pytest-of-runner/proj/../outside/site-packages/third.py"
+    assert ":" not in posix_abs.split("/")[0]          # 旧判据在此失效
+    assert is_out_of_project(posix_abs) is True          # 新判据跨平台认 POSIX 绝对路径
+    assert is_out_of_project("C:/venv/lib/site-packages/third.py") is True
+    assert is_out_of_project("//server/share/x.py") is True  # Windows UNC 形态
+    assert PurePosixPath(posix_abs).is_absolute() is True
+    assert PureWindowsPath(r"C:/venv/lib/site-packages/third.py").is_absolute() is True
 
 
 def test_split_context_带阶段后缀与不带后缀_都能正确拆分():
