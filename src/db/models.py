@@ -17,6 +17,9 @@ from datetime import datetime
 from sqlalchemy import DateTime, Float, Index, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+# TestCase.__repr__ 中 source_ref 的展示截断长度（日志可读性用，非入库约束）
+SOURCE_REF_REPR_MAX_CHARS = 40
+
 
 class Base(DeclarativeBase):
     """
@@ -42,9 +45,18 @@ class TestCase(Base):
         case_type   用例类型: api=HTTP接口 / chip=芯片板卡
         status      用例状态: active=启用 / disabled=停用
         description 用例描述与验证点说明
+        source_ref  用例关联的测试脚本路径（pytest 可执行目标）；为空表示该用例不可被 pytest 执行
         creator     创建人
         created_at  创建时间（数据库时间自动填充）
         updated_at  更新时间（行更新时自动刷新）
+
+    source_ref 空值语义（Day46，与 ADR-001 决策③一致）:
+        该列存"仓库相对路径[::测试函数名]"形态的可执行目标，是
+        PytestRunner.build_command 取执行目标的**唯一**合法来源。
+        为 None 或空串一律表示"该用例不可被 pytest 执行"，
+        执行器必须显式报错，**禁止回落到 case_id**
+        （回落会让 pytest 把业务编号当文件路径、每条用例落 exit code 4）。
+        Day47 存量回填后，存量用例才有可执行目标。
     """
 
     __tablename__ = "test_cases"
@@ -59,6 +71,16 @@ class TestCase(Base):
     case_type: Mapped[str] = mapped_column(String(16), nullable=False, default="api", comment="用例类型api/chip")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", comment="状态active/disabled")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="", comment="用例描述")
+    # 类型标注刻意写 str | None（与本表其余可空列的裸类型写法不同）：
+    # 该列的"空值"是**业务语义**而非数据瑕疵，空值语义正是本列存在的理由。
+    # 标注为裸 str 会让 mypy 放行 case.source_ref.strip() 这类调用，
+    # 而运行时拿到 None 直接 AttributeError——正是要防的那类缺陷。
+    source_ref: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+        default=None,
+        comment="用例关联的测试脚本路径（pytest 可执行目标），为空表示该用例不可被 pytest 执行",
+    )
     creator: Mapped[str] = mapped_column(String(64), nullable=False, default="admin", comment="创建人")
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now(), comment="创建时间"
@@ -77,12 +99,23 @@ class TestCase(Base):
         """
         模型可读化表示（调试与日志打印用）
 
+        source_ref 截断至前 SOURCE_REF_REPR_MAX_CHARS 个字符（超长补省略号），
+        避免长路径把日志行撑爆；None 与空串分别原样显示，与该列"不可被
+        pytest 执行"的空值语义保持一致。
+
         返回:
-            str: 形如 TestCase(case_id=TM-API-0001, name=登录校验, priority=P0) 的字符串
+            str: 形如 TestCase(case_id=TM-API-0001, name=登录校验,
+                  priority=P0, source_ref='tests/api_demo/test_api_login.py') 的字符串
         """
+        ref = self.source_ref
+        if ref is not None and len(ref) > SOURCE_REF_REPR_MAX_CHARS:
+            short_ref: str | None = f"{ref[:SOURCE_REF_REPR_MAX_CHARS]}..."
+        else:
+            short_ref = ref
         return (
             f"TestCase(case_id={self.case_id!r}, name={self.name!r}, "
-            f"module={self.module!r}, priority={self.priority!r})"
+            f"module={self.module!r}, priority={self.priority!r}, "
+            f"source_ref={short_ref!r})"
         )
 
 
