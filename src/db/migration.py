@@ -28,6 +28,7 @@ MySQL 双模式:
 """
 
 import shutil
+import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -215,6 +216,69 @@ def _should_skip_backup(
             logger.info(f"备份幂等跳过 | {within_seconds}s 内已有备份: {path.name}")
             return True
     return False
+
+
+def _is_usable_backup(path: Path) -> bool:
+    """
+    校验备份文件是否为"可用的"SQLite 备份
+
+    两道判据:
+        1. 能以**只读**方式打开并读到文件头（mode=ro，避免校验动作本身改动文件）
+        2. 至少含一张表——只满足第 1 条的空库能打开但无表，
+           拿它回滚等于把"库被清空"从一个失败现场换成另一个失败现场
+
+    参数:
+        path (Path): 备份文件路径
+
+    返回:
+        bool: True=可用备份；False=损坏/空库/不可读
+
+    异常:
+        无（sqlite3.Error 与 ValueError 全部内部消化为 False）
+    """
+    try:
+        # as_uri() 产出 file:///C:/... 形式，避免 Windows 反斜杠破坏 URI 语法
+        uri = f"{path.resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            table_count = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'"
+            ).fetchone()
+        return bool(table_count and table_count[0] > 0)
+    except (sqlite3.Error, ValueError, OSError):
+        # 损坏文件/无 SQLite 文件头/空库/路径异常：按"不可用"处理，不让恢复流程崩
+        return False
+
+
+def _find_latest_backup(backup_dir: Path) -> Path | None:
+    """
+    找出备份目录中最新的**可用**备份（迁移失败但本次无备份时的回退恢复源）
+
+    为什么需要它: 幂等窗口内重复迁移会跳过备份（backup_path 为 None），
+    此时若写回失败，原实现不回滚 → 整库被清空。这是 P1 数据丢失路径。
+
+    参数:
+        backup_dir (Path): 备份目录
+
+    返回:
+        Path | None: 最新一份可用备份的路径；无任何可用备份返回 None
+
+    异常:
+        无（文件名时间戳解析失败与文件损坏均跳过并记 warning）
+    """
+    candidates: list[tuple[datetime, Path]] = []
+    for path in backup_dir.glob(f"{BACKUP_FILE_PREFIX}*{BACKUP_SUFFIX}"):
+        stamp = _parse_backup_timestamp(path.name)
+        if stamp is None:
+            logger.warning(f"备份文件名时间戳无法解析，跳过 | 文件: {path.name}")
+            continue
+        candidates.append((stamp, path))
+
+    # 时间戳从新到旧逐个尝试：最新的损坏时自动回退到次新的可用备份
+    for _stamp, path in sorted(candidates, key=lambda item: item[0], reverse=True):
+        if _is_usable_backup(path):
+            return path
+        logger.warning(f"备份文件损坏或无有效表，跳过 | 文件: {path.name}")
+    return None
 
 
 def _backup_database(db_file: Path, directory: Path) -> Path:
@@ -415,6 +479,69 @@ def _restore_from_backup(backup_path: Path, db_file: Path) -> None:
     logger.warning(f"已从备份恢复数据库 | 备份: {backup_path.name}")
 
 
+def _restore_outcome(backup: Path, db_file: Path, label: str) -> str:
+    """
+    执行恢复并如实描述结果（恢复本身失败也要说出来）
+
+    参数:
+        backup (Path): 恢复源备份文件
+        db_file (Path): 待恢复的数据库文件
+        label (str): 恢复来源标签（"本次备份"/"最近历史备份"），用于消息措辞
+
+    返回:
+        str: 描述真实恢复结果的中文片段
+
+    异常:
+        无（恢复失败也转成描述文本，不掩盖原始迁移异常）
+    """
+    try:
+        _restore_from_backup(backup, db_file)
+    except OSError as restore_exc:
+        # 恢复本身失败：必须说出来，否则上层会以为已回滚而放过一个空库
+        return f"从{label}（{backup.name}）恢复失败: {restore_exc}"
+    return f"已从{label}（{backup.name}）恢复"
+
+
+def _recover_after_failure(
+    exc: Exception, backup_path: Path | None, db_file: Path | None
+) -> str:
+    """
+    迁移失败后的恢复与消息生成（Day46-fix P1-1）
+
+    恢复源优先级: 本次备份 > 备份目录中最新的可用备份 > 无（需人工恢复）。
+
+    **不再使用"已保持或恢复迁移前状态"这类无法验证的措辞**——
+    幂等窗口内跳过备份时 backup_path 为 None，若不显式回退到历史备份，
+    库已被 DROP 重建为空，消息却声称"已恢复"，排障会被直接误导（7.47）。
+
+    参数:
+        exc (Exception): 触发迁移失败的原始异常
+        backup_path (Path | None): 本次迁移生成的备份（跳过备份时为 None）
+        db_file (Path | None): 数据库文件路径（内存库为 None）
+
+    返回:
+        str: 与实际恢复行为一致的中文消息
+
+    异常:
+        无（所有恢复失败均转为描述文本）
+    """
+    prefix = f"source_ref 字段迁移失败: {exc}"
+    if db_file is None:
+        return f"{prefix}；当前为 SQLite 内存库，无文件可恢复，需从其它来源重建"
+    if backup_path is not None:
+        return f"{prefix}；{_restore_outcome(backup_path, db_file, '本次备份')}"
+    latest = _find_latest_backup(get_backup_dir())
+    if latest is None:
+        return (
+            f"{prefix}；无可用备份，库结构已重建为空，"
+            f"请从 {get_backup_dir()} 手工恢复最近备份"
+        )
+    return (
+        f"{prefix}；{_restore_outcome(latest, db_file, '最近历史备份')}，"
+        f"注意：可能丢失该备份之后、迁移之前的增量数据"
+    )
+
+
 def migrate_add_source_ref() -> dict[str, Any]:
     """
     执行 source_ref 字段迁移（重建库方案）
@@ -436,8 +563,10 @@ def migrate_add_source_ref() -> dict[str, Any]:
                         added_columns / elapsed_seconds
 
     异常:
-        MigrationError: 迁移或完整性校验失败（已先完成回滚）
-        SQLAlchemyError: 数据库不可达等底层异常（同样先尝试回滚）
+        MigrationError: 迁移或完整性校验失败。异常消息**如实描述**恢复结果
+            （本次备份 / 最近历史备份 / 无可用备份需人工恢复），
+            不保证一定已回滚——无任何可用备份时库已被重建为空
+        SQLAlchemyError: 数据库不可达等底层异常（同样先走恢复流程）
     """
     started_at = perf_counter()
     engine = DatabaseSession.get_engine()
@@ -500,9 +629,9 @@ def migrate_add_source_ref() -> dict[str, Any]:
         after = _count_rows(fresh_engine)
         _verify_integrity(before, after)
     except Exception as exc:
-        if backup_path is not None and db_file is not None:
-            _restore_from_backup(backup_path, db_file)
-        raise MigrationError(f"source_ref 字段迁移失败，已保持或恢复迁移前状态: {exc}") from exc
+        # Day46-fix P1-1: 回滚源不能只有"本次备份"——幂等窗口内跳过备份时
+        # backup_path 为 None，原实现直接不回滚，整库已被 DROP 成空库
+        raise MigrationError(_recover_after_failure(exc, backup_path, db_file)) from exc
 
     elapsed = round(perf_counter() - started_at, 4)
     logger.info(

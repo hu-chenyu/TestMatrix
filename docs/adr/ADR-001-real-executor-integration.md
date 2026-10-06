@@ -85,8 +85,22 @@ Day52 验收门禁要求"真跑一条 `assert True` 通过 + 结果入库 + Web 
 
 ### 决策 3：`source_ref` 存"文件路径 + 可选函数名"，不存行号、不只存 node id
 
-- **选择**：`test_cases` 新增 `source_ref`（Text，可空），值为
+- **选择**：`test_cases` 新增 `source_ref`（**String(512)**，可空，默认 None），值为
   `tests/x.py` 或 `tests/x.py::TestC::test_y`。一期 1:1，1:N 演进走新增关联表。
+  列注释与 `src/db/models.py` 保持一致：
+  "用例关联的测试脚本路径（pytest 可执行目标），为空表示该用例不可被 pytest 执行"。
+
+- **字段类型为何定为 String(512) 而非 Text（Day46-fix 定稿）**：
+
+  | 考量 | 结论 |
+  | --- | --- |
+  | 实际长度 | 仓库相对路径 + `::函数名` 正常不超 200 字符，512 留足余量 |
+  | 异常输入拦截 | MySQL 严格模式下 VARCHAR(512) 有长度校验，异常超长值在库层即报错；Text 无长度上限，异常数据静默落库 |
+  | 录入侧兜底 | Day47 在录入通道（YAML/Excel/创建接口）加长度校验，超 512 字符在录入时即拒绝，不让异常值走到库层 |
+  | 跨库一致性 | VARCHAR(512) 是 SQLite/MySQL 通用类型，与本项目其余列（如 `case_id` String(64)）风格统一 |
+
+  **注意**：SQLite 不实现 VARCHAR 长度约束，`String(512)` 在 SQLite 上只是声明、
+  不做拦截（Day46 已用测试钉住这一事实），真正的拦截依赖 MySQL 严格模式与 Day47 的录入侧校验。
 
 - **备选方案与取舍**：
 

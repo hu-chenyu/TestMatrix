@@ -21,6 +21,7 @@ source_ref 字段模型测试 + 数据库迁移脚本测试（Day46）
 
 import sqlite3
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from src.db import migration
 from src.db.db_session import DatabaseSession
 from src.db.migration import (
     MigrationError,
+    _find_latest_backup,
     backup_dir_override,
     get_backup_dir,
     migrate_add_source_ref,
@@ -591,6 +593,176 @@ def test_migration_failure_restores_from_backup(
     restored = _dump_table("test_cases")
     assert "source_ref" not in restored[0]
     assert restored == before
+
+
+def test_failure_with_current_backup_rolls_back_from_current(
+    legacy_db: Path, backup_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    本次迁移已生成备份时，失败消息如实说明"从本次备份恢复"
+
+    与 test_migration_failure_restores_from_backup 互补：那条验数据，
+    这条验**消息措辞**——消息是排障时唯一可依赖的线索，不能与实际行为脱节。
+    """
+    def _boom(engine: Any, snapshots: Any) -> Any:
+        raise RuntimeError("注入的写回故障")
+
+    monkeypatch.setattr(migration, "_write_back", _boom)
+
+    with pytest.raises(MigrationError) as excinfo:
+        migrate_add_source_ref()
+
+    message = str(excinfo.value)
+    assert "本次备份" in message
+    assert "最近历史备份" not in message
+    assert len(_list_backups(backup_dir)) == 1
+    assert _list_backups(backup_dir)[0].name in message
+
+
+def test_backup_skipped_then_failure_rolls_back_from_latest(
+    legacy_db: Path, backup_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    P1-1 回归: 备份被幂等跳过时写回失败，必须回退到最近历史备份而不是留空库
+
+    原缺陷路径: 首次迁移成功(有备份) → 幂等窗口内二次迁移跳过备份
+    (backup_path=None) → 写回失败 → 原 except 只判 backup_path is not None
+    → **不回滚**，整库已被 DROP 重建为空，而消息仍写"已保持或恢复迁移前状态"。
+
+    本用例把这条路径的三个关键属性一起钉住:
+        1. 抛 MigrationError（不是静默留下空库）
+        2. 数据回到备份时刻的 N 条（不是 0，也不是失败前新写入的 N+1）
+        3. 消息说明来源是历史备份，并提示增量数据可能丢失
+    """
+    # 第一次迁移成功，生成一份含 5 条用例的备份
+    migrate_add_source_ref()
+    assert len(_list_backups(backup_dir)) == 1
+
+    # 往新库追加一条用例，制造"备份之后"的增量数据
+    with DatabaseSession.session_scope() as session:
+        session.add(CaseModel(case_id="TM-NEW-0001", name="备份后新增", module="订单"))
+    assert len(_dump_table("test_cases")) == 6
+
+    # 命中幂等窗口（跳过备份）+ 注入写回故障
+    monkeypatch.setattr(migration, "_should_skip_backup", lambda directory: True)
+
+    def _boom(engine: Any, snapshots: Any) -> Any:
+        raise RuntimeError("注入的写回故障")
+
+    monkeypatch.setattr(migration, "_write_back", _boom)
+
+    with pytest.raises(MigrationError) as excinfo:
+        migrate_add_source_ref()
+
+    message = str(excinfo.value)
+    assert "最近历史备份" in message
+    assert "增量数据" in message
+    # 关键：库从备份恢复 = 5 条（不是 0，也不是失败前的 6 条）
+    restored = _dump_table("test_cases")
+    assert len(restored) == 5
+    assert "TM-NEW-0001" not in {row["case_id"] for row in restored}
+    assert len(_list_backups(backup_dir)) == 1
+
+
+def test_failure_without_any_backup_reports_manual_restore(
+    legacy_db: Path, backup_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    既无本次备份、目录里也没有可用备份时，消息必须要求人工恢复而非声称已恢复
+
+    这条守住消息的"最后一道诚实"：宁可明说库空了，也不能让排障以为
+    数据还在（错误告警比没告警更糟，见 7.47/7.49）。
+    """
+    assert _list_backups(backup_dir) == []
+    monkeypatch.setattr(migration, "_should_skip_backup", lambda directory: True)
+
+    def _boom(engine: Any, snapshots: Any) -> Any:
+        raise RuntimeError("注入的写回故障")
+
+    monkeypatch.setattr(migration, "_write_back", _boom)
+
+    with pytest.raises(MigrationError) as excinfo:
+        migrate_add_source_ref()
+
+    message = str(excinfo.value)
+    assert "无可用备份" in message
+    assert "手工恢复" in message
+    assert "已从本次备份恢复" not in message
+    assert "已从最近历史备份恢复" not in message
+
+
+def test_find_latest_backup_skips_corrupted_files(
+    legacy_db: Path, backup_dir: Path
+) -> None:
+    """
+    最新的备份损坏时，_find_latest_backup 自动回退到次新的可用备份
+
+    构造两份：时间戳**更新**的损坏文件 + 时间戳较旧的有效备份。
+    若实现只取"文件名最新"而不校验可读性，就会把损坏文件当恢复源——
+    而恢复源损坏意味着回滚静默失效，正是本缺陷更隐蔽的形态。
+    """
+    migrate_add_source_ref()
+    valid = _list_backups(backup_dir)[0]
+
+    # 造一个时间戳更新（+1 小时）的损坏文件：不是 SQLite 文件
+    corrupted_stamp = (datetime.now() + timedelta(hours=1)).strftime("%Y%m%d_%H%M%S")
+    corrupted = backup_dir / f"testmatrix_backup_{corrupted_stamp}.db"
+    corrupted.write_bytes(b"this is definitely not a sqlite database file")
+
+    assert _find_latest_backup(backup_dir) == valid
+    # 损坏文件确实排在时间戳最前（证明上一条不是"恰好只有一个候选"）
+    assert corrupted.name > valid.name
+
+
+def test_is_usable_backup_rejects_empty_and_corrupted(backup_dir: Path) -> None:
+    """空库（可打开但无表）与损坏文件都判为不可用备份"""
+    empty_db = backup_dir / "testmatrix_backup_20260101_000001.db"
+    with sqlite3.connect(empty_db) as conn:
+        conn.execute("CREATE TABLE marker (id INTEGER)")
+        conn.execute("DROP TABLE marker")
+        conn.commit()
+
+    corrupted = backup_dir / "testmatrix_backup_20260101_000002.db"
+    corrupted.write_bytes(b"not a database")
+
+    assert migration._is_usable_backup(empty_db) is False
+    assert migration._is_usable_backup(corrupted) is False
+    assert migration._is_usable_backup(backup_dir / "不存在.db") is False
+
+
+def test_restore_failure_is_reported_honestly(
+    legacy_db: Path, backup_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    恢复动作本身失败时，消息必须说"恢复失败"而非谎称已恢复
+
+    P1-1 的教训在恢复侧同样成立：`_restore_from_backup` 也会失败
+    （磁盘满/权限不足/文件被占用）。若恢复失败仍输出"已从备份恢复"，
+    排障会以为数据还在而放弃手工介入——比直接报错更危险。
+    """
+
+    def _boom(engine: Any, snapshots: Any) -> Any:
+        raise RuntimeError("注入的写回故障")
+
+    def _restore_fails(backup_path: Path, db_file: Path) -> None:
+        raise OSError("模拟恢复时磁盘不可写")
+
+    monkeypatch.setattr(migration, "_write_back", _boom)
+    monkeypatch.setattr(migration, "_restore_from_backup", _restore_fails)
+
+    with pytest.raises(MigrationError) as excinfo:
+        migrate_add_source_ref()
+
+    message = str(excinfo.value)
+    assert "恢复失败" in message
+    assert "模拟恢复时磁盘不可写" in message
+    assert "已从本次备份" not in message
+
+
+def test_find_latest_backup_returns_none_for_unparsable_names(backup_dir: Path) -> None:
+    """备份目录只有文件名时间戳不可解析的文件时，返回 None（无可用备份）"""
+    (backup_dir / "testmatrix_backup_不是时间戳.db").write_bytes(b"x")
+    assert _find_latest_backup(backup_dir) is None
 
 
 def test_mysql_mode_skips_migration(

@@ -509,15 +509,26 @@ CaseResult(
 **列定义**：
 
 ```python
-source_ref: Mapped[str] = mapped_column(
-    Text, nullable=True, comment="可执行测试目标：仓库相对路径[::函数名]"
+source_ref: Mapped[str | None] = mapped_column(
+    String(512),
+    nullable=True,
+    default=None,
+    comment="用例关联的测试脚本路径（pytest 可执行目标），为空表示该用例不可被 pytest 执行",
 )
 ```
 
-- 用 `Text` 而非 `String(N)`：路径 + node id 可能超 64/128；
-  避免后续扩长再改列。
-- `nullable=True`：存量与手工录入用例允许为空，**空值语义是"该用例不可被 pytest 执行"**，
-  编排层遇空值必须跳过并明确记录（不能像现在这样回落到 case_id）。
+- 用 `String(512)`（**Day46-fix 定稿，原为 `Text`**）：路径 + node id 正常不超 200 字符，
+  512 留足余量；MySQL 严格模式下 VARCHAR 有长度校验，能提前拦截异常超长输入
+  （`Text` 无长度上限，异常数据会静默落库）；录入侧（Day47）再加长度校验兜底，
+  超 512 字符在录入时就拒绝，不让异常值走到库层才炸。
+  代价与边界：**SQLite 不实现 VARCHAR 长度约束**，该列在 SQLite 上不做拦截
+  （Day46 已用测试钉住），真正的拦截依赖 MySQL 严格模式与录入侧校验。
+- `nullable=True` + `default=None`：存量与手工录入用例允许为空，**空值语义是
+  "该用例不可被 pytest 执行"**，编排层遇空值必须跳过并明确记录
+  （不能像现在这样回落到 case_id）。
+- 类型标注写 `Mapped[str | None]` 而非裸 `Mapped[str]`：该列的空值是**业务语义**
+  而非数据瑕疵，裸 `str` 会让 mypy 放行 `case.source_ref.strip()`，运行时拿到 None
+  直接 AttributeError——用类型系统把这条契约前置到编译期。
 
 ### 5.2 与用例模型的关系：1:N 的折中
 
@@ -528,7 +539,7 @@ source_ref: Mapped[str] = mapped_column(
 - 1:N 的真实场景：一条业务用例被 3 个测试函数覆盖（正向 + 异常 + 边界）。
   一期不做，但如果一列里塞 `path::a,path::b` 逗号串，查询与校验会立刻变复杂
   （要拆串、去重、判空），**属于为不确定的需求提前付代价**。
-- 预留方式：`source_ref` 用 Text 存单值（不塞多值），**1:N 演进路径是新增
+- 预留方式：`source_ref` 用 String(512) 存单值（不塞多值），**1:N 演进路径是新增
   `test_case_sources` 关联表**（Day47 视实际需要决定是否建），而不是把一列撑成多值串。
   关联表方案还能顺手承载"主/次"标记与历史。
 
