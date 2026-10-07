@@ -43,6 +43,7 @@ from src.core.case_manager import (
     CaseDataLoadError,
     CaseManager,
     CaseNotFoundError,
+    validate_source_ref,
 )
 from src.web.exceptions import (
     ConflictError,
@@ -68,6 +69,32 @@ DEFAULT_PAGE_SIZE = 20
 
 # 批量导入支持的文件后缀（与DataDriver支持的格式对齐）
 IMPORT_SUFFIXES = (".yaml", ".yml", ".xlsx")
+
+
+def _validate_source_ref_field(value: str | None) -> str | None:
+    """
+    source_ref 的 marshmallow 字段校验器（Day47）
+
+    复用 core 层 validate_source_ref（YAML/Excel/API 三侧同一事实来源），
+    只把它的 ValueError 翻译成 marshmallow 的 ValidationError，从而复用
+    既有的错误格式化链路（_load_case_payload → _format_field_errors →
+    统一 400 响应）。**不在本层另写一份正则**：三处各写一份时，任何一次
+    规则调整都会漏改某一侧，而漏改的那一侧表现为"接口收下了但导入收不下"。
+
+    参数:
+        value (str | None): 原始字段值（None 表示未配置）
+
+    返回:
+        str | None: 归一化后的值（空串归一为 None）
+
+    异常:
+        marshmallow.ValidationError: 格式/长度/路径非法时抛出，
+                                     message 含字段名与具体原因
+    """
+    try:
+        return validate_source_ref(value, context="")
+    except ValueError as exc:
+        raise marshmallow.ValidationError(str(exc)) from exc
 
 
 # ===========================================================================
@@ -127,6 +154,14 @@ class CaseCreateSchema(Schema):
     creator = fields.String(
         load_default="admin", validate=validate.Length(max=64)
     )
+    # source_ref（Day47）: pytest 可执行目标，**可选**——不传即 None，
+    # 语义为"该用例不可被 pytest 执行"。存量客户端不传该字段时行为与
+    # Day46 完全一致（不写这一列）。校验复用 core 层单一事实来源。
+    source_ref = fields.String(
+        load_default=None,
+        allow_none=True,
+        validate=_validate_source_ref_field,
+    )
 
 
 class CaseUpdateSchema(Schema):
@@ -159,6 +194,11 @@ class CaseUpdateSchema(Schema):
     status = fields.String(validate=validate.OneOf(["active", "disabled"]))
     description = fields.String()
     creator = fields.String(validate=validate.Length(max=64))
+    # source_ref（Day47）: 可更新。显式传 null/空串即"清空执行目标"，
+    # 这是补录时的正常动作（配错路径要撤销），故照写而非忽略
+    source_ref = fields.String(
+        allow_none=True, validate=_validate_source_ref_field
+    )
 
 
 def _parse_int_param(name: str, default: int) -> int:
@@ -377,6 +417,9 @@ def create_case():
         status      可选，active/disabled，默认"active"
         description 可选，默认""
         creator     可选，长度最大64，默认"admin"
+        source_ref  可选（Day47），pytest 可执行目标，
+                    形如 tests/x.py 或 tests/x.py::TestC::test_y，
+                    不传即 None（该用例不可被 pytest 执行）
 
     参数:
         无（从request.get_json解析请求体）
@@ -442,6 +485,7 @@ def update_case(case_id: str):
     请求体（JSON，经CaseUpdateSchema校验，全字段可选）:
         name/module/priority/case_type/status/description/creator
         任意子集；case_id不可修改（body中回传被静默忽略）
+        source_ref（Day47）同属可更新字段，显式传 null/空串即清空
 
     参数:
         case_id (str): 业务用例编号（URL路径参数定位目标用例）

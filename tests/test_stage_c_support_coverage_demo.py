@@ -419,6 +419,11 @@ class TestExecutorCoverage:
         """
         子进程启动失败: 命令不存在（py 不在 PATH）等 OSError 必须映射
         为 result=error，消息保留原始异常以便运维发现"解释器没装"。
+
+        必须给全 source_ref: Day47 起 build_command 不再回落 case_id，
+        只给 case_id 会先抛 ValueError 并被 run_one 转成 error，
+        而本用例断言的是 "pytest子进程启动失败" 这条具体分支——
+        不给 source_ref 时该断言会假通过而 OSError 分支从未执行。
         """
         def _raise_os_error(_cmd: list, **_kwargs) -> None:
             """模拟解释器不存在"""
@@ -427,7 +432,9 @@ class TestExecutorCoverage:
         monkeypatch.setattr(executors_mod.subprocess, "run", _raise_os_error)
         runner = PytestRunner()
 
-        result = runner.run_one({"case_id": "TM-UC-0001"})
+        result = runner.run_one(
+            {"case_id": "TM-UC-0001", "source_ref": "tests/test_uc.py"}
+        )
 
         assert result.result == "error"
         assert "pytest子进程启动失败" in result.error_message

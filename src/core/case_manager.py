@@ -97,6 +97,7 @@
 """
 
 import argparse
+import re
 import sys
 import time
 import uuid
@@ -157,6 +158,25 @@ VALID_RESULTS = ("passed", "failed", "error", "skipped")
 # description字段中标签暂存格式的前缀（与_build_description写入格式对齐）
 TAGS_PREFIX = "标签:"
 
+# --------------------------------------------------------------------------
+# source_ref（pytest 可执行目标）校验规则（Day47）
+# --------------------------------------------------------------------------
+# source_ref 是 PytestRunner 取执行目标的**唯一**合法来源（ADR-001 决策③），
+# 值为"仓库相对路径[::类名::函数名]"。三条规则与 models.py 的 String(512)
+# 及 Day46-fix 定稿口径对齐：
+#   1. 形态: ^[\w./-]+\.py(::\w+)*$ —— 路径段允许字母数字/点/下划线/连字符，
+#      函数级可带 :: 分段；不含空格与 shell 元字符，天然阻断选项注入
+#      （即使它形如 "--version"，也过不了这条正则）
+#   2. 长度: ≤512，与列类型一致。**SQLite 不实现 VARCHAR 长度约束**
+#      （Day46 已实测），库层不会拦，这里是录入侧唯一的兜底闸
+#   3. 禁止上级目录 "..": source_ref 会被拼进 pytest 子进程命令，
+#      放行 ".." 等于让一条用例的路径越出项目根
+# 存量数据文件不含该键时返回 None，零改动继续可用。
+SOURCE_REF_PATTERN = re.compile(r"^[\w./-]+\.py(::\w+)*$")
+
+# source_ref 长度上限（与 models.py String(512) 一致）
+MAX_SOURCE_REF_LENGTH = 512
+
 # 进程内已生成批次号集合: 防止同秒内uuid4前4位hex碰撞
 # （16bit空间100次生成理论碰撞概率约7%），重试机制保证进程内绝对唯一
 _generated_execution_ids: set = set()
@@ -215,6 +235,11 @@ UPDATABLE_CASE_FIELDS = frozenset(
         "status",
         "description",
         "creator",
+        # source_ref（Day47）: pytest 执行目标，允许人工补录/修正。
+        # 归入白名单而非不可变字段——它是**数据**（指向哪个测试文件），
+        # 不是工作流属性；回填脚本只是首次填值的自动化，人工补录是
+        # 同一件事的另一半，必须留出通道。
+        "source_ref",
     }
 )
 
@@ -395,6 +420,62 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def validate_source_ref(value: object, context: str = "") -> str | None:
+    r"""
+    校验并归一化 source_ref（Day47，YAML/Excel/创建API 三侧复用的单一事实来源）
+
+    三条校验规则（口径见 SOURCE_REF_PATTERN 常量处说明）:
+        1. 形态: 必须匹配 ^[\w./-]+\.py(::\w+)*$
+        2. 长度: ≤512 字符（与 models.py 的 String(512) 对齐）
+        3. 禁止上级目录 ".."（该值会拼进 pytest 子进程命令）
+
+    为什么放在 core 层而不是各通道各写一份: 三条规则的**任何**一次漂移，
+    都会让"接口能写进去、导入进不来"或反之这类只在某一侧暴露的问题出现
+    ——和 6.31「共享解析逻辑必须单一事实来源」同源。三侧共用一个函数后，
+    规则变更只需改一处，测试也只需钉一处。
+
+    参数:
+        value (object): 待校验的原始值（None、空串、空格串视为未配置）
+        context (str): 错误定位前缀（如 YAML 用例名/Excel 行号），
+                       为空串时不加前缀
+
+    返回:
+        str | None: 归一化后的 source_ref（已 strip）；未配置时为 None
+
+    异常:
+        ValueError: 非字符串 / 形态非法 / 超长 / 含 ".." 时抛出，
+                    消息含 context、字段名与具体原因，便于定位到哪一条用例
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(
+            f"{context}字段'source_ref'非法: {value!r}，要求为字符串或留空".strip()
+        )
+    stripped = value.strip()
+    if not stripped:
+        # 空串与 None 同义（"未配置执行目标"），归一为 None 落库
+        return None
+    if len(stripped) > MAX_SOURCE_REF_LENGTH:
+        raise ValueError(
+            f"{context}字段'source_ref'超长: {len(stripped)} 字符，"
+            f"上限 {MAX_SOURCE_REF_LENGTH} 字符".strip()
+        )
+    if not SOURCE_REF_PATTERN.match(stripped):
+        raise ValueError(
+            f"{context}字段'source_ref'格式非法: {stripped!r}，"
+            f"要求形如 'tests/x.py' 或 'tests/x.py::TestC::test_y'"
+            f"（.py 结尾，不含空格）".strip()
+        )
+    path_part = stripped.split("::")[0]
+    if ".." in path_part.split("/"):
+        raise ValueError(
+            f"{context}字段'source_ref'非法: {stripped!r}，"
+            f"路径不得含上级目录 '..'".strip()
+        )
+    return stripped
+
+
 class CaseManager:
     """
     用例调度与管理器
@@ -423,6 +504,10 @@ class CaseManager:
             3. 逐条upsert到test_cases表: case_id存在则更新业务字段，
                不存在则插入新记录（更新时保留原记录的creator与status，
                二者为工作流属性，不随数据文件同步覆盖）
+            4. source_ref 为**可选键**（Day47）: YAML 写 source_ref 键、
+               Excel 写 source_ref 列表头即为该用例配置 pytest 执行目标；
+               文件里没有这一列/键时不动库里的既有值（存量文件零改动继续
+               可用，也不会把回填脚本已回填的 source_ref 冲掉）
 
         参数:
             file_path (str | Path): 数据文件路径（YAML/Excel，相对路径支持项目根兜底）
@@ -456,6 +541,31 @@ class CaseManager:
                 context={"operation": "load_cases", "file_path": str(file_path)},
             ) from exc
 
+        # 1.5 source_ref 格式校验（Day47）
+        # 必须在入库前整批校验完：DataDriver 只做必填字段与枚举校验，
+        # source_ref 是新增的可选字段，由本层统一把关（YAML/Excel 同一入口，
+        # 校验一次覆盖两种格式）。任一条不合法即整批拒绝并指出是哪一条，
+        # 避免"前 30 条已入库、第 31 条报错"的半截状态。
+        source_ref_map: dict[str, str | None] = {}
+        try:
+            for case in cases:
+                raw_ref = case.get("source_ref")
+                if raw_ref is None and "source_ref" not in case:
+                    # 键不存在 = 该文件未配置此列，保持"不写"语义
+                    continue
+                source_ref_map[str(case["case_id"])] = validate_source_ref(
+                    raw_ref, context=f"用例{case['case_id']}: "
+                )
+        except ValueError as exc:
+            logger.error(f"source_ref 校验失败 | 文件: {file_path} | {exc}")
+            raise CaseDataLoadError(
+                str(exc),
+                context={
+                    "operation": "validate_source_ref",
+                    "file_path": str(file_path),
+                },
+            ) from exc
+
         # 2. 用例类型推断
         case_type = cls._infer_case_type(file_path)
 
@@ -486,6 +596,10 @@ class CaseManager:
                         existing_map[row.case_id] = row
                 for case in cases:
                     existing = existing_map.get(str(case["case_id"]))
+                    case_key = str(case["case_id"])
+                    # 该文件是否显式提供了 source_ref（区分"没这一列"
+                    # 与"写了空值"：前者不写库以保住既有回填值）
+                    has_source_ref = case_key in source_ref_map
                     if existing is not None:
                         # 已存在: 更新业务字段，保留creator与status
                         existing.name = case["name"]
@@ -493,10 +607,12 @@ class CaseManager:
                         existing.priority = case["priority"]
                         existing.case_type = case_type
                         existing.description = cls._build_description(case)
+                        if has_source_ref:
+                            existing.source_ref = source_ref_map[case_key]
                         updated += 1
                     else:
                         new_row = TestCase(
-                            case_id=case["case_id"],
+                            case_id=case_key,
                             name=case["name"],
                             module=case["module"],
                             priority=case["priority"],
@@ -504,6 +620,9 @@ class CaseManager:
                             status="active",
                             description=cls._build_description(case),
                             creator=creator,
+                            # 文件未提供该键时为 None（模型默认值），
+                            # 语义 = 该用例不可被 pytest 执行
+                            source_ref=source_ref_map.get(case_key),
                         )
                         session.add(new_row)
                         # 关键：把新建对象也登记回映射。批量查询发生在循环
@@ -846,11 +965,15 @@ class CaseManager:
                ConflictError，防唯一约束在数据库层裸抛）
             4. 插入TestCase实例，flush+refresh取回库端生成字段
                （自增id/created_at/updated_at），提交后返回_to_dict结果
+            5. source_ref 归一化（Day47）: 复用 core 层单一校验函数，
+               空值归一为None（"不可被 pytest 执行"），非法值抛
+               CaseManagerError——路由层 Schema 已先拦一道，此处是
+               给内部调用方的兜底，与 case_id/name 的两层校验同口径
 
         参数:
             data (dict): 已校验的字段字典（case_id/name必填，
                          module/priority/case_type/status/description/
-                         creator可选，缺省走模型默认值）
+                         creator/source_ref可选，缺省走模型默认值）
 
         返回:
             dict: 新建用例的完整字段字典（含库端生成的
@@ -874,6 +997,17 @@ class CaseManager:
                 "用例名称不能为空",
                 context={"operation": "create_case", "case_id": case_id_value},
             )
+
+        # source_ref归一化（Day47，路由层Schema之外的第二道闸）
+        try:
+            source_ref_value = validate_source_ref(
+                data.get("source_ref"), context=""
+            )
+        except ValueError as exc:
+            raise CaseManagerError(
+                str(exc),
+                context={"operation": "create_case", "case_id": case_id_value},
+            ) from exc
 
         # priority统一大写（与list_cases/list_cases_paged查询口径对齐）
         payload = dict(data)
@@ -907,6 +1041,8 @@ class CaseManager:
                     status=payload.get("status", "active"),
                     description=payload.get("description", ""),
                     creator=payload.get("creator", "admin"),
+                    # 归一化后落库（None = 未配置执行目标）
+                    source_ref=source_ref_value,
                 )
                 session.add(case)
                 # flush触发INSERT，refresh取回库端生成字段
@@ -990,13 +1126,15 @@ class CaseManager:
               处的说明。HTTP 路径上路由层已用 unknown=EXCLUDE 先剥掉，
               这里是给内部调用方的第二道闸
             - priority若传入则统一转大写（与查询口径对齐）
+            - source_ref若传入则统一走 core 层校验函数归一化（Day47），
+              空串/None 归一为"未配置执行目标"
             - updated_at由模型onupdate=func.now()自动刷新，
               无需手动设置
 
         参数:
             case_id (str): 业务用例编号（URL路径参数定位目标用例）
             data (dict): 待更新字段字典（name/module/priority/case_type/
-                         status/description/creator任意子集）
+                         status/description/creator/source_ref任意子集）
 
         返回:
             dict: 更新后用例的完整字段字典
@@ -1030,6 +1168,19 @@ class CaseManager:
         # priority统一大写（与list_cases/list_cases_paged查询口径对齐）
         if "priority" in payload:
             payload["priority"] = str(payload["priority"]).strip().upper()
+        # source_ref归一化（Day47，与 create_case 同一校验函数）
+        # 显式传 null/空串归一为 None = "清空执行目标"，这是补录时的
+        # 正常动作（此前配错了路径需要撤销），故照写而非忽略
+        if "source_ref" in payload:
+            try:
+                payload["source_ref"] = validate_source_ref(
+                    payload["source_ref"], context=""
+                )
+            except ValueError as exc:
+                raise CaseManagerError(
+                    str(exc),
+                    context={"operation": "update_case", "case_id": case_id},
+                ) from exc
 
         # strip 归一化（Day44 P3-12，与 get_case/delete_case 同口径）
         case_id = str(case_id).strip()

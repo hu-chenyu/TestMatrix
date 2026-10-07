@@ -465,20 +465,28 @@ class TestExecutionsTriggerApi:
         pytest 报 "file or directory not found: -q" 并以退出码 4 收场，
         `TM_EXECUTOR=pytest` 下每条用例都落入 error 分支，真实执行链路
         功能性不可用。正确顺序是所有选项在前、"--" 紧邻 path 之前。
+
+        第三次修正（Day47）: 执行目标字段由 case_id 改为 source_ref。
+        build_command **不再回落 case_id**（ADR-001 决策③：空值语义是
+        "该用例不可被 pytest 执行"，回落会让每条用例以退出码 4 落 error，
+        排障时看到的是"路径错了"而非"这条用例本就不该走 pytest"）。
+        故此处用例补 source_ref，命令尾部断言同步改为该路径。
         """
         runner = PytestRunner()
-        case = {"case_id": "TM-UC-0002"}
+        case = {"case_id": "TM-UC-0002", "source_ref": "tests/test_uc2.py"}
 
         # 命令拼装结构（骨架契约）：选项全部在终止符之前，path 紧随其后
         command = runner.build_command(case)
         assert command == [
             sys.executable, "-m", "pytest",
-            "-q", "--tb=short", "--", "TM-UC-0002",
+            "-q", "--tb=short", "--", "tests/test_uc2.py",
         ]
+        # 回归点（Day47）: case_id 绝不进入命令——它不是文件路径
+        assert "TM-UC-0002" not in command, "执行目标必须取 source_ref"
         # 回归点: 解释器必须是当前解释器而非 "py"，且必须有 "--" 终止符
         assert command[0] == sys.executable
         assert command[0] != "py", "不得回退到 Windows 专属的 py 启动器"
-        assert "--" in command, "必须有选项终止符，防止 case_id 被当作选项"
+        assert "--" in command, "必须有选项终止符，防止路径被当作选项"
         # 回归点（Day44 P1-01）: 终止符之后只允许有 path 一个位置参数。
         # 多出来的 "-q"/"--tb=short" 会被 pytest 当成不存在的测试文件，
         # 每条用例都以 error 收尾——这个断言是本缺陷的直接护栏。

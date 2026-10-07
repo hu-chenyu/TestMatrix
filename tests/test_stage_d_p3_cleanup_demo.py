@@ -243,6 +243,10 @@ class TestUpdateCaseAllowlist:
 
         白名单是"允许"列表，写漏一个就是功能回退——因此这里遍历
         UPDATABLE_CASE_FIELDS 逐个验证，而不是只测一两个代表字段。
+
+        Day47 新增 source_ref（pytest 可执行目标，人工补录/修正用），
+        故探测字典同步扩充；白名单与探测值必须始终全等——白名单加了
+        source_ref 而探测字典没加，本断言会红，正是它该红的时候。
         """
         probe_values = {
             "name": "全字段更新校验",
@@ -252,6 +256,7 @@ class TestUpdateCaseAllowlist:
             "status": "disabled",
             "description": "白名单全字段遍历",
             "creator": "qa-bot",
+            "source_ref": "tests/test_update_case.py",
         }
         assert set(probe_values) == set(UPDATABLE_CASE_FIELDS), (
             "探测字典必须覆盖白名单全部字段，否则本测试会漏检"
@@ -260,9 +265,25 @@ class TestUpdateCaseAllowlist:
         result = CaseManager.update_case("TM-UC-0001", probe_values)
 
         for field_name, expected in probe_values.items():
+            if field_name == "source_ref":
+                # source_ref 刻意**不在** _to_dict 的响应字段集内：Day47
+                # 只放开录入侧（写），未改 GET 响应的字段集合契约，
+                # 改它会让既有"详情返回全量字段"的精确断言全部失效。
+                # 故该字段改为直接查库校验"确实已落库"。
+                continue
             assert result[field_name] == expected, (
                 f"白名单字段 {field_name} 应可更新"
             )
+
+        with DatabaseSession.session_scope() as session:
+            row = (
+                session.query(models.TestCase)
+                .filter_by(case_id="TM-UC-0001")
+                .one()
+            )
+        assert row.source_ref == "tests/test_update_case.py", (
+            "白名单字段 source_ref 应可更新并落库"
+        )
 
     def test_immutable_fields_still_silently_stripped(
         self, seeded_db: Path

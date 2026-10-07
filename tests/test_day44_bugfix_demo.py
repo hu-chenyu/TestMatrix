@@ -130,7 +130,10 @@ class TestP1_01OptionTerminatorPosition:
     @allure.story("选项全部位于 -- 之前")
     def test_options_precede_terminator(self):
         """-q 与 --tb=short 必须在 -- 之前，否则被当成路径"""
-        command = PytestRunner().build_command({"case_id": "TM-X-1"})
+        # Day47 起执行目标取 source_ref，不再回落 case_id
+        command = PytestRunner().build_command(
+            {"case_id": "TM-X-1", "source_ref": "tests/test_x.py"}
+        )
         terminator_index = command.index("--")
         assert command.index("-q") < terminator_index
         assert command.index("--tb=short") < terminator_index
@@ -138,25 +141,51 @@ class TestP1_01OptionTerminatorPosition:
     @allure.story("-- 之后只有 path 一个位置参数")
     def test_single_positional_after_terminator(self):
         """终止符后紧邻 path 且无第二个位置参数（多一个就是又一个路径）"""
-        command = PytestRunner().build_command({"case_id": "TM-X-1"})
+        command = PytestRunner().build_command(
+            {"case_id": "TM-X-1", "source_ref": "tests/test_x.py"}
+        )
         terminator_index = command.index("--")
-        assert command[terminator_index + 1] == "TM-X-1"
+        assert command[terminator_index + 1] == "tests/test_x.py"
         assert command[terminator_index - 1] == "--tb=short"
         assert len(command) == terminator_index + 2
 
-    @allure.story("script_path 优先于 case_id 且仍排在 -- 之后")
+    @allure.story("script_path 过渡兼容且仍排在 -- 之后")
     def test_script_path_last(self):
-        """script_path 覆盖 case_id，且位于终止符之后"""
-        command = PytestRunner().build_command(
+        """
+        source_ref 优先；为空时兼容读 script_path（Day48+ 移除该分支）。
+
+        两种情形都必须落在终止符之后，且 case_id 绝不出现——
+        后者是 Day47 的核心契约（build_command 不再回落 case_id）。
+        """
+        runner = PytestRunner()
+        command = runner.build_command(
             {"case_id": "TM-X-1", "script_path": "tests/test_demo.py"}
         )
         assert command[-1] == "tests/test_demo.py"
         assert "TM-X-1" not in command
 
-    @allure.story("形如 --version 的 case_id 仍是位置参数（阻断选项注入）")
+        # source_ref 与 script_path 同时存在时 source_ref 胜出
+        command = runner.build_command(
+            {
+                "case_id": "TM-X-1",
+                "source_ref": "tests/primary.py",
+                "script_path": "tests/test_demo.py",
+            }
+        )
+        assert command[-1] == "tests/primary.py"
+        assert "tests/test_demo.py" not in command
+
+    @allure.story("形如 --version 的执行路径仍是位置参数（阻断选项注入）")
     def test_dash_case_id_not_option(self):
-        """Day43 的防护意图不能丢：--version 必须落在 -- 之后"""
-        command = PytestRunner().build_command({"case_id": "--version"})
+        """
+        Day43 的防护意图不能丢：--version 必须落在 -- 之后。
+
+        执行目标字段已由 case_id 改为 source_ref，但"路径形如选项"
+        这一风险不变，故验证对象同步改为 source_ref。
+        """
+        command = PytestRunner().build_command(
+            {"case_id": "TM-X-1", "source_ref": "--version"}
+        )
         assert command[command.index("--") + 1] == "--version"
 
     @allure.story("真实子进程：通过的用例返回 passed（核心验收点）")

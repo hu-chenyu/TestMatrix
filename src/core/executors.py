@@ -177,6 +177,12 @@ class PytestRunner(BaseExecutor):
     本日仅搭命令拼装与退出码解析结构，不真跑测试集
     （真实开源项目测试集执行另行安排）。
 
+    执行目标来源（Day47，与 ADR-001 决策③一致）:
+        source_ref 是**唯一**合法的 pytest 执行目标，为空即语义为
+        "该用例不可被 pytest 执行"。**绝不回落到 case_id**——业务编号
+        不是文件路径，回落后每条用例都以"file or directory not found"
+        退出码 4 收场，全量落 error，真实执行链路功能性不可用。
+
     退出码映射（pytest约定）:
         0 → passed（全部通过）
         1 → failed（存在失败用例）
@@ -185,20 +191,53 @@ class PytestRunner(BaseExecutor):
 
     def build_command(self, case: dict) -> list:
         """
-        拼装单用例的pytest执行命令
+        拼装单用例的pytest执行命令（Day47: source_ref 优先）
+
+        取值优先级:
+            1. source_ref（唯一合法来源）
+            2. script_path（**过渡兼容**，仅当 source_ref 为空时；
+               打 WARNING 记录，Day48+ 随回填收口后移除）
+            3. 两者都空 → 抛 ValueError，**不回落到 case_id**
+
+        为什么 source_ref 为空必须报错而不是找个值顶上: 空值语义
+        "不可被 pytest 执行"是该列存在的理由，回落到 case_id 会把这条
+        语义抹平——pytest 拿业务编号当路径，报 file or directory not
+        found 并以退出码 4 收场，每条用例落入 error 分支，排障时看到
+        的却是"路径错了"而非"该用例本就不该走 pytest"。
 
         参数:
-            case (dict): 待执行用例字典
+            case (dict): 待执行用例字典（source_ref 为可选键）
 
         返回:
-            list: 命令参数列表，如
-                  [sys.executable, "-m", "pytest", "-q", "--tb=short", "--", path]
+            list[str]: 命令参数列表，形如
+                [sys.executable, "-m", "pytest", "-q", "--tb=short", "--", path]
 
         异常:
-            无
+            ValueError: source_ref 为空且无 script_path（过渡兼容也拿不到）
+                        时抛出，消息说明该补什么字段
         """
-        # 测试文件路径：优先用 script_path，回落 case_id
-        path = str(case.get("script_path") or case.get("case_id", ""))
+        case_id = str(case.get("case_id", ""))
+        source_ref = case.get("source_ref")
+        path = source_ref.strip() if isinstance(source_ref, str) else source_ref
+
+        if not path:
+            # script_path 是 Day47 之前 build_command 实际读取的字段名，
+            # 而 Day46 起真实字段是 source_ref —— 这是一段悬空契约。
+            # 过渡期保留读取以免存量调用方直接炸，Day48+ 移除。
+            script_path = case.get("script_path")
+            if isinstance(script_path, str) and script_path.strip():
+                logger.warning(
+                    f"用例 source_ref 为空，回退使用 script_path（过渡兼容，"
+                    f"Day48+ 移除该分支）| 用例: {case_id}"
+                )
+                path = script_path.strip()
+            else:
+                raise ValueError(
+                    f"用例 {case_id} 的 source_ref 为空，该用例不可被 pytest 执行；"
+                    f"请先回填 source_ref（python -m src.scripts.backfill_source_ref "
+                    f"--dry-run 查看待补录清单），或改用 SimulatedExecutor"
+                )
+
         # sys.executable 指向当前解释器（虚拟环境下即 venv 的 python，
         # 保证用项目依赖跑 pytest），跨 Windows/Linux/macOS 通用；
         # 修前硬编码的 "py" 是 Windows 专属启动器，非 Windows 平台
@@ -213,7 +252,7 @@ class PytestRunner(BaseExecutor):
         #   错误写法会让 "-q" 与 "--tb=short" 同样被当成路径，pytest 报
         #   "file or directory not found: -q" 并以退出码 4 收场，每条用例
         #   都落入 error 分支——真实执行链路功能性不可用。
-        #   保持 "--" 的目的不变：阻断 case_id 形如 "--version" 时被 pytest
+        #   保持 "--" 的目的不变：阻断路径形如 "--version" 时被 pytest
         #   当选项执行、退出码 0 被误判为 passed 的假通过。
         return [sys.executable, "-m", "pytest", "-q", "--tb=short", "--", path]
 
@@ -222,7 +261,8 @@ class PytestRunner(BaseExecutor):
         同步执行单条用例的pytest子进程
 
         执行流程:
-            1. build_command拼装命令
+            1. build_command拼装命令（source_ref 与 script_path 都为空时
+               抛 ValueError，此处捕获后降级为该条用例的 error 结果）
             2. subprocess.run同步执行，超时30秒
             3. 按退出码映射结果: 0→passed / 1→failed / 其他→error
             4. 失败/错误时输出截断2000字存入error_message
@@ -233,13 +273,29 @@ class PytestRunner(BaseExecutor):
         返回:
             ExecutionResult: result为passed/failed/error；
                              failed/error时error_message非空
-                             （超时/命令不存在同样映射error）
+                             （超时/命令不存在/source_ref为空同样映射error）
 
         异常:
-            无（子进程异常均转为error结果返回，不向上抛）
+            无（命令拼装失败与子进程异常均转为error结果返回，不向上抛，
+            保持"单条用例的失败不升级为整批failed"的既有契约）
         """
-        command = self.build_command(case)
         start_time = time.perf_counter()
+        try:
+            command = self.build_command(case)
+        except ValueError as exc:
+            # 编排层逐条 run_one，任何异常上抛都会让整批判 failed；
+            # 而"source_ref 为空"是**单条用例的配置问题**、不是批次故障，
+            # 必须降级为该条用例的 error 结果，让批次继续跑完其余用例。
+            duration = time.perf_counter() - start_time
+            error_message = str(exc)
+            logger.warning(
+                f"pytest执行目标缺失（该用例不可被 pytest 执行）| "
+                f"用例: {case.get('case_id')} | {exc}"
+            )
+            return ExecutionResult(
+                result="error", error_message=error_message, duration=duration
+            )
+
         try:
             completed = subprocess.run(
                 command,

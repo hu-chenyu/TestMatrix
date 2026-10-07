@@ -107,24 +107,39 @@ class TestPytestRunnerCommand:
 
     @allure.story("解释器是当前解释器而非 Windows 专属的 py")
     def test_uses_sys_executable(self):
-        command = PytestRunner().build_command({"case_id": "TM-X-1"})
+        # Day47 起执行目标取 source_ref（不再回落 case_id），补该键
+        command = PytestRunner().build_command(
+            {"case_id": "TM-X-1", "source_ref": "tests/x.py"}
+        )
         assert command[0] == sys.executable
         assert command[0] != "py"
 
     @allure.story("path 前有 -- 选项终止符（阻断选项注入）")
     def test_has_option_terminator(self):
-        command = PytestRunner().build_command({"case_id": "TM-X-1"})
+        command = PytestRunner().build_command(
+            {"case_id": "TM-X-1", "source_ref": "tests/x.py"}
+        )
         assert "--" in command
-        assert command.index("--") < command.index("TM-X-1")
+        assert command.index("--") < command.index("tests/x.py")
 
-    @allure.story("以 - 开头的 case_id 落在 -- 之后，仍是位置参数")
+    @allure.story("以 - 开头的执行路径落在 -- 之后，仍是位置参数")
     def test_dash_case_id_after_terminator(self):
-        """即使 case_id 形如 --version，-- 之后 pytest 只会当它是路径"""
-        command = PytestRunner().build_command({"case_id": "--version"})
+        """
+        即使执行路径形如 --version，-- 之后 pytest 只会当它是路径。
+
+        Day47 起执行目标字段由 case_id 改为 source_ref（case_id 不再
+        参与命令拼装），但"路径可能形如选项"这一风险不变，故防护意图
+        的验证对象同步改为 source_ref。
+        """
+        command = PytestRunner().build_command(
+            {"case_id": "TM-X-1", "source_ref": "--version"}
+        )
         assert command[command.index("--") + 1] == "--version"
 
     @allure.story("script_path 优先于 case_id")
     def test_script_path_priority(self):
+        # Day47 起 source_ref 为第一优先；script_path 仅作过渡兼容，
+        # 且**绝不回落 case_id**——故此处断言 case_id 不出现在命令中
         command = PytestRunner().build_command(
             {"case_id": "TM-X-1", "script_path": "tests/test_demo.py"}
         )
@@ -144,6 +159,24 @@ class TestPytestRunnerSubprocess:
         obj.stderr = stderr
         return obj
 
+    @staticmethod
+    def _case() -> dict:
+        """
+        构造带 source_ref 的用例字典（本组用例统一入口）
+
+        Day47 起 build_command 不再回落 case_id，只给 case_id 会在
+        命令拼装阶段抛 ValueError，下游的编码/截断/退出码分支根本走不到
+        ——那会让这些用例**假通过**（run_one 把异常降级成 error，而本组
+        恰好有几条断言 result == "error"），等于悄悄停测。
+
+        参数:
+            无
+
+        返回:
+            dict: 含 case_id 与 source_ref 的用例字典
+        """
+        return {"case_id": "TM-X-1", "source_ref": "tests/test_x.py"}
+
     @allure.story("subprocess.run 显式指定 encoding 与 errors")
     def test_subprocess_uses_utf8_replace(self):
         captured = {}
@@ -153,7 +186,7 @@ class TestPytestRunnerSubprocess:
             return self._completed(0)
 
         with patch.object(executors_mod.subprocess, "run", _fake_run):
-            PytestRunner().run_one({"case_id": "TM-X-1"})
+            PytestRunner().run_one(self._case())
 
         assert captured.get("encoding") == SUBPROCESS_ENCODING == "utf-8"
         assert captured.get("errors") == SUBPROCESS_ERRORS == "replace"
@@ -170,7 +203,7 @@ class TestPytestRunnerSubprocess:
             "run",
             return_value=self._completed(1, stdout=stdout),
         ):
-            result = PytestRunner().run_one({"case_id": "TM-X-1"})
+            result = PytestRunner().run_one(self._case())
 
         assert result.result == "failed"
         assert result.error_message is not None
@@ -187,7 +220,7 @@ class TestPytestRunnerSubprocess:
             "run",
             return_value=self._completed(2, stderr=stderr),
         ):
-            result = PytestRunner().run_one({"case_id": "TM-X-1"})
+            result = PytestRunner().run_one(self._case())
 
         assert result.result == "error"
         assert result.error_message is not None
@@ -199,22 +232,30 @@ class TestPytestRunnerSubprocess:
         with patch.object(
             executors_mod.subprocess, "run", return_value=self._completed(0)
         ):
-            assert runner.run_one({"case_id": "TM-X-1"}).result == "passed"
+            assert runner.run_one(self._case()).result == "passed"
         with patch.object(
             executors_mod.subprocess, "run", return_value=self._completed(1, stdout="x")
         ):
-            assert runner.run_one({"case_id": "TM-X-1"}).result == "failed"
+            assert runner.run_one(self._case()).result == "failed"
         with patch.object(
             executors_mod.subprocess,
             "run",
             return_value=self._completed(2, stderr="usage error"),
         ):
-            got = runner.run_one({"case_id": "TM-X-1"})
+            got = runner.run_one(self._case())
             assert got.result == "error"
             assert "usage error" in got.error_message
 
     @allure.story("TimeoutExpired / OSError 仍降级为 error（不回归）")
     def test_timeout_and_oserror_still_error(self):
+        """
+        两条异常路径必须各自触发，不能被"source_ref 为空"提前短路。
+
+        这里刻意给全 source_ref：若不给，build_command 先抛 ValueError
+        并被 run_one 转成 error，两条断言都会**假通过**而真实的
+        超时/OSError 分支一次都没执行——这正是 7.51 说的"只测了
+        各自有测试、没测它们组合"的同类陷阱。
+        """
         runner = PytestRunner()
 
         def _timeout(cmd, **kwargs):
@@ -224,9 +265,18 @@ class TestPytestRunnerSubprocess:
             raise OSError(2, "No such file or directory")
 
         with patch.object(executors_mod.subprocess, "run", _timeout):
-            assert runner.run_one({"case_id": "TM-X-1"}).result == "error"
+            result = runner.run_one(self._case())
+        assert result.result == "error"
+        assert "执行超时" in (result.error_message or ""), (
+            "必须是超时分支而非其它 error 来源"
+        )
+
         with patch.object(executors_mod.subprocess, "run", _oserror):
-            assert runner.run_one({"case_id": "TM-X-1"}).result == "error"
+            result = runner.run_one(self._case())
+        assert result.result == "error"
+        assert "启动失败" in (result.error_message or ""), (
+            "必须是启动失败分支而非其它 error 来源"
+        )
 
 
 # ===========================================================================
