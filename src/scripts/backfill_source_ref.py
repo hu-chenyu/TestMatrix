@@ -129,7 +129,13 @@ def extract_source_ref(text_content: str | None) -> str | None:
     if not text_content:
         return None
     for match in _CANDIDATE_PATTERN.finditer(str(text_content)):
-        candidate = match.group(0)
+        # P3-2（Day47-fix）: Windows 风格反斜杠路径归一为 POSIX 正斜杠。
+        # 候选正则刻意含 `\`（存量用例的描述里两种写法都有），而
+        # SOURCE_REF_PATTERN 不含 `\` —— 不归一的话 `tests\foo.py` 会被
+        # 复验判为非法并**静默跳过**，该用例随后被报成"待人工补录"，
+        # 而它明明写了一个可用路径。归一后 `tests\foo.py` → `tests/foo.py`
+        # 即可通过复验，且 pytest 本身也接受正斜杠路径。
+        candidate = match.group(0).replace("\\", "/")
         if SOURCE_REF_PATTERN.match(candidate):
             return candidate
     return None
@@ -206,8 +212,16 @@ def classify_case(case: dict[str, Any]) -> str:
     case_type = str(case.get("case_type") or "").strip().lower()
     if case_type in SIMULATION_CASE_TYPES:
         return TIER_SIMULATION
+    # C 档关键词扫描覆盖 module/name/description 三个字段
+    # （P3-1 Day47-fix: 原实现只扫 module/name，与上方常量注释里写的
+    # "module/name/description" 不一致）。补上 description 的理由不只是
+    # 注释对齐——存量用例常把接口性质写在描述里（实测 dev 库大量
+    # description 形如"标签: smoke, api"），只扫 name/module 会把这些
+    # 本该判 C 档的用例报成"待人工补录"，人工去给一条根本没有 .py 的
+    # 接口用例找路径。两档都不写库，但报表归类会误导补录方向。
     lowered = " ".join(
-        str(case.get(field) or "").lower() for field in ("module", "name")
+        str(case.get(field) or "").lower()
+        for field in ("module", "name", "description")
     )
     if any(keyword in lowered for keyword in SIMULATION_KEYWORDS):
         return TIER_SIMULATION

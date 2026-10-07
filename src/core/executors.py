@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 from src.common.env_manager import env_manager
 from src.common.logger import LogManager
+from src.common.source_ref import validate_source_ref
 
 logger = LogManager.get_logger()
 
@@ -213,8 +214,10 @@ class PytestRunner(BaseExecutor):
                 [sys.executable, "-m", "pytest", "-q", "--tb=short", "--", path]
 
         异常:
-            ValueError: source_ref 为空且无 script_path（过渡兼容也拿不到）
-                        时抛出，消息说明该补什么字段
+            ValueError: 以下三种情况抛出，消息均说明该补什么/改什么
+                - source_ref 为空且无 script_path（过渡兼容也拿不到）
+                - source_ref 非空但格式非法 / 超长 / 含 ".."
+                  （执行侧纵深防御，详见函数体注释）
         """
         case_id = str(case.get("case_id", ""))
         source_ref = case.get("source_ref")
@@ -237,6 +240,26 @@ class PytestRunner(BaseExecutor):
                     f"请先回填 source_ref（python -m src.scripts.backfill_source_ref "
                     f"--dry-run 查看待补录清单），或改用 SimulatedExecutor"
                 )
+        else:
+            # 执行侧纵深防御（Day47-fix P3-3）
+            #
+            # 录入侧校验是第一道闸，但库里的值不只经录入侧写入：回填脚本
+            # 按描述文本猜路径、人工直接改库、未来的数据迁移都可能塞进
+            # 非法值。而本方法会把该值**原样拼进 pytest 子进程命令**，
+            # 故这里必须自己再拒一次：
+            #   - `../secret/x.py` 放行 = 测试目标越出项目根
+            #   - 含空格/元字符的值进入命令行 = 事实上的参数注入
+            #
+            # 与录入侧共用 src/common/source_ref.py 的同一函数（而不是
+            # 各写一份），避免"录入放行、执行拒绝"的口径分叉——那会让
+            # 同一条数据在不同链路上表现不一致，最难排查。
+            try:
+                path = validate_source_ref(path, context=f"用例 {case_id}: ")
+            except ValueError as exc:
+                raise ValueError(
+                    f"{exc}（该值来自库中 source_ref，非法值不会进入 pytest 命令；"
+                    f"请修正后重试）"
+                ) from exc
 
         # sys.executable 指向当前解释器（虚拟环境下即 venv 的 python，
         # 保证用项目依赖跑 pytest），跨 Windows/Linux/macOS 通用；

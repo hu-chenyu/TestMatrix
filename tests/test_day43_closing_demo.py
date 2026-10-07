@@ -122,19 +122,29 @@ class TestPytestRunnerCommand:
         assert "--" in command
         assert command.index("--") < command.index("tests/x.py")
 
-    @allure.story("以 - 开头的执行路径落在 -- 之后，仍是位置参数")
-    def test_dash_case_id_after_terminator(self):
+    @allure.story("以 - 开头的执行路径在拼命令前即被拒（Day47-fix P3-3）")
+    def test_dash_source_ref_rejected_before_command(self):
         """
-        即使执行路径形如 --version，-- 之后 pytest 只会当它是路径。
+        Day43 起防护手段是 `--` 终止符；Day47-fix 又在 build_command 里
+        加了 source_ref 格式校验，**形如选项的路径在拼命令之前就被拒**。
 
-        Day47 起执行目标字段由 case_id 改为 source_ref（case_id 不再
-        参与命令拼装），但"路径可能形如选项"这一风险不变，故防护意图
-        的验证对象同步改为 source_ref。
+        这里把断言从"终止符让它落在 -- 之后"改成"它根本进不了命令"：
+        前者是事后兜底（值已进了命令行，只是没被当选项），后者是事前
+        拒绝。两条防线都保留，但**前者不能单独作为正确性依据**——
+        终止符只是不让它被解析成选项，值本身仍会被当作测试文件路径传
+        给 pytest。格式校验把它挡在门外是更强的性质。
         """
+        with pytest.raises(ValueError) as excinfo:
+            PytestRunner().build_command(
+                {"case_id": "TM-X-1", "source_ref": "--version"}
+            )
+        assert "source_ref" in str(excinfo.value)
+
+        # 终止符本身的位置仍然必须正确（合法路径照常拼装）
         command = PytestRunner().build_command(
-            {"case_id": "TM-X-1", "source_ref": "--version"}
+            {"case_id": "TM-X-1", "source_ref": "tests/x.py"}
         )
-        assert command[command.index("--") + 1] == "--version"
+        assert command[command.index("--") + 1] == "tests/x.py"
 
     @allure.story("script_path 优先于 case_id")
     def test_script_path_priority(self):

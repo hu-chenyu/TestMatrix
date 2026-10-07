@@ -175,18 +175,30 @@ class TestP1_01OptionTerminatorPosition:
         assert command[-1] == "tests/primary.py"
         assert "tests/test_demo.py" not in command
 
-    @allure.story("形如 --version 的执行路径仍是位置参数（阻断选项注入）")
+    @allure.story("形如 --version 的执行路径在拼命令前即被拒（Day47-fix P3-3）")
     def test_dash_case_id_not_option(self):
         """
-        Day43 的防护意图不能丢：--version 必须落在 -- 之后。
+        Day43 的防护意图不能丢，但防护层次已前移。
 
-        执行目标字段已由 case_id 改为 source_ref，但"路径形如选项"
-        这一风险不变，故验证对象同步改为 source_ref。
+        Day43 用 `--` 终止符保证 "--version" 只被当作位置参数；
+        Day47-fix 在 build_command 补了 source_ref 格式校验后，
+        形如选项的路径**在拼命令之前就被拒绝**。这比终止符更强：
+        终止符只是不让它被解析成选项，值本身仍会作为测试文件路径传给
+        pytest；格式校验把它挡在门外才真正做到"不进命令"。
+
+        故断言从"落在 -- 之后"改为"根本拼不出命令"，并保留一条
+        合法路径的终止符位置断言（`--` 本身仍是必要的第二道防线）。
         """
+        with pytest.raises(ValueError) as excinfo:
+            PytestRunner().build_command(
+                {"case_id": "TM-X-1", "source_ref": "--version"}
+            )
+        assert "source_ref" in str(excinfo.value)
+
         command = PytestRunner().build_command(
-            {"case_id": "TM-X-1", "source_ref": "--version"}
+            {"case_id": "TM-X-1", "source_ref": "tests/test_x.py"}
         )
-        assert command[command.index("--") + 1] == "--version"
+        assert command[command.index("--") + 1] == "tests/test_x.py"
 
     @allure.story("真实子进程：通过的用例返回 passed（核心验收点）")
     def test_real_subprocess_passed(self, tmp_path: Path):

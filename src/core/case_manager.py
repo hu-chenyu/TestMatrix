@@ -97,7 +97,6 @@
 """
 
 import argparse
-import re
 import sys
 import time
 import uuid
@@ -109,6 +108,17 @@ from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from src.common.logger import LogManager
+
+# Day47-fix P3-3: source_ref 校验实现已下沉到 src/common/source_ref.py
+# ——执行侧（executors.PytestRunner.build_command）也要用同一份校验，而
+# case_manager 反向依赖 executors，就地定义会构成**循环导入**。
+# 此处保留再导出，对外 API 面（case_manager.SOURCE_REF_PATTERN /
+# MAX_SOURCE_REF_LENGTH / validate_source_ref）零变化，既有引用与测试
+# 不必改（符合 6.33 幂等导出约定）。用 `X as X` 冗余别名声明"有意再导出"，
+# 否则 ruff 会把本模块内未直接使用的名字当 F401 删掉（该项目发生过一次）。
+from src.common.source_ref import MAX_SOURCE_REF_LENGTH as MAX_SOURCE_REF_LENGTH
+from src.common.source_ref import SOURCE_REF_PATTERN as SOURCE_REF_PATTERN
+from src.common.source_ref import validate_source_ref
 from src.common.time_utils import local_to_utc_iso, to_utc_iso
 from src.core.cache import cache_client
 from src.core.data_driver import DataDriver, DataDriverError
@@ -157,25 +167,6 @@ VALID_RESULTS = ("passed", "failed", "error", "skipped")
 
 # description字段中标签暂存格式的前缀（与_build_description写入格式对齐）
 TAGS_PREFIX = "标签:"
-
-# --------------------------------------------------------------------------
-# source_ref（pytest 可执行目标）校验规则（Day47）
-# --------------------------------------------------------------------------
-# source_ref 是 PytestRunner 取执行目标的**唯一**合法来源（ADR-001 决策③），
-# 值为"仓库相对路径[::类名::函数名]"。三条规则与 models.py 的 String(512)
-# 及 Day46-fix 定稿口径对齐：
-#   1. 形态: ^[\w./-]+\.py(::\w+)*$ —— 路径段允许字母数字/点/下划线/连字符，
-#      函数级可带 :: 分段；不含空格与 shell 元字符，天然阻断选项注入
-#      （即使它形如 "--version"，也过不了这条正则）
-#   2. 长度: ≤512，与列类型一致。**SQLite 不实现 VARCHAR 长度约束**
-#      （Day46 已实测），库层不会拦，这里是录入侧唯一的兜底闸
-#   3. 禁止上级目录 "..": source_ref 会被拼进 pytest 子进程命令，
-#      放行 ".." 等于让一条用例的路径越出项目根
-# 存量数据文件不含该键时返回 None，零改动继续可用。
-SOURCE_REF_PATTERN = re.compile(r"^[\w./-]+\.py(::\w+)*$")
-
-# source_ref 长度上限（与 models.py String(512) 一致）
-MAX_SOURCE_REF_LENGTH = 512
 
 # 进程内已生成批次号集合: 防止同秒内uuid4前4位hex碰撞
 # （16bit空间100次生成理论碰撞概率约7%），重试机制保证进程内绝对唯一
@@ -418,62 +409,61 @@ def _escape_like(value: str) -> str:
         str: 可安全嵌入 LIKE 模式的可搜索文本
     """
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+# Excel 单元格显式"清空"标记值（Day47-fix P3-4）
+#
+# 为什么需要它: DataDriver 只把**非 None** 单元格放进用例字典，
+# 而 Excel 的空单元格与"没有这一列"在解析后长得一模一样（都不在字典里）。
+# 于是 Excel 通道无法表达"把这条用例的 source_ref 清掉"——
+# YAML 可以写 `source_ref:`（解析出 None）、API 可以传 null，
+# 唯独 Excel 做不到。用一个显式标记值补上这个能力。
+#
+# 为什么标记值只对 source_ref 生效、而不是通用机制:
+# source_ref 是当前唯一需要"清空"语义的字段（其余字段空值等价于
+# "用默认值"，清空没有意义）。做成通用机制会要求 DataDriver 逐字段
+# 判断并改变"键是否存在"的语义，影响面远超本条修复。
+SOURCE_REF_CLEAR_MARKER = "__CLEAR__"
 
 
-def validate_source_ref(value: object, context: str = "") -> str | None:
-    r"""
-    校验并归一化 source_ref（Day47，YAML/Excel/创建API 三侧复用的单一事实来源）
-
-    三条校验规则（口径见 SOURCE_REF_PATTERN 常量处说明）:
-        1. 形态: 必须匹配 ^[\w./-]+\.py(::\w+)*$
-        2. 长度: ≤512 字符（与 models.py 的 String(512) 对齐）
-        3. 禁止上级目录 ".."（该值会拼进 pytest 子进程命令）
-
-    为什么放在 core 层而不是各通道各写一份: 三条规则的**任何**一次漂移，
-    都会让"接口能写进去、导入进不来"或反之这类只在某一侧暴露的问题出现
-    ——和 6.31「共享解析逻辑必须单一事实来源」同源。三侧共用一个函数后，
-    规则变更只需改一处，测试也只需钉一处。
+def _normalize_clear_marker(value: object) -> object:
+    """
+    把 Excel 显式清空标记值归一为 None（内部函数，Day47-fix P3-4）
 
     参数:
-        value (object): 待校验的原始值（None、空串、空格串视为未配置）
-        context (str): 错误定位前缀（如 YAML 用例名/Excel 行号），
-                       为空串时不加前缀
+        value (object): 原始单元格值（None / 字符串 / 其它类型）
 
     返回:
-        str | None: 归一化后的 source_ref（已 strip）；未配置时为 None
+        object: 等于标记值（忽略大小写与首尾空白）时返回 None；
+                其余原样返回
 
     异常:
-        ValueError: 非字符串 / 形态非法 / 超长 / 含 ".." 时抛出，
-                    消息含 context、字段名与具体原因，便于定位到哪一条用例
+        无
     """
-    if value is None:
+    if isinstance(value, str) and value.strip().upper() == SOURCE_REF_CLEAR_MARKER:
         return None
-    if not isinstance(value, str):
-        raise ValueError(
-            f"{context}字段'source_ref'非法: {value!r}，要求为字符串或留空".strip()
-        )
-    stripped = value.strip()
-    if not stripped:
-        # 空串与 None 同义（"未配置执行目标"），归一为 None 落库
-        return None
-    if len(stripped) > MAX_SOURCE_REF_LENGTH:
-        raise ValueError(
-            f"{context}字段'source_ref'超长: {len(stripped)} 字符，"
-            f"上限 {MAX_SOURCE_REF_LENGTH} 字符".strip()
-        )
-    if not SOURCE_REF_PATTERN.match(stripped):
-        raise ValueError(
-            f"{context}字段'source_ref'格式非法: {stripped!r}，"
-            f"要求形如 'tests/x.py' 或 'tests/x.py::TestC::test_y'"
-            f"（.py 结尾，不含空格）".strip()
-        )
-    path_part = stripped.split("::")[0]
-    if ".." in path_part.split("/"):
-        raise ValueError(
-            f"{context}字段'source_ref'非法: {stripped!r}，"
-            f"路径不得含上级目录 '..'".strip()
-        )
-    return stripped
+    return value
+
+
+def _case_context(case: dict[str, object]) -> str:
+    """
+    构造 source_ref 校验失败的用例定位前缀（内部函数，Day47-fix P3-5）
+
+    为什么带上 name: 只给 case_id 时，收到报错的人得回数据文件里
+    逐行找"哪个 case_id 写错了"；而导入场景里人往往只记得用例名。
+    Excel 的真实行号在 DataDriver 归一化后已不可得（case dict 里不留
+    `_row_number`），故 case_id + name 是当前可得的最强定位组合。
+
+    参数:
+        case (dict): DataDriver 归一化后的单条用例数据
+
+    返回:
+        str: 形如 "用例 TM-0001（登录校验）: " 的前缀；
+             name 缺失或为空时退化为 "用例 TM-0001: "
+    """
+    case_id = str(case.get("case_id", "")).strip()
+    case_name = str(case.get("name") or "").strip()
+    if case_name:
+        return f"用例 {case_id}（{case_name}）: "
+    return f"用例 {case_id}: "
 
 
 class CaseManager:
@@ -554,7 +544,8 @@ class CaseManager:
                     # 键不存在 = 该文件未配置此列，保持"不写"语义
                     continue
                 source_ref_map[str(case["case_id"])] = validate_source_ref(
-                    raw_ref, context=f"用例{case['case_id']}: "
+                    _normalize_clear_marker(raw_ref),
+                    context=_case_context(case),
                 )
         except ValueError as exc:
             logger.error(f"source_ref 校验失败 | 文件: {file_path} | {exc}")

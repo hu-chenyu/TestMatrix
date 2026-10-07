@@ -31,6 +31,16 @@ from src.core.report_analyzer import (
     StatisticsResult,
 )
 
+# Day47-fix P2-1: env_manager.get 的测试替身**不得**屏蔽数据库配置键。
+# 被屏蔽时 DatabaseSession 拿不到隔离路径、回落到真实库默认值
+# output/testmatrix.db，测试数据直接写进项目真实库。故这几个键
+# 一律放行给真实实现（conftest 已把路径钉到 tmp_path）。
+DB_CONFIG_KEYS = frozenset({"TM_DB_TYPE", "TM_DB_SQLITE_PATH"})
+
+# 真实 get 的绑定引用：在替身生效前抓取，之后 patch.object 替换的是
+# 实例属性，本引用仍指向原实现（否则递归调用自己）
+_real_env_get = env_manager.get
+
 # 路由器相关env配置基线（无额外@人配置）
 ROUTER_ENV = {
     "TM_NOTIFY_STRATEGY": "all",
@@ -61,6 +71,19 @@ def _mock_get(config: dict):
     """
     构造env_manager.get替身
 
+    **数据库配置键必须放行给真实实现**（Day47-fix P2-1）:
+    本替身只查 config 表，表中没有的键一律返回 default。而
+    `DatabaseSession._build_db_url()` 读的就是 `TM_DB_SQLITE_PATH`，
+    default 恰是**项目真实库** `output/testmatrix.db`——于是
+    `NotificationRouter` 未注入仓储时回落真实 `NotificationHistoryRepository`，
+    通知历史与死信直接写进真实库（实测 notification_history 1222→1228、
+    notification_dead_letters 173→174）。
+
+    这类"全局替换配置访问器"的替身会连**无关子系统**的配置一起屏蔽，
+    隔离 fixture 设置的环境变量在替身生效期间完全失效——所以只对
+    通知类键用替身，DB 键放行真实读取（conftest 的隔离 fixture
+    已经把路径钉到 tmp_path）。
+
     参数:
         config (dict): 配置键值表
 
@@ -68,6 +91,8 @@ def _mock_get(config: dict):
         function: get(key, default)替身
     """
     def _get(key, default=None):
+        if key in DB_CONFIG_KEYS:
+            return _real_env_get(key, default)
         value = config.get(key)
         return value if value is not None else default
     return _get

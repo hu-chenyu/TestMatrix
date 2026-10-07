@@ -20,6 +20,7 @@ pytest全局配置模块（tests/conftest.py）
     真实被测服务通过.env的TM_BASE_URL配置，由后续阶段用例按需接入。
 """
 
+import os
 import sys
 import threading
 import time
@@ -41,6 +42,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.common.env_manager import env_manager  # noqa: E402 (路径兜底后导入)
 from src.common.http_client import HttpClient  # noqa: E402
 from src.common.logger import LogManager  # noqa: E402
+from src.db.db_session import DatabaseSession  # noqa: E402
 
 logger = LogManager.get_logger()
 
@@ -278,6 +280,81 @@ def _disable_real_notification_channels(monkeypatch):
     monkeypatch.setenv("TM_WECHAT_ENABLED", "false")
     monkeypatch.setenv("TM_NOTIFY_MAX_RETRIES", "0")
     yield
+
+
+# ===========================================================================
+# 默认数据库隔离（Day47-fix P2-1）
+# ===========================================================================
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_default_database_session(tmp_path_factory):
+    """
+    会话级默认库隔离fixture（autouse，全会话自动生效）
+
+    为什么必须是**会话级**而不是用例级（P2-1 实测踩了两层坑）:
+        第一层——用例级 `monkeypatch.setenv` + `reset()` 看着就够，实际
+        挡不住**跨用例泄漏的后台线程**。本项目的执行编排用 daemon 线程
+        跑批次（`_execute_batch_async`），线程可能在用例结束后仍在收尾；
+        用例一结束 monkeypatch 就把 `TM_DB_SQLITE_PATH` 还原成 `.env`
+        里的真实库路径，而线程此时若调用 `get_engine()`（已被 reset 清空）
+        就会**按还原后的环境变量重建引擎**，把行写进项目真实库。
+        实测该文件单独连跑两次，两次都漏（test_executions +1、+3），
+        说明这不是偶发而是必然——只要有线程活过用例边界。
+
+        第二层——本仓多处测试用 `patch.object(env_manager, "get")` 整体
+        替换配置访问器。替身对表外的键返回 `default`，而
+        `TM_DB_SQLITE_PATH` 的 default 恰是真实库路径，于是隔离环境变量
+        在替身生效期间**完全失效**（详见各测试文件内 `_mock_get` 的注释）。
+
+    修法: 会话开始就把默认路径钉到**会话级临时目录**（tmp_path_factory），
+    整个会话不还原。于是即便有线程活过用例边界、甚至活过会话边界，
+    它重建引擎时读到的仍是临时路径——**从"逐用例隔离"升级为"整场会话
+    绝不触碰真实库"**，前者防不住泄漏，后者防得住。
+
+    各测试文件自己的 fixture 仍可覆盖成自己的库（函数级 monkeypatch
+    在本 fixture 之后生效、且只在本用例内有效），既有隔离全部照常。
+
+    参数:
+        tmp_path_factory (pytest.TempPathFactory): 会话级临时目录工厂
+
+    返回:
+        Generator: yield 无数据；会话结束释放引擎
+    """
+    session_db_dir = tmp_path_factory.mktemp("tm_session_db")
+    os.environ["TM_DB_TYPE"] = "sqlite"
+    os.environ["TM_DB_SQLITE_PATH"] = str(session_db_dir / "session_default.db")
+    # 关键：先清掉可能已按 .env 真实路径建好的引擎（conftest 导入期或
+    # 早期用例可能已触发），否则第一次访问会命中旧引擎写进真实库
+    DatabaseSession.reset()
+    yield
+    DatabaseSession.reset()
+    # 会话级临时目录由 pytest 自行清理；此处只保证不留活引擎句柄
+    os.environ.pop("TM_DB_SQLITE_PATH", None)
+    os.environ.pop("TM_DB_TYPE", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_database_engine_between_tests():
+    """
+    用例间重置数据库引擎（autouse，全用例自动生效）
+
+    与会话级隔离 fixture 配套: 隔离负责"路径指向哪里"，本 fixture 负责
+    "每条用例都拿到干净引擎"。前后各 reset 一次——
+        前: 清掉上一条用例遗留的引擎与 SQLite 句柄（Windows 下不释放
+            会锁住临时库文件，导致 tmp_path 清不掉）；
+        后: 同样为下一条与本条收尾的线程留出干净起点。
+
+    刻意**不改环境变量**: 路径由会话级 fixture 统一钉住，这里再逐用例
+    改一次反而会把会话级保障降级成用例级（见上方 docstring 第一层坑）。
+
+    参数:
+        无
+
+    返回:
+        Generator: yield 无数据
+    """
+    DatabaseSession.reset()
+    yield
+    DatabaseSession.reset()
 
 
 # ===========================================================================
