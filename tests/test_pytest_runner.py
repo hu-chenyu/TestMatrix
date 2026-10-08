@@ -363,6 +363,27 @@ class TestPytestRunnerRunOne:
         )
         assert PytestRunner(env={}).env == {}, "空 dict 是合法注入（区别于 None）"
 
+        # env **内容**校验（Day48-fix2）：容器类型对了不等于内容对
+        # `dict[str, str]` 只是类型标注、运行时不生效，而 subprocess 要求
+        # 环境块全为 str。漏掉这层时 TypeError 会从 subprocess.run 逃逸。
+        for bad_value in (123, None, True, 1.5, b"bytes", ["x"]):
+            with pytest.raises(TypeError, match="CUSTOM_VAR") as excinfo:
+                PytestRunner(env={"CUSTOM_VAR": bad_value})  # type: ignore[dict-item]
+            message = str(excinfo.value)
+            assert "值必须是 str" in message
+            assert type(bad_value).__name__ in message, "消息须带实际类型"
+        with pytest.raises(TypeError, match="键必须是 str"):
+            PytestRunner(env={123: "v"})  # type: ignore[dict-item]
+        with pytest.raises(ValueError, match="不能包含"):
+            PytestRunner(env={"A=B": "v"})
+        with pytest.raises(ValueError, match="不能为空串"):
+            PytestRunner(env={"": "v"})
+        # 合法 env 仍放行（含形似非法但确实合法的边界）
+        legal_env = {"A": "", "B_C-D": "x y z", "TM_长变量名": "值"}
+        assert PytestRunner(env=legal_env).env == legal_env, (
+            "空串值、含空格/连字符/中文的合法变量名都应放行"
+        )
+
     @allure.story("子进程启动失败 → error，消息含启动失败原因")
     def test_run_one_os_error(self, patch_subprocess: FakeRun) -> None:
         """
@@ -383,6 +404,66 @@ class TestPytestRunnerRunOne:
             "必须保留底层 OSError 原文，否则无法判断是路径错还是权限错"
         )
         assert result.duration >= 0.0
+
+    @allure.story("启动参数非法（TypeError/ValueError）→ 降级为 error，不逃逸")
+    def test_run_one_type_error_degraded(self, patch_subprocess: FakeRun) -> None:
+        """
+        子进程启动**参数**非法时 run_one 不得抛异常，必须降级为该条 error。
+
+        背景（Day48-fix2）：`subprocess.run(env=...)` 要求环境块全为 str，
+        非 str 会抛 TypeError；env 键含 "=" 或含 NUL 抛 ValueError；cwd 含
+        NUL 同样抛 ValueError。这些异常由 subprocess 在**创建进程之前**
+        抛出，既不是 TimeoutExpired 也不是 OSError——修复前的 except 链
+        只捕这两类，于是异常直接上抛穿透 run_one，违反 docstring
+        "异常: 无"，更违反"单条用例失败不升级为整批 failed"的编排契约。
+
+        构造期校验（_validate_env_content）已挡住正常路径，本用例守的是
+        **兜底层**：未来有人直接给 self.env 赋值绕过构造函数，或出现
+        校验未覆盖的新参数形态时，这一层仍必须生效。
+
+        断言要点：降级为 error、消息点明"启动失败"、**保留标准库原文**
+        （否则排障时要重新翻 subprocess 源码才知道是哪类参数问题）。
+        """
+        for exc in (
+            TypeError("environment can only contain strings"),
+            ValueError("embedded null character"),
+            ValueError("illegal environment variable name"),
+        ):
+            patch_subprocess.exc = exc
+
+            result = PytestRunner().run_one(
+                {"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF}
+            )
+
+            assert result.result == "error", (
+                f"{type(exc).__name__} 必须降级为 error 而非上抛穿透 run_one"
+            )
+            assert "启动失败" in (result.error_message or ""), (
+                "消息须归入'启动失败'类，便于与超时/断言失败区分"
+            )
+            assert str(exc) in result.error_message, "必须保留标准库异常原文"
+            assert result.duration >= 0.0
+
+    @allure.story("绕过构造期校验后兜底层仍生效（直接改 self.env）")
+    def test_run_one_degrades_when_env_mutated_after_construction(
+        self, patch_subprocess: FakeRun
+    ) -> None:
+        """
+        构造后直接改 self.env 注入非字符串值，run_one 仍须兜住。
+
+        这条用例证明兜底层不是"构造期校验的附属品"：`_validate_env_content`
+        只在构造期跑一次，之后 self.env 是可变的。任何人（包括未来新增的
+        批次级 env 注入逻辑）绕过构造函数写坏 env，run_one 都必须把它
+        降级为单条 error——这正是 Day48-fix2 保留两层的原因。
+        """
+        runner = PytestRunner()
+        runner.env = {"BROKEN": 8080}  # 绕过构造期校验直接赋值
+        patch_subprocess.exc = TypeError("environment can only contain strings")
+
+        result = runner.run_one({"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF})
+
+        assert result.result == "error"
+        assert "environment can only contain strings" in result.error_message
 
     @allure.story("source_ref 缺失 → 降级为单条 error，且不启动子进程")
     def test_run_one_build_command_failure_degraded(self) -> None:

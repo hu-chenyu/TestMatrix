@@ -230,13 +230,18 @@ class PytestRunner(BaseExecutor):
                                      PROJECT_ROOT。
             env (dict[str, str] | None): 额外环境变量（叠加在当前进程
                                           环境变量之上）；None表示不注入。
+                                          **每个键和值都必须是 str**；键
+                                          不能为空串、不能含 "="。
+                                          非法时构造期即抛 TypeError /
+                                          ValueError，绝不自动 str()
+                                          转换——见函数体注释。
 
         返回:
             无
 
         异常:
-            ValueError: timeout 非法（详见参数说明）
-            TypeError: cwd 不是 str/Path，或 env 不是 dict（详见函数体注释）
+            ValueError: timeout 非法，或 env 的键为空串 / 含 "="（详见参数说明）
+            TypeError: cwd 不是 str/Path，env 不是 dict，或 env 的键/值不是 str
         """
         self.timeout = self._resolve_timeout(timeout)
 
@@ -259,8 +264,72 @@ class PytestRunner(BaseExecutor):
                 f"pytest执行环境变量必须是 dict 或 None，实际类型: {type(env).__name__}"
             )
 
+        self._validate_env_content(env)
+
         self.cwd = Path(cwd) if cwd is not None else PROJECT_ROOT
         self.env = dict(env) if env is not None else None
+
+    @staticmethod
+    def _validate_env_content(env: dict[str, str] | None) -> None:
+        """
+        校验 env 字典内部的键与值（Day48-fix2）
+
+        为什么要单独校验"内容"而不只校验"容器类型"（Day48-fix P3-6 的盲区）:
+            `dict[str, str]` 只是个类型标注，运行时不生效——`PytestRunner(
+            env={"PORT": 8080})` 在 Python 看来完全合法。而
+            `subprocess.run(env=...)` 真正要求环境块**全部是字符串**，
+            非 str 会抛 `TypeError: environment can only contain strings`。
+
+        关键在于这个 TypeError **不在 run_one 的既有 except 链里**
+            （只捕 TimeoutExpired 与 OSError），会直接上抛穿透 run_one，
+            违反 docstring"异常: 无"的契约，更违反"单条用例的失败不升级
+            为整批 failed"这条更重要的编排契约——一条用例的环境变量配错
+            会让整批判 failed。
+
+        为什么不自动 str() 转换（否决方案 C）:
+            `None → "None"`、`True → "True"` 是**静默语义篡改**——子进程
+            拿到的是一段毫无意义的文本，配置错误被伪装成正常值，排障时
+            反而找不到根因。与 Day48 确立的"非法配置显式抛错"原则冲突。
+
+        参数:
+            env (dict[str, str] | None): 待校验的环境变量字典；
+                                         None 表示"未配置"，直接跳过
+
+        返回:
+            无
+
+        异常:
+            TypeError: 键或值不是 str
+            ValueError: 键为空串，或键含 "="（Windows 环境块以 "=" 分隔
+                        键值，含 "=" 的键会被 subprocess 判为
+                        `illegal environment variable name`）
+        """
+        if env is None:
+            return
+        for key, value in env.items():
+            # 键先校验：键非法时后两条消息都指不到具体变量名
+            if not isinstance(key, str):
+                raise TypeError(
+                    f"pytest执行环境变量的键必须是 str，实际类型: {type(key).__name__}，"
+                    f"实际值: {key!r}"
+                )
+            if not key:
+                raise ValueError(
+                    "pytest执行环境变量的键不能为空串"
+                    "（Windows 下空键名会被判为非法环境变量名）"
+                )
+            if "=" in key:
+                raise ValueError(
+                    f"pytest执行环境变量的键 {key!r} 不能包含 '='"
+                    f"（环境块以 '=' 分隔键值，含 '=' 会被判为非法变量名）"
+                )
+            # bytes 同样拒：Windows CreateProcess 的环境块只接受 str，
+            # 放行 bytes 只是把失败从构造期推迟到调用期
+            if not isinstance(value, str):
+                raise TypeError(
+                    f"pytest执行环境变量 {key} 的值必须是 str，"
+                    f"实际类型: {type(value).__name__}"
+                )
 
     @staticmethod
     def _resolve_timeout(timeout: int | None) -> int:
@@ -419,11 +488,20 @@ class PytestRunner(BaseExecutor):
         返回:
             ExecutionResult: result为passed/failed/error；
                              failed/error时error_message非空
-                             （超时/命令不存在/source_ref为空同样映射error）
+                             （超时/命令不存在/启动参数非法/
+                              source_ref为空同样映射error）
 
         异常:
             无（命令拼装失败与子进程异常均转为error结果返回，不向上抛，
             保持"单条用例的失败不升级为整批failed"的既有契约）
+
+            被本方法兜住并降级为 error 的全部异常类型：
+                - ValueError: build_command 侧的执行目标缺失/格式非法
+                - subprocess.TimeoutExpired: 子进程超时
+                - OSError: 命令不存在/权限不足/工作目录不存在
+                - TypeError / ValueError: **子进程启动参数非法**
+                  （Day48-fix2 补齐，如 env 含非字符串值、env 键含 "="、
+                  cwd 含 NUL）——这两类此前会直接上抛穿透本方法
         """
         start_time = time.perf_counter()
         try:
@@ -481,6 +559,40 @@ class PytestRunner(BaseExecutor):
             # 命令不存在/权限不足等子进程启动异常（如py不在PATH）
             duration = time.perf_counter() - start_time
             error_message = f"pytest子进程启动失败: {exc}"
+            logger.error(f"{error_message} | 命令: {command}")
+            return ExecutionResult(
+                result="error", error_message=error_message, duration=duration
+            )
+        except (TypeError, ValueError) as exc:
+            # 子进程**启动参数**非法（Day48-fix2 兜底层）
+            #
+            # 实测逃逸面（Windows + Python 3.11.9 实测复现）：这些异常由
+            # subprocess.run 在真正创建进程**之前**抛出，既不是
+            # TimeoutExpired 也不是 OSError，此前直接上抛穿透 run_one：
+            #   env 值非 str（int/None/bool/float/bytes）
+            #       → TypeError: environment can only contain strings
+            #   env 键非 str（int） → TypeError: bad argument type
+            #   env 键含 "="        → ValueError: illegal environment variable name
+            #   env 键/值含 NUL     → ValueError: embedded null character
+            #   cwd 含 NUL          → ValueError: embedded null character
+            # 跨平台成立：CI 的 Linux 3.11 走 POSIX 分支（env 经
+            # os.fsencode 转换），非 str 同样抛 TypeError。
+            #
+            # 为什么不靠构造期校验就够了——两层都要：
+            #   ① 构造期校验（_validate_env_content）把**自己写的**配置
+            #      错误挡在最早处，报错带变量名，比这里清楚得多；
+            #   ② 但 run_one 是编排层唯一入口，"单条用例的失败绝不升级为
+            #      整批 failed"是它对外的硬契约。任何未预料的参数异常都
+            #      必须在此兜住——一条用例的环境变量配错，不能让整批判
+            #      failed 且丢掉真正的原因。
+            #   未来若有人直接给 self.env 赋值绕过构造函数，本分支仍兜底。
+            #
+            # 与 OSError 分支并列而非合并：两者同属"启动失败"语义，但
+            # OSError 是操作系统层面的故障（解释器不存在/权限不足），
+            # 本分支是我们传给 subprocess 的参数不合法，日志分级与措辞
+            # 需区分——前者查环境，后者查代码。
+            duration = time.perf_counter() - start_time
+            error_message = f"pytest子进程启动失败(参数非法): {exc}"
             logger.error(f"{error_message} | 命令: {command}")
             return ExecutionResult(
                 result="error", error_message=error_message, duration=duration
