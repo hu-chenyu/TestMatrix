@@ -234,10 +234,11 @@ class TestCasesCrudApi:
         assert case_data["priority"] == "P1"
         assert case_data["case_type"] == "api"
         assert case_data["status"] == "active"
-        # 字段完整性
+        # 字段完整性（source_ref 于 Day48 进入 _to_dict 全量字段集）
         assert {
             "id", "case_id", "name", "module", "priority", "case_type",
-            "status", "description", "creator", "created_at", "updated_at",
+            "status", "description", "source_ref", "creator",
+            "created_at", "updated_at",
         } == set(case_data.keys()), "详情应返回用例全量字段"
 
     def test_get_case_not_found(self, crud_client: FlaskClient) -> None:

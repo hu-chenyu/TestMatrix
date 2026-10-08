@@ -8,8 +8,8 @@
     - SimulatedExecutor        模拟执行器（0.01s耗时 + case_id末位
                               奇偶定通过/失败，与既有_simulate_execute
                               规则完全一致）
-    - PytestRunner             真实pytest执行器骨架（本日仅搭
-                              退出码解析结构，不真跑测试集）
+    - PytestRunner             真实pytest执行器（subprocess 同步执行 +
+                              可配置超时/cwd/env + 输出捕获 + 退出码映射）
     - get_executor             执行器工厂（读TM_EXECUTOR环境变量，
                               默认simulated）
 
@@ -22,13 +22,15 @@
     - 不引入新第三方依赖: subprocess为标准库
 """
 
+import os
 import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 
-from src.common.env_manager import env_manager
+from src.common.env_manager import PROJECT_ROOT, env_manager
 from src.common.logger import LogManager
 from src.common.source_ref import validate_source_ref
 
@@ -37,8 +39,12 @@ logger = LogManager.get_logger()
 # 执行器类型合法值（工厂与Web入参校验共用，单一事实来源）
 VALID_EXECUTORS = ("simulated", "pytest")
 
-# pytest子进程执行超时时间（秒）
+# pytest子进程执行超时时间（秒）：PytestRunner.timeout 未显式传参、
+# TM_PYTEST_TIMEOUT 未设置时的兜底默认值
 PYTEST_TIMEOUT_SECONDS = 30
+
+# 子进程超时阈值的环境变量名（运维可在不改代码的情况下放宽/收紧单条用例预算）
+TM_PYTEST_TIMEOUT_KEY = "TM_PYTEST_TIMEOUT"
 
 # 子进程输出截断长度（防超长堆栈撑爆error_message与库表）
 OUTPUT_TRUNCATE_LENGTH = 2000
@@ -173,16 +179,27 @@ class SimulatedExecutor(BaseExecutor):
 
 class PytestRunner(BaseExecutor):
     """
-    真实pytest执行器（骨架版）
+    真实pytest执行器（subprocess 同步执行版）
 
-    本日仅搭命令拼装与退出码解析结构，不真跑测试集
-    （真实开源项目测试集执行另行安排）。
+    以子进程方式真实拉起 pytest 执行 source_ref 指向的测试文件，
+    并按退出码把结果映射为 passed/failed/error。
 
-    执行目标来源（Day47，与 ADR-001 决策③一致）:
+    执行目标来源（Day47 建立、Day48 收口，与 ADR-001 决策③一致）:
         source_ref 是**唯一**合法的 pytest 执行目标，为空即语义为
-        "该用例不可被 pytest 执行"。**绝不回落到 case_id**——业务编号
-        不是文件路径，回落后每条用例都以"file or directory not found"
-        退出码 4 收场，全量落 error，真实执行链路功能性不可用。
+        "该用例不可被 pytest 执行"。**绝不回落到 case_id，也不再回落到
+        script_path**——业务编号不是文件路径，回落后每条用例都以
+        "file or directory not found" 退出码 4 收场，全量落 error，
+        真实执行链路功能性不可用。Day47 期间的 script_path 过渡兼容
+        分支已在 Day48 随回填收口移除。
+
+    三项可配置项（Day48）:
+        - timeout: 单条用例的执行预算。优先级 构造参数 > 环境变量
+          TM_PYTEST_TIMEOUT > 模块常量 PYTEST_TIMEOUT_SECONDS。
+        - cwd:     子进程工作目录。pytest 靠它定位测试文件与配置文件，
+          默认取项目根 PROJECT_ROOT（不传则继承调用进程 cwd，会让
+          从别处触发的执行找不到 pytest.ini 与相对路径用例）。
+        - env:     叠加到当前进程环境变量之上的额外环境变量
+          （如 PYTEST_ADDOPTS、PYTHONPATH），用于按批次注入执行环境。
 
     退出码映射（pytest约定）:
         0 → passed（全部通过）
@@ -190,15 +207,78 @@ class PytestRunner(BaseExecutor):
         其他（2/5等） → error（用法错误/内部错误/中断）
     """
 
+    def __init__(
+        self,
+        timeout: int | None = None,
+        cwd: str | Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        """
+        构造PytestRunner并归一化三项可配置项
+
+        参数:
+            timeout (int | None): 单条用例执行超时秒数；None表示按
+                                 "环境变量TM_PYTEST_TIMEOUT → 模块常量"
+                                 顺序回落。非法值（≤0 / 非整数 /
+                                 环境变量值非数字）一律抛 ValueError
+                                 而不是静默回落——静默回落会让"我明明
+                                 把预算调到5秒"却仍按30秒跑，排查时
+                                 完全看不出配置没生效。
+            cwd (str | Path | None): 子进程工作目录；None时取项目根
+                                     PROJECT_ROOT。
+            env (dict[str, str] | None): 额外环境变量（叠加在当前进程
+                                          环境变量之上）；None表示不注入。
+
+        返回:
+            无
+
+        异常:
+            ValueError: timeout 非法（详见参数说明）
+        """
+        self.timeout = self._resolve_timeout(timeout)
+        self.cwd = Path(cwd) if cwd is not None else PROJECT_ROOT
+        self.env = dict(env) if env is not None else None
+
+    @staticmethod
+    def _resolve_timeout(timeout: int | None) -> int:
+        """
+        归一化执行超时阈值（构造参数 > TM_PYTEST_TIMEOUT > 模块常量）
+
+        参数:
+            timeout (int | None): 显式传入的超时秒数；None则读环境变量
+
+        返回:
+            int: 归一化后的正整数超时秒数
+
+        异常:
+            ValueError: 三级来源任一解析出的值不是正整数
+        """
+        if timeout is not None:
+            resolved = timeout
+        else:
+            raw_env = env_manager.get(TM_PYTEST_TIMEOUT_KEY)
+            if raw_env is None or not str(raw_env).strip():
+                return PYTEST_TIMEOUT_SECONDS
+            try:
+                resolved = int(str(raw_env).strip())
+            except ValueError as exc:
+                raise ValueError(
+                    f"环境变量{TM_PYTEST_TIMEOUT_KEY}必须是正整数秒数，"
+                    f"实际值: {raw_env!r}"
+                ) from exc
+
+        # bool 是 int 的子类，isinstance(True, int) 为真但语义不是"1秒"，
+        # 故一并拒掉，避免漏写 timeout=True 时拿到 1 秒预算。
+        if isinstance(resolved, bool) or not isinstance(resolved, int) or resolved <= 0:
+            raise ValueError(f"pytest执行超时阈值必须是正整数秒数，实际值: {resolved!r}")
+        return resolved
+
     def build_command(self, case: dict) -> list:
         """
-        拼装单用例的pytest执行命令（Day47: source_ref 优先）
+        拼装单用例的pytest执行命令（Day48 收口：只读 source_ref）
 
-        取值优先级:
-            1. source_ref（唯一合法来源）
-            2. script_path（**过渡兼容**，仅当 source_ref 为空时；
-               打 WARNING 记录，Day48+ 随回填收口后移除）
-            3. 两者都空 → 抛 ValueError，**不回落到 case_id**
+        source_ref 为空即抛 ValueError，**不回落到 case_id，也不回落到
+        script_path**（Day47 的过渡兼容分支已随回填收口移除）。
 
         为什么 source_ref 为空必须报错而不是找个值顶上: 空值语义
         "不可被 pytest 执行"是该列存在的理由，回落到 case_id 会把这条
@@ -214,8 +294,8 @@ class PytestRunner(BaseExecutor):
                 [sys.executable, "-m", "pytest", "-q", "--tb=short", "--", path]
 
         异常:
-            ValueError: 以下三种情况抛出，消息均说明该补什么/改什么
-                - source_ref 为空且无 script_path（过渡兼容也拿不到）
+            ValueError: 以下两种情况抛出，消息均说明该补什么/改什么
+                - source_ref 为空（None / 空串 / 纯空格）
                 - source_ref 非空但格式非法 / 超长 / 含 ".."
                   （执行侧纵深防御，详见函数体注释）
         """
@@ -224,42 +304,31 @@ class PytestRunner(BaseExecutor):
         path = source_ref.strip() if isinstance(source_ref, str) else source_ref
 
         if not path:
-            # script_path 是 Day47 之前 build_command 实际读取的字段名，
-            # 而 Day46 起真实字段是 source_ref —— 这是一段悬空契约。
-            # 过渡期保留读取以免存量调用方直接炸，Day48+ 移除。
-            script_path = case.get("script_path")
-            if isinstance(script_path, str) and script_path.strip():
-                logger.warning(
-                    f"用例 source_ref 为空，回退使用 script_path（过渡兼容，"
-                    f"Day48+ 移除该分支）| 用例: {case_id}"
-                )
-                path = script_path.strip()
-            else:
-                raise ValueError(
-                    f"用例 {case_id} 的 source_ref 为空，该用例不可被 pytest 执行；"
-                    f"请先回填 source_ref（python -m src.scripts.backfill_source_ref "
-                    f"--dry-run 查看待补录清单），或改用 SimulatedExecutor"
-                )
-        else:
-            # 执行侧纵深防御（Day47-fix P3-3）
-            #
-            # 录入侧校验是第一道闸，但库里的值不只经录入侧写入：回填脚本
-            # 按描述文本猜路径、人工直接改库、未来的数据迁移都可能塞进
-            # 非法值。而本方法会把该值**原样拼进 pytest 子进程命令**，
-            # 故这里必须自己再拒一次：
-            #   - `../secret/x.py` 放行 = 测试目标越出项目根
-            #   - 含空格/元字符的值进入命令行 = 事实上的参数注入
-            #
-            # 与录入侧共用 src/common/source_ref.py 的同一函数（而不是
-            # 各写一份），避免"录入放行、执行拒绝"的口径分叉——那会让
-            # 同一条数据在不同链路上表现不一致，最难排查。
-            try:
-                path = validate_source_ref(path, context=f"用例 {case_id}: ")
-            except ValueError as exc:
-                raise ValueError(
-                    f"{exc}（该值来自库中 source_ref，非法值不会进入 pytest 命令；"
-                    f"请修正后重试）"
-                ) from exc
+            raise ValueError(
+                f"用例 {case_id} 的 source_ref 为空，该用例不可被 pytest 执行；"
+                f"请先回填 source_ref（python -m src.scripts.backfill_source_ref "
+                f"--dry-run 查看待补录清单），或改用 SimulatedExecutor"
+            )
+
+        # 执行侧纵深防御（Day47-fix P3-3）
+        #
+        # 录入侧校验是第一道闸，但库里的值不只经录入侧写入：回填脚本
+        # 按描述文本猜路径、人工直接改库、未来的数据迁移都可能塞进
+        # 非法值。而本方法会把该值**原样拼进 pytest 子进程命令**，
+        # 故这里必须自己再拒一次：
+        #   - `../secret/x.py` 放行 = 测试目标越出项目根
+        #   - 含空格/元字符的值进入命令行 = 事实上的参数注入
+        #
+        # 与录入侧共用 src/common/source_ref.py 的同一函数（而不是
+        # 各写一份），避免"录入放行、执行拒绝"的口径分叉——那会让
+        # 同一条数据在不同链路上表现不一致，最难排查。
+        try:
+            path = validate_source_ref(path, context=f"用例 {case_id}: ")
+        except ValueError as exc:
+            raise ValueError(
+                f"{exc}（该值来自库中 source_ref，非法值不会进入 pytest 命令；"
+                f"请修正后重试）"
+            ) from exc
 
         # sys.executable 指向当前解释器（虚拟环境下即 venv 的 python，
         # 保证用项目依赖跑 pytest），跨 Windows/Linux/macOS 通用；
@@ -279,14 +348,31 @@ class PytestRunner(BaseExecutor):
         #   当选项执行、退出码 0 被误判为 passed 的假通过。
         return [sys.executable, "-m", "pytest", "-q", "--tb=short", "--", path]
 
+    def _build_env(self) -> dict[str, str] | None:
+        """
+        构造子进程环境变量（当前进程环境 + 构造时注入的额外变量）
+
+        返回:
+            dict[str, str] | None: 合并后的环境变量字典；未注入额外变量时
+                                   返回 None（交由 subprocess 直接继承
+                                   当前进程环境，避免无谓地拷贝一份环境）
+
+        异常:
+            无
+        """
+        if not self.env:
+            return None
+        return {**os.environ, **self.env}
+
     def run_one(self, case: dict) -> ExecutionResult:
         """
         同步执行单条用例的pytest子进程
 
         执行流程:
-            1. build_command拼装命令（source_ref 与 script_path 都为空时
-               抛 ValueError，此处捕获后降级为该条用例的 error 结果）
-            2. subprocess.run同步执行，超时30秒
+            1. build_command拼装命令（source_ref 为空时抛 ValueError，
+               此处捕获后降级为该条用例的 error 结果）
+            2. subprocess.run同步执行，工作目录取 self.cwd（默认项目根），
+               环境变量为 self.env 叠加当前进程环境，超时取 self.timeout
             3. 按退出码映射结果: 0→passed / 1→failed / 其他→error
             4. 失败/错误时输出截断2000字存入error_message
 
@@ -326,13 +412,17 @@ class PytestRunner(BaseExecutor):
                 text=True,
                 encoding=SUBPROCESS_ENCODING,
                 errors=SUBPROCESS_ERRORS,
-                timeout=PYTEST_TIMEOUT_SECONDS,
+                timeout=self.timeout,
+                # pytest 靠 cwd 定位测试文件与 pytest.ini：不显式指定时
+                # 继承调用进程的工作目录，而 Web 触发 / 任务队列 worker
+                # 的 cwd 与项目根无关，source_ref 里的相对路径会全部
+                # 找不到，每条用例以退出码 4 落 error。
+                cwd=str(self.cwd),
+                env=self._build_env(),
             )
         except subprocess.TimeoutExpired:
             duration = time.perf_counter() - start_time
-            error_message = (
-                f"执行超时(>{PYTEST_TIMEOUT_SECONDS}s): {' '.join(command)}"
-            )
+            error_message = f"执行超时(>{self.timeout}s): {' '.join(command)}"
             logger.warning(f"pytest子进程超时 | {' '.join(command)}")
             return ExecutionResult(
                 result="error", error_message=error_message, duration=duration

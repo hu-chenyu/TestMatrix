@@ -927,18 +927,30 @@ class TestPytestRunnerSourceRef:
         )
         assert common_source_ref_pattern.match("tests/a.py"), "共用正则应可用"
 
-    @allure.story("script_path 过渡兼容分支仍可用")
+    @allure.story("Day48 收口：script_path 过渡兼容分支已移除")
     def test_script_path_transition_fallback(self):
         """
-        source_ref 空但 script_path 非空时走过渡兼容（Day48+ 移除）。
+        Day47 留的 script_path 过渡兜底在 Day48 随回填收口移除。
 
-        该分支必须仍能产出可执行命令，否则存量调用方在回填收口前会
-        全部落 error——而那些用例的 source_ref 本来就只能靠回填补上。
+        断言口径随之反转: 此前要求"该分支仍能产出可执行命令"，是因为
+        回填未完成、存量调用方需要兜底；回填收口后保留它反而有害——它会
+        把"库里的 source_ref 还是空的"这一**待补录事实**掩盖成一次看似
+        成功的执行，排障时再没人知道哪些用例其实没配执行目标。
+
+        故此处断言：只带 script_path 的用例必须显式失败，且消息指向
+        source_ref 与回填命令。
         """
-        command = PytestRunner().build_command(
-            {"case_id": "TM-BC-0004", "script_path": "tests/demo.py"}
+        with pytest.raises(ValueError) as excinfo:
+            PytestRunner().build_command(
+                {"case_id": "TM-BC-0004", "script_path": "tests/demo.py"}
+            )
+
+        message = str(excinfo.value)
+        assert "source_ref" in message, f"异常必须指向唯一合法字段: {message}"
+        assert "TM-BC-0004" in message, "异常消息必须指明是哪条用例"
+        assert "backfill_source_ref" in message, (
+            "空值是待补录状态，消息必须给出回填入口而不是让人猜"
         )
-        assert command[-1] == "tests/demo.py"
 
     @allure.story("P3-3 执行侧拒绝 .. 越界路径")
     def test_build_command_rejects_parent_dir(self):

@@ -146,12 +146,21 @@ class TestPytestRunnerCommand:
         )
         assert command[command.index("--") + 1] == "tests/x.py"
 
-    @allure.story("script_path 优先于 case_id")
+    @allure.story("Day48 收口：source_ref 唯一优先，script_path 不再兜底")
     def test_script_path_priority(self):
-        # Day47 起 source_ref 为第一优先；script_path 仅作过渡兼容，
-        # 且**绝不回落 case_id**——故此处断言 case_id 不出现在命令中
+        # Day47 起 source_ref 为第一优先，Day48 进一步移除 script_path
+        # 过渡兼容；两条铁律都不变——只带 script_path 的用例必须显式报错，
+        # 且**绝不回落 case_id**
+        with pytest.raises(ValueError) as excinfo:
+            PytestRunner().build_command(
+                {"case_id": "TM-X-1", "script_path": "tests/test_demo.py"}
+            )
+        assert "source_ref" in str(excinfo.value), (
+            "script_path 已不再作为执行目标，异常必须指向 source_ref"
+        )
+
         command = PytestRunner().build_command(
-            {"case_id": "TM-X-1", "script_path": "tests/test_demo.py"}
+            {"case_id": "TM-X-1", "source_ref": "tests/test_demo.py"}
         )
         assert "tests/test_demo.py" in command
         assert "TM-X-1" not in command

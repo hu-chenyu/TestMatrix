@@ -2919,6 +2919,17 @@ class CaseManager:
 
         异常:
             无
+
+        为什么 source_ref 必须在这里（Day48 补 Day47 前置缺口）:
+            本方法是"模型行 → 用例字典"的**唯一**出口，GET /api/cases/
+            列表、详情、创建响应，以及执行调度用的
+            select_cases_for_execution → _execute_batch_async 逐条 run_one
+            的 case 字典，**全部**经由它产出。Day47 已经在写入侧落库、
+            在执行侧按 source_ref 拼命令，但本方法没把这个字段放进字典，
+            于是执行器读到的永远是空值，build_command 每条都抛
+            "source_ref 为空" 并降级为 error——真实执行链路功能性不可用。
+            键缺失比值为 None 更危险，故此处无条件输出该键（未配置时序列化为
+            JSON null），不做"有值才带"的裁剪。
         """
         return {
             "id": row.id,
@@ -2929,6 +2940,8 @@ class CaseManager:
             "case_type": row.case_type,
             "status": row.status,
             "description": row.description,
+            # pytest 可执行目标（None = 该用例不可被 pytest 执行）
+            "source_ref": row.source_ref,
             "creator": row.creator,
             "created_at": to_utc_iso(row.created_at),
             "updated_at": to_utc_iso(row.updated_at),

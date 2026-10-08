@@ -401,7 +401,7 @@ class TestExecutorCoverage:
 
         monkeypatch.setattr(executors_mod.subprocess, "run", _raise_timeout)
         runner = PytestRunner()
-        case = {"case_id": "TM-UC-0001", "script_path": "test_demo.py"}
+        case = {"case_id": "TM-UC-0001", "source_ref": "test_demo.py"}
 
         result = runner.run_one(case)
 

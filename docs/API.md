@@ -317,6 +317,7 @@ curl.exe "http://127.0.0.1:5000/api/cases/?priority=P1&page=1&page_size=2"
         "case_type": "api",
         "status": "active",
         "description": "跨API集成测试种子用例",
+        "source_ref": "tests/api_demo/test_api_login.py",
         "creator": "admin",
         "created_at": "2026-09-20T10:15:30",
         "updated_at": "2026-09-20T10:15:30"
@@ -330,6 +331,7 @@ curl.exe "http://127.0.0.1:5000/api/cases/?priority=P1&page=1&page_size=2"
         "case_type": "api",
         "status": "active",
         "description": "跨API集成测试种子用例",
+        "source_ref": null,
         "creator": "admin",
         "created_at": "2026-09-20T10:15:31",
         "updated_at": "2026-09-20T10:15:31"
@@ -372,6 +374,7 @@ curl.exe "http://127.0.0.1:5000/api/cases/?priority=P1&page=1&page_size=2"
 | case_type | string | 否 | api | `api` 或 `chip` |
 | status | string | 否 | active | `active` 或 `disabled` |
 | description | string | 否 | 空字符串 | 用例描述 |
+| source_ref | string \| null | 否 | null | pytest 可执行目标，形如 `tests/x.py` 或 `tests/x.py::TestC::test_y`，≤ 512 字符、不含空格与 `..`；`null` 表示该用例不可被 pytest 执行 |
 | creator | string | 否 | admin | 创建人，长度 ≤ 64 |
 
 **请求示例**：
@@ -395,6 +398,7 @@ curl.exe -X POST "http://127.0.0.1:5000/api/cases/" -H "Content-Type: applicatio
     "case_type": "api",
     "status": "active",
     "description": "",
+    "source_ref": null,
     "creator": "admin",
     "created_at": "2026-09-20T10:15:30",
     "updated_at": "2026-09-20T10:15:30"
@@ -451,6 +455,7 @@ curl.exe "http://127.0.0.1:5000/api/cases/TM-UC-0001"
     "case_type": "api",
     "status": "active",
     "description": "跨API集成测试种子用例",
+    "source_ref": "tests/api_demo/test_api_login.py",
     "creator": "admin",
     "created_at": "2026-09-20T10:15:30",
     "updated_at": "2026-09-20T10:15:30"
@@ -491,6 +496,7 @@ curl.exe "http://127.0.0.1:5000/api/cases/TM-UC-0001"
 | case_type | string | 否 | `api` 或 `chip` |
 | status | string | 否 | `active` 或 `disabled` |
 | description | string | 否 | 用例描述 |
+| source_ref | string \| null | 否 | pytest 可执行目标，格式与创建接口一致；传 `null` 或空串表示清空（该用例不可被 pytest 执行） |
 | creator | string | 否 | 长度 ≤ 64 |
 
 **请求示例**（禁用用例）：
@@ -514,6 +520,7 @@ curl.exe -X PUT "http://127.0.0.1:5000/api/cases/TM-UC-0001" -H "Content-Type: a
     "case_type": "api",
     "status": "disabled",
     "description": "跨API集成测试种子用例",
+    "source_ref": "tests/api_demo/test_api_login.py",
     "creator": "admin",
     "created_at": "2026-09-20T10:15:30",
     "updated_at": "2026-09-20T10:20:05"

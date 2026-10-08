@@ -23,6 +23,7 @@ Day44 收尾批量修复的回归测试（Day1~Day44 全量审查发现的 30 �
     - 涉及线程/时序的用例走预算内轮询 + 终态断言，不用固定 time.sleep 赌时序
 """
 
+import shutil
 from pathlib import Path
 
 import allure
@@ -38,6 +39,55 @@ ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
 COMPOSE_FILE = PROJECT_ROOT / "docker" / "docker-compose.yml"
 DOCKERFILE = PROJECT_ROOT / "docker" / "Dockerfile"
 PYTEST_INI = PROJECT_ROOT / "pytest.ini"
+# Day48：真实子进程用例的临时测试文件目录（output/ 已被 .gitignore 忽略）
+SCRATCH_DIRNAME = "day44_pytest_scratch"
+
+
+@pytest.fixture
+def scratch_dir():
+    """
+    在项目根 output/ 下准备一个可写的临时目录（用例结束后清理）
+
+    为什么不用 tmp_path: Day48 起 build_command 只读 source_ref，而
+    source_ref 必须过 validate_source_ref 的形态校验
+    （``^[\\w./-]+\\.py(::\\w+)*$``，禁盘符、反斜杠与 ".."）。Windows 的
+    临时目录绝对路径形如 ``C:\\Users\\...\\Temp\\pytest-xxx\\test_x.py``，
+    **过不了这条正则**——若继续用绝对路径，命令在拼装阶段就被拒并降级为
+    error，这三条"真实子进程"用例会变成假通过，恰好丢掉它们唯一要证明的
+    东西（命令确实可被 pytest 真实执行）。
+
+    放 output/ 下而非仓库其它位置: 该目录已在 .gitignore 中，临时文件
+    不会污染版本库；同时它在项目根内，能算出合法的相对 source_ref。
+    """
+    target_dir = PROJECT_ROOT / "output" / SCRATCH_DIRNAME
+    shutil.rmtree(target_dir, ignore_errors=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        yield target_dir
+    finally:
+        shutil.rmtree(target_dir, ignore_errors=True)
+
+
+@pytest.fixture
+def make_source_ref(scratch_dir: Path):
+    """
+    造一个真实可执行的测试文件，返回其**项目相对** source_ref
+
+    参数:
+        scratch_dir (Path): scratch_dir fixture 提供的临时目录
+
+    返回:
+        Callable[[str, str], str]: 入参为（模块名, 文件内容），返回形如
+                                    ``output/day44_pytest_scratch/x.py``
+                                    的相对路径（正斜杠，跨平台一致）
+    """
+
+    def _factory(module_name: str, body: str) -> str:
+        (scratch_dir / f"{module_name}.py").write_text(body, encoding="utf-8")
+        relative_dir = scratch_dir.relative_to(PROJECT_ROOT).as_posix()
+        return f"{relative_dir}/{module_name}.py"
+
+    return _factory
 CI_YML = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 ENV_CONFIG_FILE = PROJECT_ROOT / ".env"
 
@@ -149,20 +199,30 @@ class TestP1_01OptionTerminatorPosition:
         assert command[terminator_index - 1] == "--tb=short"
         assert len(command) == terminator_index + 2
 
-    @allure.story("script_path 过渡兼容且仍排在 -- 之后")
+    @allure.story("Day48 收口：只认 source_ref，script_path 不再回落")
     def test_script_path_last(self):
         """
-        source_ref 优先；为空时兼容读 script_path（Day48+ 移除该分支）。
+        source_ref 是唯一执行目标，script_path 已不再被读取。
 
         两种情形都必须落在终止符之后，且 case_id 绝不出现——
-        后者是 Day47 的核心契约（build_command 不再回落 case_id）。
+        后者是 Day47 的核心契约（build_command 不回落 case_id）。
+
+        断言口径随 Day48 收口而变: 此前"source_ref 为空时兼容读
+        script_path"是**过渡期行为**（Day47 在 build_command 里留的
+        悬空契约），Day48 随回填收口移除。原先的过渡兼容断言若原样
+        保留，会在分支被误删/误留时都判不出问题——它只描述"当时有这
+        么个兜底"，而今天真正要守住的是"**没有**兜底，为空即报错"。
         """
         runner = PytestRunner()
-        command = runner.build_command(
-            {"case_id": "TM-X-1", "script_path": "tests/test_demo.py"}
+
+        # 仅带 script_path 的旧调用方现在必须显式失败
+        with pytest.raises(ValueError) as excinfo:
+            runner.build_command(
+                {"case_id": "TM-X-1", "script_path": "tests/test_demo.py"}
+            )
+        assert "source_ref" in str(excinfo.value), (
+            "过渡分支已移除，异常消息必须指向唯一合法字段 source_ref"
         )
-        assert command[-1] == "tests/test_demo.py"
-        assert "TM-X-1" not in command
 
         # source_ref 与 script_path 同时存在时 source_ref 胜出
         command = runner.build_command(
@@ -174,6 +234,7 @@ class TestP1_01OptionTerminatorPosition:
         )
         assert command[-1] == "tests/primary.py"
         assert "tests/test_demo.py" not in command
+        assert "TM-X-1" not in command
 
     @allure.story("形如 --version 的执行路径在拼命令前即被拒（Day47-fix P3-3）")
     def test_dash_case_id_not_option(self):
@@ -201,41 +262,43 @@ class TestP1_01OptionTerminatorPosition:
         assert command[command.index("--") + 1] == "tests/test_x.py"
 
     @allure.story("真实子进程：通过的用例返回 passed（核心验收点）")
-    def test_real_subprocess_passed(self, tmp_path: Path):
+    def test_real_subprocess_passed(self, make_source_ref):
         """**不 mock subprocess.run**，真实拉起子进程。
 
         这是 P1-01 的关键验收点：当初该缺陷能存活并通过 CI，正是因为
         全部测试都 mock 了 subprocess.run、只断言命令的"形状"。
         真实跑一次才能证明命令确实可用。
         """
-        target = tmp_path / "test_day44_real_pass.py"
-        target.write_text("def test_pass():\n    assert True\n", encoding="utf-8")
+        source_ref = make_source_ref(
+            "test_day44_real_pass", "def test_pass():\n    assert True\n"
+        )
         result = PytestRunner().run_one(
-            {"case_id": "test_day44_real_pass", "script_path": str(target)}
+            {"case_id": "test_day44_real_pass", "source_ref": source_ref}
         )
         assert result.result == "passed"
         assert not result.error_message
 
     @allure.story("真实子进程：失败的用例返回 failed 而非 error")
-    def test_real_subprocess_failed(self, tmp_path: Path):
+    def test_real_subprocess_failed(self, make_source_ref):
         """真实失败用例必须映射到 failed——修复前会误落 error 分支"""
-        target = tmp_path / "test_day44_real_fail.py"
-        target.write_text(
-            "def test_fail():\n    assert 1 == 2, 'day44 boom'\n", encoding="utf-8"
+        source_ref = make_source_ref(
+            "test_day44_real_fail",
+            "def test_fail():\n    assert 1 == 2, 'day44 boom'\n",
         )
         result = PytestRunner().run_one(
-            {"case_id": "test_day44_real_fail", "script_path": str(target)}
+            {"case_id": "test_day44_real_fail", "source_ref": source_ref}
         )
         assert result.result == "failed"
         assert result.error_message
 
     @allure.story("真实子进程：耗时被记录且为正数")
-    def test_real_subprocess_duration(self, tmp_path: Path):
+    def test_real_subprocess_duration(self, make_source_ref):
         """真实子进程必须产出正数耗时，证明确实执行过而非短路返回"""
-        target = tmp_path / "test_day44_real_dur.py"
-        target.write_text("def test_d():\n    assert True\n", encoding="utf-8")
+        source_ref = make_source_ref(
+            "test_day44_real_dur", "def test_d():\n    assert True\n"
+        )
         result = PytestRunner().run_one(
-            {"case_id": "test_day44_real_dur", "script_path": str(target)}
+            {"case_id": "test_day44_real_dur", "source_ref": source_ref}
         )
         assert result.duration > 0.0
 

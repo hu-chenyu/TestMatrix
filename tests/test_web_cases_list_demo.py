@@ -351,10 +351,11 @@ class TestCasesListApi:
         assert {
             "items", "total", "page", "page_size", "total_pages"
         } == set(page_data.keys()), "data应为分页五字段结构"
-        # items元素字段完整性（_to_dict全量字段）
+        # items元素字段完整性（_to_dict全量字段，source_ref 于 Day48 纳入）
         assert len(page_data["items"]) > 0, "应返回非空items"
         first_item = page_data["items"][0]
         assert {
             "id", "case_id", "name", "module", "priority", "case_type",
-            "status", "description", "creator", "created_at", "updated_at",
+            "status", "description", "source_ref", "creator",
+            "created_at", "updated_at",
         } == set(first_item.keys()), "items元素应含用例全量字段"
