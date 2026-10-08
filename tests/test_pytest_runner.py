@@ -200,7 +200,11 @@ class TestPytestRunnerRunOne:
 
         assert result.result == "passed"
         assert result.error_message is None
-        assert result.duration >= 0.0, "耗时必须是真实测量值而非硬编码 0"
+        # 只校验非负（Day48-fix P3-2 方案 A）：此处 subprocess.run 被 mock，
+        # duration 落在 1e-5 量级，写死 >0 会引入时钟分辨率相关的 flaky
+        # 风险。"确实执行过而非短路返回"由 Day44 三条**真实子进程**用例
+        # 以 duration > 0.0 兜底——两者互补，不是重复断言。
+        assert result.duration >= 0.0, "耗时为非负测量值"
 
         # 命令里不能出现用于识别这条用例的编号
         command, kwargs = patch_subprocess.calls[0]
@@ -224,6 +228,13 @@ class TestPytestRunnerRunOne:
 
         断言 error_message 带上真实输出内容（而非泛化文案），否则报告里
         每条失败都只写"pytest退出码: 1"，排障还得回机器复跑一遍。
+
+        顺带钉住"未注入 env 时传 None"这条语义（Day48-fix P3-3）：
+        `_build_env` 的 docstring 承诺不注入就交由 subprocess 直接继承
+        当前进程环境。改成"总是返回环境拷贝"是**等价变异**（子进程所见
+        环境相同、不报错），因此只能靠这条断言钉住——否则该语义细节
+        完全无人看守，改了也没人知道。本测试用默认构造的 PytestRunner()，
+        正是"未注入"的场景。
         """
         detail = "tests/test_login.py::test_wrong_password AssertionError: boom"
         fake_completed.returncode = 1
@@ -239,6 +250,11 @@ class TestPytestRunnerRunOne:
         assert result.error_message, "failed 必须带失败详情"
         assert detail in result.error_message, "error_message 必须含失败输出尾部"
         assert result.duration >= 0.0
+
+        _, kwargs = patch_subprocess.calls[0]
+        assert kwargs["env"] is None, (
+            "未注入 env 时应传 None（交由 subprocess 继承），而非环境拷贝"
+        )
 
     @allure.story("退出码 2 → error，error_message 含 stderr 尾部")
     def test_run_one_error_exit_code(
@@ -282,6 +298,12 @@ class TestPytestRunnerRunOne:
         与非法值的显式拒绝：静默回落会让"我明明把预算调到 5 秒"却仍按 30
         秒跑，而超时消息里的阈值看起来又是合法的，排查时完全看不出配置
         没生效，故非法值一律抛错而不是回落。
+
+        同一条用例还覆盖 cwd / env 的**显式类型校验**（Day48-fix P3-6）：
+        三参数此前只有 timeout 有业务级校验，cwd/env 传错类型会在
+        `Path()`/`dict()` 处抛标准库消息（"expected str, bytes or
+        os.PathLike object, not int"），读不出"是我把 cwd 传成了 int"。
+        校验补齐后错误信息带字段名与实际类型，与 timeout 口径统一。
         """
         fake_timeout = 5
         patch_subprocess.exc = subprocess.TimeoutExpired(
@@ -314,6 +336,32 @@ class TestPytestRunnerRunOne:
         for illegal in (0, -1, True):
             with pytest.raises(ValueError, match="正整数"):
                 PytestRunner(timeout=illegal)  # type: ignore[arg-type]
+
+        # 空串同样视为"未配置"（容器/CI 常把未设置的变量渲染成空串）
+        monkeypatch.setenv("TM_PYTEST_TIMEOUT", "")
+        assert PytestRunner().timeout == PYTEST_TIMEOUT_SECONDS, (
+            "空串是'未配置'而非'配错了'，应回落而非报错"
+        )
+
+        # cwd / env 非法类型显式拒绝，消息须带字段名与实际类型
+        for bad_cwd in (123, 1.5, ["a"], {"a": 1}):
+            with pytest.raises(TypeError, match=r"cwd|工作目录"):
+                PytestRunner(cwd=bad_cwd)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match=r"str 或 Path"):
+            PytestRunner(cwd=123)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match=r"int"):
+            PytestRunner(cwd=123)  # type: ignore[arg-type]
+        for bad_env in ("PATH=x", ["PATH=x"], ("PATH", "x")):
+            with pytest.raises(TypeError, match=r"env|环境变量"):
+                PytestRunner(env=bad_env)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match=r"dict 或 None"):
+            PytestRunner(env="PATH=x")  # type: ignore[arg-type]
+
+        # 合法类型照常通过（cwd 收 str/Path 并归一为 Path，env 收 dict）
+        assert PytestRunner(cwd="sub/dir").cwd == Path("sub/dir"), (
+            "str 形式的 cwd 应被接受并归一为 Path"
+        )
+        assert PytestRunner(env={}).env == {}, "空 dict 是合法注入（区别于 None）"
 
     @allure.story("子进程启动失败 → error，消息含启动失败原因")
     def test_run_one_os_error(self, patch_subprocess: FakeRun) -> None:

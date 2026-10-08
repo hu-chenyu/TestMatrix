@@ -220,7 +220,7 @@ class TestCasesCrudApi:
     def test_get_case_success(self, crud_client: FlaskClient) -> None:
         """
         查询成功: 查询已存在的case_id（TM-CRUD-0001），返回200，
-        数据字段正确且完整（_to_dict全量11字段）
+        数据字段正确且完整（_to_dict 全量 12 字段）
         """
         response = crud_client.get("/api/cases/TM-CRUD-0001")
         data = response.get_json()

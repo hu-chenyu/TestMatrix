@@ -223,7 +223,9 @@ class PytestRunner(BaseExecutor):
                                  环境变量值非数字）一律抛 ValueError
                                  而不是静默回落——静默回落会让"我明明
                                  把预算调到5秒"却仍按30秒跑，排查时
-                                 完全看不出配置没生效。
+                                 完全看不出配置没生效。环境变量值为空串
+                                 或纯空白时视为"未配置"，回落为模块
+                                 常量（与"未设置"同义），不抛错。
             cwd (str | Path | None): 子进程工作目录；None时取项目根
                                      PROJECT_ROOT。
             env (dict[str, str] | None): 额外环境变量（叠加在当前进程
@@ -234,8 +236,29 @@ class PytestRunner(BaseExecutor):
 
         异常:
             ValueError: timeout 非法（详见参数说明）
+            TypeError: cwd 不是 str/Path，或 env 不是 dict（详见函数体注释）
         """
         self.timeout = self._resolve_timeout(timeout)
+
+        # cwd / env 的显式类型校验（Day48-fix P3-6）
+        #
+        # 为什么已经有了"响亮失败"还要加：传错类型原本会在 `Path(cwd)` /
+        # `dict(env)` 处抛 TypeError 或 ValueError，但那两条消息来自标准库
+        # 内部（"expected str, bytes or os.PathLike object, not int"），
+        # 读不出"是我把 cwd 传成了 int"。三参数里只有 timeout 有业务级
+        # 校验，失败信息口径不齐——同一个构造函数的三个参数，报错风格
+        # 却是两种。这里统一为带字段名与实际类型的业务消息。
+        #
+        # None 是"未配置"而非"类型错误"，故跳过校验直接走默认值分支。
+        if cwd is not None and not isinstance(cwd, (str, Path)):
+            raise TypeError(
+                f"pytest执行工作目录必须是 str 或 Path，实际类型: {type(cwd).__name__}"
+            )
+        if env is not None and not isinstance(env, dict):
+            raise TypeError(
+                f"pytest执行环境变量必须是 dict 或 None，实际类型: {type(env).__name__}"
+            )
+
         self.cwd = Path(cwd) if cwd is not None else PROJECT_ROOT
         self.env = dict(env) if env is not None else None
 
@@ -252,6 +275,20 @@ class PytestRunner(BaseExecutor):
 
         异常:
             ValueError: 三级来源任一解析出的值不是正整数
+
+        注意（空值语义，Day48-fix P3-5 明确）:
+            环境变量 TM_PYTEST_TIMEOUT 值为**空串或纯空白**时视为
+            "未配置"，与"未设置"同义，回落为 PYTEST_TIMEOUT_SECONDS，
+            **不抛错**。这与 `env_manager.get` 的口径一致（该方法对空串
+            返回 default），也和 Day46 起 source_ref 的"空即未配置"语义
+            统一。只有值为**非空白却不是正整数**时（如 "abc"、"0"、"1.5"）
+            才抛 ValueError。
+
+            为什么空串要放行而不是报错: 容器与 CI 的配置注入经常把未设置
+            的变量渲染成空串（如 `-e TM_PYTEST_TIMEOUT=`），此时报
+            "必须是正整数"是噪声而非信息——它看上去像运维配错了，实际
+            含义就是"没配"。而真正需要拦截的是"配了但配错了"，那才会
+            静默按 30 秒跑并让人查不到原因。
         """
         if timeout is not None:
             resolved = timeout
@@ -422,6 +459,19 @@ class PytestRunner(BaseExecutor):
             )
         except subprocess.TimeoutExpired:
             duration = time.perf_counter() - start_time
+            # 超时消息与日志**刻意保留完整命令行**（含 sys.executable 的
+            # 解释器绝对路径），不做脱敏也不截断（Day48-fix P3-4 决策）。
+            #
+            # 理由: 这是本地自托管工具的解释器路径（如
+            # D:\projects\TestMatrix\.venv\Scripts\python.exe），既非凭据
+            # 也不含任何业务数据；而超时恰恰是"必须复现才能定位"的故障，
+            # 缺了命令行就无法判断当时跑的是哪个解释器、哪些选项、哪个
+            # 用例路径——把最有诊断价值的一段裁掉，保全性收益为零而排障
+            # 成本陡增。
+            #
+            # 若将来本工具改为多租户/对外托管，需重新评估：那时解释器
+            # 路径会暴露部署方的主机目录结构，口径要与项目既有日志脱敏
+            # 规则对齐（见 Day39 的 _sanitize_log_field）。
             error_message = f"执行超时(>{self.timeout}s): {' '.join(command)}"
             logger.warning(f"pytest子进程超时 | {' '.join(command)}")
             return ExecutionResult(
