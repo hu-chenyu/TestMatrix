@@ -40,9 +40,9 @@ class TestCase(Base):
         id          自增主键
         case_id     业务用例编号（唯一），如 TM-API-0001
         name        用例名称
-        module      所属业务模块（如 用户中心/订单/板卡通信）
+        module      所属业务模块（如 用户中心/订单/串口通信）
         priority    优先级 P0-P3（P0最高，冒烟必跑）
-        case_type   用例类型: api=HTTP接口 / chip=芯片板卡
+        case_type   用例类型: api=HTTP接口 / chip=串口/Telnet协议
         status      用例状态: active=启用 / disabled=停用
         description 用例描述与验证点说明
         source_ref  用例关联的测试脚本路径（pytest 可执行目标）；为空表示该用例不可被 pytest 执行

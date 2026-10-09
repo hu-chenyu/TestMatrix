@@ -1,4 +1,4 @@
-﻿"""
+"""
 存量用例 source_ref 回填脚本（Day47，真实执行器 Phase-1 Day3）
 
 用途:
@@ -96,7 +96,7 @@ TIER_SIMULATION = "simulation_only"
 SIMULATION_KEYWORDS = ("api", "接口", "模拟", "mock")
 
 # 模拟执行专用档的 case_type 精确取值（与 routes/cases.py 的
-# VALID_CASE_TYPES 对齐：api=HTTP接口，chip=芯片板卡。chip 是真实
+# VALID_CASE_TYPES 对齐：api=HTTP接口，chip=串口/Telnet协议。chip 是真实
 # 硬件执行，不属本档）
 SIMULATION_CASE_TYPES = ("api",)
 

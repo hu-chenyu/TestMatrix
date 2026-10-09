@@ -156,7 +156,7 @@ MAX_PAGE_SIZE = 100
 # src/web/pagination.py 从此处 import，避免两条路径的上界口径分叉。
 MAX_PAGE = 10000
 
-# 芯片板卡用例的路径特征关键词（路径命中任意词即判定为chip类型，统一小写匹配）
+# 串口/Telnet协议用例的路径特征关键词（路径命中任意词即判定为chip类型，统一小写匹配）
 CHIP_PATH_KEYWORDS = ("chip", "serial", "telnet")
 
 # 执行批次触发方式合法值
@@ -2788,13 +2788,13 @@ class CaseManager:
         按文件路径推断用例类型（内部方法）
 
         规则: **只对文件名**（统一小写、反斜杠归一为斜杠）包含
-        chip/serial/telnet 任意关键词即判定为chip（芯片板卡），
+        chip/serial/telnet 任意关键词即判定为chip（串口/Telnet协议），
         否则为api（HTTP接口）。
 
         为什么只看文件名: 原实现对**整条绝对路径**做子串匹配，而路径里
         包含操作系统账户名与所有父目录。部署机账户名一旦含关键词
         （如 telnet_lab、serial.wang），该用户上传的**所有**文件都会被
-        误判为 chip，连纯 API 用例也会被标成板卡类型——进而
+        误判为 chip，连纯 API 用例也会被标成协议类型——进而
         case_type="api" 的执行批次永远筛不到它们。
 
         参数:

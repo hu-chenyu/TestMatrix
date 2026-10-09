@@ -374,7 +374,7 @@ class TestSerialClientHardening:
         构造物理串口时必须设置 write_timeout
 
         回归点: pyserial 的 timeout 只作用于**读**，写路径默认永久阻塞。
-        板卡复位死循环/USB转串口桥固件卡死时 write() 无限挂死，且阻塞发生在
+        设备复位死循环/USB转串口桥固件卡死时 write() 无限挂死，且阻塞发生在
         with 块内 __exit__ 永不执行、串口句柄不释放。
         注: 用假 Serial 捕获构造参数（loop:// 会走 serial_for_url 分支，
         观测不到物理串口的构造参数）
@@ -431,7 +431,7 @@ class TestSerialClientHardening:
         open 不得再用 comports 前置硬拦截
 
         回归点: macOS 的 pyserial comports() 不枚举 /dev/cu.*，而
-        serial.Serial 本身能打开——修复前在 macOS 上板卡测试完全不可用。
+        serial.Serial 本身能打开——修复前在 macOS 上串口测试完全不可用。
         本用例让 comports 返回空列表，open 仍应成功走到实际打开逻辑。
         """
         monkeypatch.setattr(serial.tools.list_ports, "comports", lambda: [])
@@ -470,7 +470,7 @@ class TestCaseTypeInference:
 
         回归点: 修复前对整条绝对路径做子串匹配。部署机账户名含 chip/serial/
         telnet（如 telnet_lab）时，该用户上传的所有文件都被误判为 chip，
-        连纯 API 用例也会被标成板卡类型。
+        连纯 API 用例也会被标成协议类型。
         """
         infer = CaseManager._infer_case_type
 

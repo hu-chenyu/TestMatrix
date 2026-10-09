@@ -330,7 +330,7 @@ class TestSerialExpectNoBlindWait:
         """
         有 expect 时不再 time.sleep(wait_time)，直接进入 read_until 轮询
 
-        修复前无论板卡 10ms 还是 5s 应答，send_command 都先无条件
+        修复前无论设备 10ms 还是 5s 应答，send_command 都先无条件
         干等满 wait_time（默认0.5s），批量命令时线性放大。
         """
         slept: list[float] = []

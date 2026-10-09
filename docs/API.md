@@ -290,7 +290,7 @@ limit/offset 分页。注意集合路径末尾带斜杠。
 | page_size | int | 否 | 20 | 每页条数，1 ~ 100 |
 | module | string | 否 | 无 | 模块精确匹配，如 `用户中心` |
 | priority | string | 否 | 无 | 优先级筛选，P0/P1/P2/P3，不区分大小写 |
-| case_type | string | 否 | 无 | 用例类型，`api` 或 `chip`，非法值返回 400 |
+| case_type | string | 否 | 无 | 用例类型，`api`（HTTP 接口）或 `chip`（串口/Telnet 协议类用例的内部类型标识，当前以 loopback/socket 模拟验证），非法值返回 400 |
 | status | string | 否 | active | `active`/`disabled`/`all`，非法值返回 400 |
 | keyword | string | 否 | 无 | 模糊搜索 case_id/name/description 三字段 |
 

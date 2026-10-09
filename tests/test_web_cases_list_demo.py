@@ -42,7 +42,7 @@ def _build_case_data() -> list[tuple]:
     确定性断言）:
         - 用户中心模块 12条active（P0x3含"登录"关键字x3 / P1x5 / P2x4）
         - 订单中心模块 10条active（P0x1 / P1x3 / P2x6）
-        - 板卡通信模块 3条active（chip类型，P1x1 / P2x2）
+        - 串口通信模块 3条active（chip类型，P1x1 / P2x2）
         - 用户中心/订单中心各1条disabled
 
     参数:
@@ -77,10 +77,10 @@ def _build_case_data() -> list[tuple]:
         ("TM-OD-0008", "订单统计校验", "订单中心", "P2", "api", "active", "验证订单统计"),
         ("TM-OD-0009", "订单超时校验", "订单中心", "P2", "api", "active", "验证订单超时关闭"),
         ("TM-OD-0010", "订单评价校验", "订单中心", "P2", "api", "active", "验证订单评价"),
-        # 板卡通信模块（chip类型，3条active）
-        ("TM-CHIP-0001", "串口通信校验", "板卡通信", "P1", "chip", "active", "验证串口收发数据"),
-        ("TM-CHIP-0002", "Telnet连接校验", "板卡通信", "P2", "chip", "active", "验证Telnet连接"),
-        ("TM-CHIP-0003", "板卡重启校验", "板卡通信", "P2", "chip", "active", "验证板卡重启"),
+        # 串口通信模块（chip类型，3条active）
+        ("TM-CHIP-0001", "串口通信校验", "串口通信", "P1", "chip", "active", "验证串口收发数据"),
+        ("TM-CHIP-0002", "Telnet连接校验", "串口通信", "P2", "chip", "active", "验证Telnet连接"),
+        ("TM-CHIP-0003", "设备重启校验", "串口通信", "P2", "chip", "active", "验证设备重启"),
         # 停用用例（status=disabled，2条）
         ("TM-UC-0101", "用户批量导入校验", "用户中心", "P1", "api", "disabled", "验证批量导入用户"),
         ("TM-OD-0101", "订单批量导入校验", "订单中心", "P2", "api", "disabled", "验证批量导入订单"),
@@ -241,7 +241,7 @@ class TestCasesListApi:
     ) -> None:
         """
         类型筛选: case_type=api，只返回22条api类型用例
-        （用户中心12条 + 订单中心10条，板卡chip类型3条被排除）
+        （用户中心12条 + 订单中心10条，设备chip类型3条被排除）
         """
         response = cases_client.get("/api/cases/?case_type=api")
         data = response.get_json()

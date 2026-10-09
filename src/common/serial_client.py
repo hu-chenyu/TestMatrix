@@ -1,5 +1,5 @@
 """
-串口通信封装模块（芯片嵌入式板卡测试适配层）
+串口通信封装模块（串口协议适配层）
 
 功能:
     - 基于pyserial的串口设备统一封装，支持Windows/Linux串口设备
@@ -36,7 +36,7 @@ class SerialClientError(Exception):
     串口通信统一异常类
 
     封装串口操作中的设备级异常（打不开/超时/读写失败），
-    携带端口上下文信息，便于板卡测试问题时快速定位。
+    携带端口上下文信息，便于串口设备问题时快速定位。
     """
 
     def __init__(self, message: str, port: str | None = None):
@@ -58,12 +58,12 @@ class SerialClient:
     """
     串口通信客户端
 
-    面向芯片嵌入式板卡测试场景，封装串口的打开、
+    面向串口通信场景，封装串口的打开、
     命令下发、响应读取与关闭全生命周期。
 
     属性:
         port (str): 串口设备标识（Windows: COM3 / Linux: /dev/ttyUSB0）
-        baudrate (int): 波特率，芯片板卡常用115200
+        baudrate (int): 波特率，串口设备常用115200
         timeout (float): 单次读取超时时间（秒）
         _serial (serial.Serial | None): 底层pyserial实例
     """
@@ -141,7 +141,7 @@ class SerialClient:
 
         # 原先此处有 comports() 前置硬校验，端口不在枚举列表中直接拒绝打开。
         # 该校验在 macOS 上是错的: pyserial 的 comports() 不枚举 /dev/cu.*，
-        # 而 serial.Serial 本身能正常打开这些设备——结果是 macOS 上板卡测试
+        # 而 serial.Serial 本身能正常打开这些设备——结果是 macOS 上串口测试
         # 完全不可用（socat 虚拟端口、未在 /sys/class/tty 暴露的 chardev 同理）。
         # 改为"先尝试打开、失败时用 comports 补充提示信息"：既保留可读的错误
         # 提示，又不再误拒有效端口。
@@ -161,7 +161,7 @@ class SerialClient:
             else:
                 # 普通 COM/设备路径走物理串口
                 # write_timeout 必设: pyserial 的 timeout 只作用于**读**，
-                # 写路径默认永久阻塞。板卡进入复位死循环/USB转串口桥固件卡死/
+                # 写路径默认永久阻塞。设备进入复位死循环/USB转串口桥固件卡死/
                 # 流控未释放时，write() 会无限期挂住整条AT指令序列，
                 # 且因为阻塞发生在 with 块内部 __exit__ 永不执行、串口句柄
                 # 一直不释放——这是硬件在环测试最典型的挂死形态。
@@ -237,16 +237,16 @@ class SerialClient:
         encoding: str = "utf-8",
     ) -> str:
         """
-        向板卡发送命令并读取响应
+        向设备发送命令并读取响应
 
         参数:
             command (str): 待发送的命令字符串（调用方自行携带\r\n等终止符）
             expect (str | None): 期望响应中出现的特征字符串；None时读取wait_time时长内的全部输出
-            wait_time (float): 发送后等待板卡响应的稳定时间（秒），默认0.5
+            wait_time (float): 发送后等待设备响应的稳定时间（秒），默认0.5
             encoding (str): 编码格式，默认utf-8
 
         返回:
-            str: 板卡响应的解码文本（去除首尾空白）
+            str: 设备响应的解码文本（去除首尾空白）
 
         异常:
             SerialClientError: 串口未打开、写入失败或读取超时时抛出
@@ -271,7 +271,7 @@ class SerialClient:
         if expect is not None:
             # 有特征串时不再盲等: read_until 内部已按 0.05s 节拍轮询到
             # 特征出现或超时，send_command 先无条件 sleep(wait_time)
-            # 等于让每条 expect 命令恒定多付一次空等（板卡 10ms 应答
+            # 等于让每条 expect 命令恒定多付一次空等（设备 10ms 应答
             # 也要干等满 wait_time），批量命令时线性放大
             return self.read_until(expect=expect, encoding=encoding)
         # 无特征串时 wait_time 的语义是"收割这段窗口内的全部输出"，
@@ -422,7 +422,7 @@ class SerialClient:
     @staticmethod
     def list_available_ports() -> list:
         """
-        列出当前系统全部可用串口设备（板卡接入排查工具）
+        列出当前系统全部可用串口设备（串口设备接入排查工具）
 
         参数:
             无

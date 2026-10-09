@@ -310,7 +310,7 @@ class TestSerialClientMockedPaths:
         E：comports 枚举为空时 open 物理端口，抛带设备列表提示的 SerialClientError。
 
         注: Day43 起不再做 comports 前置硬拦截（macOS 不枚举 /dev/cu.*，
-        硬拦截会让板卡测试在该平台完全不可用），改为"先尝试打开、失败时
+        硬拦截会让串口测试在该平台完全不可用），改为"先尝试打开、失败时
         用 comports 补充提示"。断言口径随之从"设备不存在"改为
         "打开失败且附可用设备列表"。
         """

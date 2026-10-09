@@ -1,12 +1,12 @@
 """
-Telnet网口通信封装模块（芯片板卡远程控制适配层）
+Telnet网口通信封装模块（远程控制适配层）
 
 功能:
-    - 基于telnetlib的远程设备控制封装（板卡Linux系统常用登录方式）
+    - 基于telnetlib的远程设备控制封装（远程Linux系统常用登录方式）
     - 支持连接、账号登录、命令执行、期望特征等待全流程
     - 上下文管理器协议支持（with语句自动连接与断开）
     - 完整异常处理: 连接失败、认证失败、执行超时均有明确异常与日志
-    - 预留扩展位: 批量命令脚本执行、多板卡并行控制（第二阶段按需实现）
+    - 预留扩展位: 批量命令脚本执行、多设备并行控制（第二阶段按需实现）
 
 兼容性说明:
     telnetlib为Python标准库，自3.11起标记Deprecated（3.13移除，
@@ -45,7 +45,7 @@ class TelnetClientError(Exception):
     Telnet通信统一异常类
 
     封装远程连接、登录认证、命令执行中的异常，
-    携带目标设备信息，便于板卡测试问题时快速定位。
+    携带目标设备信息，便于串口设备问题时快速定位。
     """
 
     def __init__(self, message: str, host: str | None = None):
@@ -67,11 +67,11 @@ class TelnetClient:
     """
     Telnet远程控制客户端
 
-    面向芯片板卡远程控制场景（板卡跑Linux系统的网口登录），
+    面向串口/Telnet协议远程控制场景（设备跑Linux系统的网口登录），
     封装连接、登录、命令执行与断开全生命周期。
 
     属性:
-        host (str): 目标板卡IP地址
+        host (str): 目标设备IP地址
         port (int): Telnet服务端口，标准端口23
         timeout (float): 连接与读取超时时间（秒）
         _conn (telnetlib.Telnet | None): 底层Telnet连接实例
@@ -82,7 +82,7 @@ class TelnetClient:
         初始化Telnet客户端（仅保存配置，不立即连接）
 
         参数:
-            host (str): 目标板卡IP地址，如192.168.1.100
+            host (str): 目标设备IP地址，如192.168.1.100
             port (int): Telnet端口，默认23
             timeout (float): 连接与读取超时时间（秒），默认10.0
 
@@ -160,7 +160,7 @@ class TelnetClient:
         login_timeout: float | None = None,
     ) -> bool:
         """
-        登录板卡系统（自动识别Login/Password提示）
+        登录远程系统（自动识别Login/Password提示）
 
         参数:
             username (str): 登录用户名
@@ -257,7 +257,7 @@ class TelnetClient:
         timeout: float | None = None,
     ) -> str:
         """
-        在板卡远程Shell中执行命令并获取输出
+        在远程 Shell 中执行命令并获取输出
 
         参数:
             command (str): 待执行的Shell命令

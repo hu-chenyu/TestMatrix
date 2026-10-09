@@ -370,7 +370,7 @@ def list_cases():
 
     case_type = _parse_optional_str("case_type")
     if case_type is not None and case_type not in VALID_CASE_TYPES:
-        raise ValidationError("case_type只能为api或chip")
+        raise ValidationError("case_type只能为 api(HTTP接口) 或 chip(串口/Telnet协议)")
 
     status = _parse_optional_str("status") or "active"
     if status not in VALID_CASE_STATUSES:

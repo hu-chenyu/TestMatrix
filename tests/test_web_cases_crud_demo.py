@@ -46,7 +46,7 @@ def _build_case_data() -> list[tuple]:
         - TM-CRUD-0001 用户中心P1（详情/更新目标）
         - TM-CRUD-0002 用户中心P2（更新成功目标）
         - TM-CRUD-0003 订单中心P0（删除成功目标）
-        - TM-CRUD-0004 板卡通信P2 chip类型disabled（多元数据覆盖）
+        - TM-CRUD-0004 串口通信P2 chip类型disabled（多元数据覆盖）
 
     参数:
         无
@@ -59,7 +59,7 @@ def _build_case_data() -> list[tuple]:
         ("TM-CRUD-0001", "用例查询校验", "用户中心", "P1", "api", "active", "验证查询接口"),
         ("TM-CRUD-0002", "用例创建校验", "用户中心", "P2", "api", "active", "验证创建接口"),
         ("TM-CRUD-0003", "用例删除校验", "订单中心", "P0", "api", "active", "验证删除接口"),
-        ("TM-CRUD-0004", "串口通信校验", "板卡通信", "P2", "chip", "disabled", "验证串口收发"),
+        ("TM-CRUD-0004", "串口通信校验", "串口通信", "P2", "chip", "disabled", "验证串口收发"),
     ]
 
 

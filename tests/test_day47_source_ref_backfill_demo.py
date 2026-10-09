@@ -1,4 +1,4 @@
-﻿"""
+"""
 source_ref 改造 Day2 测试（Day47：存量回填 + 录入侧三侧放开 + build_command 改造）
 
 测试范围（30 条）:
@@ -336,7 +336,7 @@ class TestBackfillClassification:
         assert classify_case(
             {
                 "case_id": "TM-B-0001",
-                "name": "板卡上电自检",
+                "name": "设备上电自检",
                 "module": "硬件",
                 "case_type": "chip",
                 "description": "上电后读取寄存器",
