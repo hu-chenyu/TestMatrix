@@ -167,6 +167,49 @@ class TestPytestRunnerCommand:
 
 
 @allure.feature("Day43收尾")
+class FakePopen:
+    """
+    subprocess.Popen 的可控替身（Day49 起 PytestRunner 改用 Popen）
+
+    Day49 之前本文件 patch 的是 `subprocess.run`，返回 CompletedProcess；
+    执行器改为自持 Popen 句柄（为了拿到 pid 做进程树清理）之后，
+    patch 点必须跟着换成 Popen，断言语义保持不变。
+
+    只提供 run_one 真正读取的属性（pid/returncode/communicate/poll/wait），
+    不臆造其余字段。
+    """
+
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        """
+        构造替身
+
+        参数:
+            returncode (int): 子进程退出码
+            stdout (str): communicate 返回的 stdout
+            stderr (str): communicate 返回的 stderr
+        """
+        # pid 给 0：清理逻辑对非真实 pid 会走"跳过"守卫，不会误杀本机进程
+        self.pid = 0
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        """返回预置的 stdout/stderr"""
+        return self._stdout, self._stderr
+
+    def poll(self) -> int | None:
+        """进程已收场，返回退出码"""
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        """进程已收场，直接返回退出码"""
+        return self.returncode
+
+    def kill(self) -> None:
+        """补杀动作（本替身无需真实副作用）"""
+
+
 class TestPytestRunnerSubprocess:
     """run_one：编码策略与尾部截断落库（D5）"""
 
@@ -196,15 +239,15 @@ class TestPytestRunnerSubprocess:
         """
         return {"case_id": "TM-X-1", "source_ref": "tests/test_x.py"}
 
-    @allure.story("subprocess.run 显式指定 encoding 与 errors")
+    @allure.story("子进程创建显式指定 encoding 与 errors")
     def test_subprocess_uses_utf8_replace(self):
         captured = {}
 
-        def _fake_run(cmd, **kwargs):
+        def _fake_popen(cmd, **kwargs):
             captured.update(kwargs)
-            return self._completed(0)
+            return FakePopen(0)
 
-        with patch.object(executors_mod.subprocess, "run", _fake_run):
+        with patch.object(executors_mod.subprocess, "Popen", _fake_popen):
             PytestRunner().run_one(self._case())
 
         assert captured.get("encoding") == SUBPROCESS_ENCODING == "utf-8"
@@ -219,8 +262,8 @@ class TestPytestRunnerSubprocess:
 
         with patch.object(
             executors_mod.subprocess,
-            "run",
-            return_value=self._completed(1, stdout=stdout),
+            "Popen",
+            return_value=FakePopen(1, stdout=stdout),
         ):
             result = PytestRunner().run_one(self._case())
 
@@ -236,8 +279,8 @@ class TestPytestRunnerSubprocess:
 
         with patch.object(
             executors_mod.subprocess,
-            "run",
-            return_value=self._completed(2, stderr=stderr),
+            "Popen",
+            return_value=FakePopen(2, stderr=stderr),
         ):
             result = PytestRunner().run_one(self._case())
 
@@ -249,17 +292,17 @@ class TestPytestRunnerSubprocess:
     def test_exit_code_mapping_unchanged(self):
         runner = PytestRunner()
         with patch.object(
-            executors_mod.subprocess, "run", return_value=self._completed(0)
+            executors_mod.subprocess, "Popen", return_value=FakePopen(0)
         ):
             assert runner.run_one(self._case()).result == "passed"
         with patch.object(
-            executors_mod.subprocess, "run", return_value=self._completed(1, stdout="x")
+            executors_mod.subprocess, "Popen", return_value=FakePopen(1, stdout="x")
         ):
             assert runner.run_one(self._case()).result == "failed"
         with patch.object(
             executors_mod.subprocess,
-            "run",
-            return_value=self._completed(2, stderr="usage error"),
+            "Popen",
+            return_value=FakePopen(2, stderr="usage error"),
         ):
             got = runner.run_one(self._case())
             assert got.result == "error"
@@ -283,14 +326,14 @@ class TestPytestRunnerSubprocess:
         def _oserror(cmd, **kwargs):
             raise OSError(2, "No such file or directory")
 
-        with patch.object(executors_mod.subprocess, "run", _timeout):
+        with patch.object(executors_mod.subprocess, "Popen", _timeout):
             result = runner.run_one(self._case())
         assert result.result == "error"
         assert "执行超时" in (result.error_message or ""), (
             "必须是超时分支而非其它 error 来源"
         )
 
-        with patch.object(executors_mod.subprocess, "run", _oserror):
+        with patch.object(executors_mod.subprocess, "Popen", _oserror):
             result = runner.run_one(self._case())
         assert result.result == "error"
         assert "启动失败" in (result.error_message or ""), (

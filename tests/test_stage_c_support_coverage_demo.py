@@ -399,7 +399,7 @@ class TestExecutorCoverage:
             command_holder.append(cmd)
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=PYTEST_TIMEOUT_SECONDS)
 
-        monkeypatch.setattr(executors_mod.subprocess, "run", _raise_timeout)
+        monkeypatch.setattr(executors_mod.subprocess, "Popen", _raise_timeout)
         runner = PytestRunner()
         case = {"case_id": "TM-UC-0001", "source_ref": "test_demo.py"}
 
@@ -411,7 +411,7 @@ class TestExecutorCoverage:
             "超时消息应含被执行的脚本路径"
         )
         assert result.duration >= 0
-        assert command_holder, "应真正走到 subprocess.run"
+        assert command_holder, "应真正走到子进程创建（Popen）"
 
     def test_subprocess_launch_failure_maps_to_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -429,7 +429,7 @@ class TestExecutorCoverage:
             """模拟解释器不存在"""
             raise OSError(2, "No such file or directory: 'py'")
 
-        monkeypatch.setattr(executors_mod.subprocess, "run", _raise_os_error)
+        monkeypatch.setattr(executors_mod.subprocess, "Popen", _raise_os_error)
         runner = PytestRunner()
 
         result = runner.run_one(

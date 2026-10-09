@@ -23,10 +23,12 @@
 """
 
 import os
+import signal
 import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,6 +59,116 @@ OUTPUT_TRUNCATE_LENGTH = 2000
 SUBPROCESS_ENCODING = "utf-8"
 SUBPROCESS_ERRORS = "replace"
 
+# ---------------------------------------------------------------------------
+# pytest 标准退出码（Day49）
+# ---------------------------------------------------------------------------
+# 取自 pytest 官方 "Exit codes" 约定，是解释器与测试运行工具之间的稳定契约：
+#   0 OK            全部通过
+#   1 Tests failed  收集成功但存在失败用例
+#   2 Interrupted  收集/执行阶段被中断（Ctrl-C、conftest 抛 KeyboardInterrupt）
+#   3 Internal error pytest 自身缺陷或插件抛了未捕获异常
+#   4 Usage error   命令行/环境用法错误（如路径不存在、选项非法）
+#   5 No tests collected 选择器过滤后一条都没收集到
+EXIT_CODE_PASSED = 0
+EXIT_CODE_TESTS_FAILED = 1
+EXIT_CODE_INTERRUPTED = 2
+EXIT_CODE_INTERNAL_ERROR = 3
+EXIT_CODE_USAGE_ERROR = 4
+EXIT_CODE_NO_TESTS_COLLECTED = 5
+
+# ---------------------------------------------------------------------------
+# 退出码细分分类（ExecutionResult.exit_reason 的取值，单一事实来源）
+# ---------------------------------------------------------------------------
+# 为什么细分分类单独占一个字段、而不直接做成 ExecutionResult.result 的取值
+# （Day49 决策，见 PROJECT_CONTEXT 6.x）:
+#     编排层 case_manager.record_execution 只认 VALID_RESULTS 四值
+#     （passed/failed/error/skipped），落库前逐条校验，不在集合内直接抛
+#     CaseManagerError；而该异常被 _execute_batch_async 的批次级 except 吞掉
+#     → **单条用例的退出码问题会把整批判 failed**，恰好违反本项目最核心的
+#     编排契约。且 _aggregate_execution_results 只按四个值分桶，未知取值
+#     既不进任何桶、又被算进 total，pass_rate 静默失真。
+#   故 result 保持下游四值词表，细分语义由 exit_code（原始退出码）+ exit_reason
+#   （细分分类）承载，两字段均带默认值、不改数据库 schema、不动 case_manager。
+EXIT_REASON_PASSED = "passed"
+EXIT_REASON_TESTS_FAILED = "tests_failed"
+EXIT_REASON_INTERRUPTED = "interrupted"
+EXIT_REASON_INTERNAL_ERROR = "internal_error"
+EXIT_REASON_USAGE_ERROR = "usage_error"
+EXIT_REASON_NO_TESTS_COLLECTED = "no_tests_collected"
+EXIT_REASON_UNKNOWN_EXIT_CODE = "unknown_exit_code"
+# 以下四类不对应任何退出码：进程根本没正常跑完，用退出码无从表达
+EXIT_REASON_TIMEOUT = "timeout"
+EXIT_REASON_SPAWN_FAILED = "spawn_failed"
+EXIT_REASON_INVALID_ARGUMENTS = "invalid_arguments"
+EXIT_REASON_INVALID_CASE = "invalid_case"
+
+# 退出码 → 细分分类。未收录的退出码回落为 unknown_exit_code
+EXIT_CODE_REASON_MAP: dict[int, str] = {
+    EXIT_CODE_PASSED: EXIT_REASON_PASSED,
+    EXIT_CODE_TESTS_FAILED: EXIT_REASON_TESTS_FAILED,
+    EXIT_CODE_INTERRUPTED: EXIT_REASON_INTERRUPTED,
+    EXIT_CODE_INTERNAL_ERROR: EXIT_REASON_INTERNAL_ERROR,
+    EXIT_CODE_USAGE_ERROR: EXIT_REASON_USAGE_ERROR,
+    EXIT_CODE_NO_TESTS_COLLECTED: EXIT_REASON_NO_TESTS_COLLECTED,
+}
+
+# 退出码 → 下游四值词表。只有 0/1 是"跑完了且有业务结论"，其余都是"这次执行
+# 本身没跑成/没测到东西"，一律 error——与 Day48 的既有语义一致，不改口径。
+EXIT_CODE_RESULT_MAP: dict[int, str] = {
+    EXIT_CODE_PASSED: "passed",
+    EXIT_CODE_TESTS_FAILED: "failed",
+    EXIT_CODE_INTERRUPTED: "error",
+    EXIT_CODE_INTERNAL_ERROR: "error",
+    EXIT_CODE_USAGE_ERROR: "error",
+    EXIT_CODE_NO_TESTS_COLLECTED: "error",
+}
+
+# 各退出码对应的中文处置建议，出现在 error_message 前缀里，让运维一眼看出
+# 该改数据、改选择器还是改环境（Day49 任务要求"更新 docstring 说明各退出码
+# 含义与处置建议"，落到消息里比只写在 docstring 更难被漏看）
+EXIT_CODE_ADVICE_MAP: dict[int, str] = {
+    EXIT_CODE_INTERRUPTED: "执行被中断（多为 Ctrl-C 或 conftest/conftest 插件抛 KeyboardInterrupt）",
+    EXIT_CODE_INTERNAL_ERROR: "pytest 自身内部错误（插件缺陷或未捕获异常），需看 traceback 定位",
+    EXIT_CODE_USAGE_ERROR: "命令行用法错误（路径不存在/选项非法），核对 source_ref 与 -m/-k 参数",
+    EXIT_CODE_NO_TESTS_COLLECTED: "选择器过滤后未收集到任何用例，核对 -m/-k 与执行目标路径",
+}
+
+# ---------------------------------------------------------------------------
+# 进程树清理（Day49）
+# ---------------------------------------------------------------------------
+# taskkill / killpg 之后等待直接子进程真正退出的宽限期（秒）。
+# 树清理是强杀（/F、SIGKILL），进程通常毫秒级退出；留 5 秒仅兜住系统繁忙场景。
+PROCESS_TREE_KILL_GRACE_SECONDS = 5.0
+
+# POSIX 侧先发 SIGTERM 温和终止、再轮询等待的时长（秒）。给被测代码一次
+# 自己收尾（释放端口、写临时文件）的机会，避免一律强杀造成数据损坏假象。
+PROCESS_TREE_TERM_GRACE_SECONDS = 2.0
+
+# taskkill 自身也可能挂起（系统繁忙/权限），给它独立的短预算
+TASKKILL_TIMEOUT_SECONDS = 10.0
+
+# POSIX 轮询间隔（秒）。仅用于"等进程退出"的轮询循环，不是赌时序的固定等待
+PROCESS_TREE_POLL_INTERVAL_SECONDS = 0.05
+
+# POSIX 进程组强杀原语（os.killpg）在 Windows 上**不存在**，直接写
+# `os.killpg(...)` 会让 mypy 在 Windows 主机上报 attr-defined 错误。
+# 故在模块导入期解析一次：存在则绑定、不存在置 None（由调用方按"非 POSIX
+# 平台"优雅降级）。单测用 monkeypatch 替换本模块级名字即可注入替身，
+# 使这段 POSIX 逻辑在 Windows 开发机上也能被真实执行与覆盖。
+_POSIX_KILLPG: Callable[[int, int], None] | None = getattr(os, "killpg", None)
+
+# SIGKILL 同理只在 POSIX 存在；Windows 上退回 SIGTERM（仅用于兜底返回，
+# 真正执行强杀的路径不会在 Windows 上走到）
+_SIGKILL: int = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+# ---------------------------------------------------------------------------
+# pytest 选择器透传（Day49 任务二）
+# ---------------------------------------------------------------------------
+# 用例 dict 中承载选择器的可选字段名（缺省即"不加入命令行"）
+CASE_FIELD_MARKERS = "markers"
+CASE_FIELD_KEYWORD = "keyword"
+CASE_FIELD_PATH = "path"
+
 
 def truncate_output_tail(text: str, limit: int = OUTPUT_TRUNCATE_LENGTH) -> str:
     """
@@ -82,6 +194,95 @@ def truncate_output_tail(text: str, limit: int = OUTPUT_TRUNCATE_LENGTH) -> str:
     return f"...[输出过长，已保留末尾 {limit} 字符]...\n{text[-limit:]}"
 
 
+def validate_target_path(raw: object, context: str) -> str:
+    """
+    校验 pytest 位置参数（Day49 任务二的 path 字段）
+
+    与 `src/common/source_ref.py` 的 `validate_source_ref` 分工:
+        - source_ref 恒为**单个 .py 文件**（可带 ::节点选择），故其正则强制 .py 后缀
+        - path 允许是**目录**（`tests/api_demo/`）或文件（`tests/a.py::test_x`），
+          故另立一份校验，而不是硬套 source_ref 的正则——套了会把合法的
+          目录选择判成非法。
+
+    为什么执行侧还要再拒一次（纵深防御，理由同 Day47-fix P3-3）:
+        该值会被**原样拼进 pytest 子进程命令**，而库里的数据不只经 Web/YAML
+        录入侧写入，回填脚本、人工改库、未来迁移都可能塞进非法值。
+          - `../secret/` 放行 = 执行目标越出项目根
+          - 含空格/元字符的值进入命令行 = 事实上的参数注入
+          - 以 `-` 开头 = 被 pytest 当成下一个选项而非位置参数
+
+    参数:
+        raw (object): 待校验的原始值（用例 dict 取出的未加工对象）
+        context (str): 报错上下文前缀（通常是"用例 XXX: "），便于定位是哪条
+
+    返回:
+        str: 校验通过的路径字符串（已 strip）
+
+    异常:
+        ValueError: 非 str / 空串 / 含盘符、反斜杠、`..`、NUL / 以 `-` 开头
+    """
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"{context}pytest 执行目标必须是 str，实际类型: {type(raw).__name__}"
+        )
+    value = raw.strip()
+    if not value:
+        raise ValueError(
+            f"{context}pytest 执行目标不能为空串（既不传 path 也不传 source_ref 时"
+            f"该用例不可被 pytest 执行）"
+        )
+    if "\x00" in value:
+        raise ValueError(f"{context}pytest 执行目标不能包含 NUL 字符: {value!r}")
+    if "\\" in value:
+        raise ValueError(
+            f"{context}pytest 执行目标不能包含反斜杠（请用 / 分隔）: {value!r}"
+        )
+    if value.startswith("-"):
+        raise ValueError(
+            f"{context}pytest 执行目标不能以 '-' 开头（会被 pytest 当成选项而非路径）: {value!r}"
+        )
+    # 盘符形态（C:foo）与绝对路径（/foo）判据：冒号只在 :: 节点选择处合法
+    head = value.split("::", 1)[0]
+    if ":" in head or head.startswith("/"):
+        raise ValueError(
+            f"{context}pytest 执行目标必须是相对项目根的路径（禁绝对路径/盘符）: {value!r}"
+        )
+    if ".." in head.split("/"):
+        raise ValueError(
+            f"{context}pytest 执行目标不能包含 '..'（执行目标不得越出项目根）: {value!r}"
+        )
+    return value
+
+
+def decode_subprocess_stream(raw: object) -> str:
+    """
+    把子进程输出流统一解码为 str（Day49）
+
+    为什么需要它（不是"想当然"）:
+        `subprocess.TimeoutExpired` 在**两个平台携带的类型并不一致**——
+        POSIX 分支的 `_communicate` 是把已累积的 **bytes** 片段拼进去的，
+        即使调用方传了 text=True，异常上的 stdout/stderr 仍是 bytes；
+        而 Windows 分支 `subprocess.run` 额外调了一次 communicate()，
+        拿到的是已翻译过换行的 **str**。同一个字段按平台返回两种类型，
+        直接 `.strip()` 会在 Linux 上抛 AttributeError，而这段代码正好在
+        超时路径上跑——报错会把"超时"这一真实原因彻底掩盖。
+
+    参数:
+        raw (object): 异常或结果对象上的流值（bytes / str / None 皆可）
+
+    返回:
+        str: 解码后的文本；None 与非文本类型一律返回空串
+
+    异常:
+        无
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw).decode(SUBPROCESS_ENCODING, errors=SUBPROCESS_ERRORS)
+    return str(raw)
+
+
 @dataclass
 class ExecutionResult:
     """
@@ -89,16 +290,36 @@ class ExecutionResult:
 
     执行器run_one的统一返回契约，编排层据此写test_executions明细。
 
+    Day49 新增三个字段（**均带默认值，故对既有构造方式完全向后兼容**）:
+        - 不改数据库 schema：编排层 case_manager 只按名取 result/duration/
+          error_message 三个字段落库，没有 asdict/字段集断言，新增字段不会
+          改变任何下游行为（Day48 当初"不新增字段"是为了避免动 schema，
+          而 dataclass 追加带默认值字段并不触及 schema）
+        - exit_code / exit_reason 承载 Day49 的退出码细化语义（口径见文件头
+          EXIT_CODE_* 常量区）；result 仍取下游 VALID_RESULTS 四值
+
     属性:
-        result (str): 执行结果，可选passed/failed/error/skipped
+        result (str): 执行结果，取值限定 passed/failed/error/skipped
+                      （编排层 VALID_RESULTS 词表，越界会在落库校验处抛错并
+                      把整批判 failed，故此处绝不使用词表外取值）
         error_message (str | None): 失败/错误时的异常信息
                                     （passed时为None）
         duration (float): 执行耗时（秒，浮点，支持亚秒精度）
+        exit_code (int | None): 子进程原始退出码；进程未正常收场
+                                （超时被杀/启动失败/参数非法）时为 None
+        exit_reason (str): 细分分类，取值见 EXIT_REASON_* 常量，
+                           区分"断言不通过"与"这次执行没跑成/没测到"
+        output (str): 子进程输出（已截断）。超时场景保留 kill 前已捕获的
+                      部分输出——超时恰恰最需要现场，而空输出会让排障
+                      只能靠复现
     """
 
     result: str
     error_message: str | None = None
     duration: float = 0.0
+    exit_code: int | None = None
+    exit_reason: str = ""
+    output: str = ""
 
 
 class BaseExecutor(ABC):
@@ -201,10 +422,30 @@ class PytestRunner(BaseExecutor):
         - env:     叠加到当前进程环境变量之上的额外环境变量
           （如 PYTEST_ADDOPTS、PYTHONPATH），用于按批次注入执行环境。
 
-    退出码映射（pytest约定）:
-        0 → passed（全部通过）
-        1 → failed（存在失败用例）
-        其他（2/5等） → error（用法错误/内部错误/中断）
+    退出码映射（Day49 细化）:
+        result      取下游 VALID_RESULTS 四值（passed/failed/error/skipped）
+        exit_code   原始退出码
+        exit_reason 细分分类
+
+        退出码 → result / exit_reason:
+            0 → passed / passed              全部通过
+            1 → failed / tests_failed        收集成功但有用例失败
+            2 → error   / interrupted        执行被中断
+            3 → error   / internal_error     pytest 自身内部错误
+            4 → error   / usage_error        命令行/环境用法错误
+            5 → error   / no_tests_collected 选择器过滤后未收集到用例
+            其它 → error   / unknown_exit_code
+
+        进程根本没正常收场时 exit_code 为 None，另有一组 exit_reason：
+            timeout / spawn_failed / invalid_arguments / invalid_case
+
+    进程树清理（Day49）:
+        超时不再只杀直接子进程。pytest 自己会 spawn xdist worker、被测代码
+        还会再开子进程，`subprocess.run` 内部的 process.kill() 只杀得到
+        直接子进程，其余变孤儿继续占端口与内存——Day48 的"只杀不洁"。
+        故本类改用 Popen 自行持有句柄（拿得到 pid，这是 run 拿不到的），
+        超时后按平台清理整棵进程树：Windows 走 `taskkill /T /F`，
+        POSIX 让子进程自成一个进程组后 `killpg`。
     """
 
     def __init__(
@@ -381,32 +622,167 @@ class PytestRunner(BaseExecutor):
 
     def build_command(self, case: dict) -> list:
         """
-        拼装单用例的pytest执行命令（Day48 收口：只读 source_ref）
+        拼装单用例的pytest执行命令（Day49 增加选择器透传）
 
-        source_ref 为空即抛 ValueError，**不回落到 case_id，也不回落到
-        script_path**（Day47 的过渡兼容分支已随回填收口移除）。
+        位置参数（执行目标）取值优先级（Day49 决策）:
+            1. `path`       —— 本日新增，支持目录或文件（任务二）
+            2. `source_ref` —— Day48 确立的唯一执行目标，缺省即不可执行
+            3. 两者都无 → 抛 ValueError
+
+        为什么不给 path 缺省配一个“默认测试目录”（与任务书步骤2的偏差）:
+            那等于把 Day48 刚移除的“回落”缺陷又请回来——source_ref 为空
+            时静默跑整个 tests/ 目录，库里每条没回填 source_ref 的用例都会
+            去跑**全量**测试集，结果还按 passed/failed 正常入库，运维看到
+            的是“这条用例通过了”，真实原因（该用例根本没绑定执行目标）被
+            彻底掩盖。Day48 的既定契约是“空即不可执行”，本日不推翻。
+
+        选择器字段（均可选，缺省不加入命令行）:
+            `markers` -> -m、`keyword` -> -k
+
+        参数顺序（**不能照字面把 path 放到选项前面**）:
+            任务书写的是 `pytest [path] [-m markers] [-k keyword]`，本方法
+            必须输出 `pytest [-m ...] [-k ...] -- path`。见函数体末尾注释中
+            Day44 P1-01 的回归点：`--` 之后 pytest 停止解析选项，其后元素
+            一律作位置参数，path 放在 `--` 之前会被当成上一个选项的参数值。
+
+        参数:
+            case (dict): 待执行用例字典
+                         （source_ref/path/markers/keyword 均为可选键）
+
+        返回:
+            list[str]: 命令参数列表，形如
+                [sys.executable, "-m", "pytest", "-q", "--tb=short",
+                 "-m", "smoke", "--", path]
+                （无任何选择器时与 Day48 完全一致：
+                 [sys.executable, "-m", "pytest", "-q", "--tb=short", "--", path]）
+
+        异常:
+            ValueError: 执行目标缺失/非法/不存在，或选择器字段非法
+                        （消息均说明该补什么/改什么）
+        """
+        case_id = str(case.get("case_id", ""))
+        source_ref = case.get("source_ref")
+        raw_path = case.get(CASE_FIELD_PATH)
+
+        # 执行目标优先级：path（Day49 新增，可为目录） > source_ref（Day48 唯一目标）
+        if raw_path is not None:
+            path = validate_target_path(raw_path, f"用例 {case_id}: ")
+            # 存在性校验只针对 path、不针对 source_ref，理由:
+            #   source_ref 是回填脚本批量产出的历史数据，逐条 stat 会让一次
+            #   批量执行多出 N 次文件系统查询；且回填失败的用例本就该由
+            #   pytest 自己报 4 号退出码，拦在我们这边并不增加信息量。
+            #   path 是本日新增的、调用方当场传的参数，拦下来能给出明确
+            #   错误，而不是让 pytest 抛一句晦涩的 file or directory not found。
+            # 节点选择后缀（::test_func）不属于文件系统路径，存在性校验必须
+            # 只看 :: 之前的那一段——否则 pytest 合法的节点写法会被我们
+            # 误判成"路径不存在"，把选择器能力自己堵死
+            fs_path = path.split("::", 1)[0]
+            resolved = self.cwd / fs_path
+            if not resolved.exists():
+                raise ValueError(
+                    f"用例 {case_id} 的 path {path!r} 在子进程工作目录下不存在: "
+                    f"{resolved}（请核对用例配置的路径与执行器 cwd）"
+                )
+        else:
+            path = self._resolve_source_ref(case_id, source_ref)
+
+        markers = self._validate_selector(
+            case.get(CASE_FIELD_MARKERS), CASE_FIELD_MARKERS, case_id
+        )
+        keyword = self._validate_selector(
+            case.get(CASE_FIELD_KEYWORD), CASE_FIELD_KEYWORD, case_id
+        )
+
+        # sys.executable 指向当前解释器（虚拟环境下即 venv 的 python，
+        # 保证用项目依赖跑 pytest），跨 Windows/Linux/macOS 通用；
+        # 修前硬编码的 "py" 是 Windows 专属启动器，非 Windows 平台
+        # 每条用例都会 OSError 降级为 error。
+        command = [sys.executable, "-m", "pytest", "-q", "--tb=short"]
+        # 选择器必须在 "--" 之前：其后 pytest 一律当位置参数
+        if markers is not None:
+            command += ["-m", markers]
+        if keyword is not None:
+            command += ["-k", keyword]
+        command += ["--", path]
+
+        # 选项终止符 "--" 的位置（Day44 P1-01）：
+        #   "--" 之后 pytest 的 argparse 停止解析选项，其后**全部**元素
+        #   一律作为位置参数（测试文件路径）。因此它必须放在**所有选项之后、
+        #   紧邻 path 之前**：
+        #       [.., "pytest", "-q", "--tb=short", "--", path]   ← 正确
+        #       [.., "pytest", "--", path, "-q", "--tb=short"]   ← 错误
+        #   错误写法会让 "-q" 与 "--tb=short" 同样被当成路径，pytest 报
+        #   "file or directory not found: -q" 并以退出码 4 收场，每条用例
+        #   都落入 error 分支——真实执行链路功能性不可用。
+        #   保持 "--" 的目的不变：阻断路径形如 "--version" 时被 pytest
+        #   当选项执行、退出码 0 被误判为 passed 的假通过。
+        #   Day49 的 -m / -k 同理必须排在 "--" 之前，理由完全一致。
+        return command
+
+    def _validate_selector(self, raw: object, field: str, case_id: str) -> str | None:
+        """
+        校验选择器字段（markers / keyword）并归一化（Day49 任务二）
+
+        为什么"subprocess 用 list 形式"不等于可以不校验:
+            list 形式确实天然免疫 shell 注入（不经 shell、无需转义），但
+            **pytest 自己**仍在做选项解析——`-m` 的值若以 `-` 开头，pytest
+            会把它当成缺失参数后的下一个选项去解析，而不是标记表达式。
+            这类"值变成了选项"的错位，报错出现在 pytest 内部、极难定位。
+
+        参数:
+            raw (object): 用例 dict 中的原始值（未加工，可能是任何类型）
+            field (str): 字段名（markers / keyword），用于报错消息
+            case_id (str): 用例编号，用于定位是哪条用例
+
+        返回:
+            str | None: 校验通过的字符串；字段缺省或为 None 时返回 None
+                         （表示"该字段未配置，不加入命令行"）
+
+        异常:
+            ValueError: 非 str / 空串或纯空白 / 含 NUL / 以 "-" 开头
+        """
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            raise ValueError(
+                f"用例 {case_id} 的 {field} 必须是 str，实际类型: {type(raw).__name__}"
+            )
+        value = raw.strip()
+        if not value:
+            raise ValueError(
+                f"用例 {case_id} 的 {field} 不能为空串"
+                f"（不传该字段即可关闭过滤，传空串不是'不过滤'）"
+            )
+        if "\x00" in value:
+            raise ValueError(f"用例 {case_id} 的 {field} 不能包含 NUL 字符")
+        if value.startswith("-"):
+            raise ValueError(
+                f"用例 {case_id} 的 {field} 不能以 '-' 开头"
+                f"（会被 pytest 当成选项而非表达式）: {value!r}"
+            )
+        return value
+
+    @staticmethod
+    def _resolve_source_ref(case_id: str, source_ref: object) -> str:
+        """
+        取并校验 source_ref 执行目标（Day48 契约，Day49 原样保留）
+
+        参数:
+            case_id (str): 用例编号（仅用于报错定位）
+            source_ref (object): 用例 dict 中的 source_ref 原始值
+
+        返回:
+            str: 校验通过的执行目标路径
+
+        异常:
+            ValueError: source_ref 为空，或格式非法/超长/含 ".."
 
         为什么 source_ref 为空必须报错而不是找个值顶上: 空值语义
         "不可被 pytest 执行"是该列存在的理由，回落到 case_id 会把这条
         语义抹平——pytest 拿业务编号当路径，报 file or directory not
         found 并以退出码 4 收场，每条用例落入 error 分支，排障时看到
-        的却是"路径错了"而非"该用例本就不该走 pytest"。
-
-        参数:
-            case (dict): 待执行用例字典（source_ref 为可选键）
-
-        返回:
-            list[str]: 命令参数列表，形如
-                [sys.executable, "-m", "pytest", "-q", "--tb=short", "--", path]
-
-        异常:
-            ValueError: 以下两种情况抛出，消息均说明该补什么/改什么
-                - source_ref 为空（None / 空串 / 纯空格）
-                - source_ref 非空但格式非法 / 超长 / 含 ".."
-                  （执行侧纵深防御，详见函数体注释）
+        却是"路径错了"而非"该用例本就不该走 pytest"。
         """
-        case_id = str(case.get("case_id", ""))
-        source_ref = case.get("source_ref")
         path = source_ref.strip() if isinstance(source_ref, str) else source_ref
 
         if not path:
@@ -429,30 +805,21 @@ class PytestRunner(BaseExecutor):
         # 各写一份），避免"录入放行、执行拒绝"的口径分叉——那会让
         # 同一条数据在不同链路上表现不一致，最难排查。
         try:
-            path = validate_source_ref(path, context=f"用例 {case_id}: ")
+            validated = validate_source_ref(str(path), context=f"用例 {case_id}: ")
         except ValueError as exc:
             raise ValueError(
                 f"{exc}（该值来自库中 source_ref，非法值不会进入 pytest 命令；"
                 f"请修正后重试）"
             ) from exc
-
-        # sys.executable 指向当前解释器（虚拟环境下即 venv 的 python，
-        # 保证用项目依赖跑 pytest），跨 Windows/Linux/macOS 通用；
-        # 修前硬编码的 "py" 是 Windows 专属启动器，非 Windows 平台
-        # 每条用例都会 OSError 降级为 error。
-        #
-        # 选项终止符 "--" 的位置（Day44 P1-01）：
-        #   "--" 之后 pytest 的 argparse 停止解析选项，其后**全部**元素
-        #   一律作为位置参数（测试文件路径）。因此它必须放在**所有选项之后、
-        #   紧邻 path 之前**：
-        #       [.., "pytest", "-q", "--tb=short", "--", path]   ← 正确
-        #       [.., "pytest", "--", path, "-q", "--tb=short"]   ← 错误
-        #   错误写法会让 "-q" 与 "--tb=short" 同样被当成路径，pytest 报
-        #   "file or directory not found: -q" 并以退出码 4 收场，每条用例
-        #   都落入 error 分支——真实执行链路功能性不可用。
-        #   保持 "--" 的目的不变：阻断路径形如 "--version" 时被 pytest
-        #   当选项执行、退出码 0 被误判为 passed 的假通过。
-        return [sys.executable, "-m", "pytest", "-q", "--tb=short", "--", path]
+        # 上方已排除空值，validate_source_ref 的 None 分支理论不可达；
+        # 仍显式兜底而不是用断言/cast——一旦上游口径变了，这里应是可读的
+        # 业务错误，而不是裸的 TypeError
+        if validated is None:
+            raise ValueError(
+                f"用例 {case_id} 的 source_ref 校验后为空（{path!r}），"
+                f"该用例不可被 pytest 执行"
+            )
+        return validated
 
     def _build_env(self) -> dict[str, str] | None:
         """
@@ -472,24 +839,41 @@ class PytestRunner(BaseExecutor):
 
     def run_one(self, case: dict) -> ExecutionResult:
         """
-        同步执行单条用例的pytest子进程
+        同步执行单条用例的pytest子进程（Day49：Popen + 进程树清理 + 退出码细化）
 
         执行流程:
-            1. build_command拼装命令（source_ref 为空时抛 ValueError，
+            1. build_command拼装命令（执行目标缺失/非法时抛 ValueError，
                此处捕获后降级为该条用例的 error 结果）
-            2. subprocess.run同步执行，工作目录取 self.cwd（默认项目根），
-               环境变量为 self.env 叠加当前进程环境，超时取 self.timeout
-            3. 按退出码映射结果: 0→passed / 1→failed / 其他→error
-            4. 失败/错误时输出截断2000字存入error_message
+            2. Popen 起子进程并 communicate(timeout=self.timeout)，
+               工作目录取 self.cwd（默认项目根），环境变量为 self.env
+               叠加当前进程环境
+            3. 超时 → 清理**整棵进程树**（Windows taskkill /T /F、
+               POSIX killpg），保住 kill 前已捕获的部分输出，再降级为
+               error + exit_reason=timeout
+            4. 正常收场 → 按退出码映射 result/exit_code/exit_reason
+
+        为什么改用 Popen 而不是 subprocess.run（Day49 核心变更）:
+            `subprocess.run` 内部超时只做 `process.kill()`，杀的是**直接
+            子进程**；pytest 自己 spawn 的 xdist worker、被测代码再开的
+            子进程全部变孤儿，继续占端口与内存（Day48 的"只杀不洁"）。
+            而要清理后代必须知道子进程 pid——`run` 不返回它，
+            `TimeoutExpired` 上也不带（CPython 3.11 实测）。
+            `Popen` 自带句柄与 pid，这是拿到它的唯一标准库途径。
+
+        超时后为什么还要再 kill 一次（看起来多余，其实不是）:
+            我们自己接管 communicate 后就不再有"run 内部的 kill"，直接子
+            进程与整棵后代树都得由我们清理。若沿用 run 的行为只补一句
+            `process.kill()`，那 process tree 的清理逻辑就没有容身之处。
 
         参数:
             case (dict): 待执行用例字典
 
         返回:
-            ExecutionResult: result为passed/failed/error；
-                             failed/error时error_message非空
-                             （超时/命令不存在/启动参数非法/
-                              source_ref为空同样映射error）
+            ExecutionResult: result 为 passed/failed/error（下游四值词表）；
+                             failed/error 时 error_message 非空；
+                             exit_code 记录原始退出码（未正常收场为 None）；
+                             exit_reason 记录细分分类；
+                             output 保留子进程输出（已截断）
 
         异常:
             无（命令拼装失败与子进程异常均转为error结果返回，不向上抛，
@@ -497,46 +881,82 @@ class PytestRunner(BaseExecutor):
 
             被本方法兜住并降级为 error 的全部异常类型：
                 - ValueError: build_command 侧的执行目标缺失/格式非法
-                - subprocess.TimeoutExpired: 子进程超时
+                - subprocess.TimeoutExpired: 子进程超时（exit_reason=timeout）
                 - OSError: 命令不存在/权限不足/工作目录不存在
+                  （exit_reason=spawn_failed）
                 - TypeError / ValueError: **子进程启动参数非法**
                   （Day48-fix2 补齐，如 env 含非字符串值、env 键含 "="、
                   cwd 含 NUL）——这两类此前会直接上抛穿透本方法
+                  （exit_reason=invalid_arguments）
         """
         start_time = time.perf_counter()
         try:
             command = self.build_command(case)
         except ValueError as exc:
             # 编排层逐条 run_one，任何异常上抛都会让整批判 failed；
-            # 而"source_ref 为空"是**单条用例的配置问题**、不是批次故障，
+            # 而"执行目标缺失/非法"是**单条用例的配置问题**、不是批次故障，
             # 必须降级为该条用例的 error 结果，让批次继续跑完其余用例。
             duration = time.perf_counter() - start_time
             error_message = str(exc)
             logger.warning(
-                f"pytest执行目标缺失（该用例不可被 pytest 执行）| "
+                f"pytest执行目标缺失或非法（该用例不可被 pytest 执行）| "
                 f"用例: {case.get('case_id')} | {exc}"
             )
             return ExecutionResult(
-                result="error", error_message=error_message, duration=duration
+                result="error",
+                error_message=error_message,
+                duration=duration,
+                exit_code=None,
+                exit_reason=EXIT_REASON_INVALID_CASE,
             )
 
+        # Day49：从 subprocess.run 改为 Popen，理由见方法 docstring
+        process: subprocess.Popen[str] | None = None
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding=SUBPROCESS_ENCODING,
                 errors=SUBPROCESS_ERRORS,
-                timeout=self.timeout,
                 # pytest 靠 cwd 定位测试文件与 pytest.ini：不显式指定时
                 # 继承调用进程的工作目录，而 Web 触发 / 任务队列 worker
                 # 的 cwd 与项目根无关，source_ref 里的相对路径会全部
                 # 找不到，每条用例以退出码 4 落 error。
                 cwd=str(self.cwd),
                 env=self._build_env(),
+                # POSIX: 让子进程自成一个会话/进程组，超时才能 killpg 一次
+                # 干掉整棵树；否则 killpg 会波及调用方所在的终端进程组
+                # （把 IDE / CI runner 一起杀掉）。Windows 侧该参数是
+                # unused_*，传什么都不生效，树杀改由 taskkill /T 负责。
+                start_new_session=os.name == "posix",
             )
-        except subprocess.TimeoutExpired:
+            # timeout 归 communicate 管（不是 Popen 的参数）——Day48 的
+            # subprocess.run 也正是把 timeout 传到这里，语义一致
+            stdout, stderr = process.communicate(timeout=self.timeout)
+            returncode = process.returncode
+        except subprocess.TimeoutExpired as exc:
+            # 超时：先清整棵进程树，再组装结果
             duration = time.perf_counter() - start_time
+            cleanup_note = ""
+            if process is not None:
+                cleanup_note = self.kill_process_tree(process)
+            # 超时前已捕获的部分输出必须留下（Day49 任务一.3）。
+            #
+            # 丢掉它等于让最需要现场的那次执行什么都不留：超时恰恰是
+            # "必须复现才能定位"的故障，而复现前手里没有半行输出。
+            # 注意 POSIX 下 TimeoutExpired 上的流是 **bytes**（即便传了
+            # text=True），Windows 下才是 str，故统一走 decode 归一。
+            captured = "\n".join(
+                part
+                for part in (
+                    decode_subprocess_stream(exc.stdout).strip(),
+                    decode_subprocess_stream(exc.stderr).strip(),
+                )
+                if part
+            )
+            captured_tail = truncate_output_tail(captured)
             # 超时消息与日志**刻意保留完整命令行**（含 sys.executable 的
             # 解释器绝对路径），不做脱敏也不截断（Day48-fix P3-4 决策）。
             #
@@ -550,10 +970,22 @@ class PytestRunner(BaseExecutor):
             # 若将来本工具改为多租户/对外托管，需重新评估：那时解释器
             # 路径会暴露部署方的主机目录结构，口径要与项目既有日志脱敏
             # 规则对齐（见 Day39 的 _sanitize_log_field）。
-            error_message = f"执行超时(>{self.timeout}s): {' '.join(command)}"
-            logger.warning(f"pytest子进程超时 | {' '.join(command)}")
+            error_message = (
+                f"执行超时(>{self.timeout}s): {' '.join(command)}"
+                f" | 进程树清理: {cleanup_note}"
+            )
+            if captured_tail:
+                error_message = f"{error_message}\n超时前输出:\n{captured_tail}"
+            logger.warning(
+                f"pytest子进程超时 | {' '.join(command)} | 进程树清理: {cleanup_note}"
+            )
             return ExecutionResult(
-                result="error", error_message=error_message, duration=duration
+                result="error",
+                error_message=error_message,
+                duration=duration,
+                exit_code=None,
+                exit_reason=EXIT_REASON_TIMEOUT,
+                output=captured_tail,
             )
         except OSError as exc:
             # 命令不存在/权限不足等子进程启动异常（如py不在PATH）
@@ -561,14 +993,18 @@ class PytestRunner(BaseExecutor):
             error_message = f"pytest子进程启动失败: {exc}"
             logger.error(f"{error_message} | 命令: {command}")
             return ExecutionResult(
-                result="error", error_message=error_message, duration=duration
+                result="error",
+                error_message=error_message,
+                duration=duration,
+                exit_code=None,
+                exit_reason=EXIT_REASON_SPAWN_FAILED,
             )
         except (TypeError, ValueError) as exc:
             # 子进程**启动参数**非法（Day48-fix2 兜底层）
             #
             # 实测逃逸面（Windows + Python 3.11.9 实测复现）：这些异常由
-            # subprocess.run 在真正创建进程**之前**抛出，既不是
-            # TimeoutExpired 也不是 OSError，此前直接上抛穿透 run_one：
+            # Popen 在真正创建进程**之前**抛出，既不是 TimeoutExpired 也
+            # 不是 OSError，此前直接上抛穿透 run_one：
             #   env 值非 str（int/None/bool/float/bytes）
             #       → TypeError: environment can only contain strings
             #   env 键非 str（int） → TypeError: bad argument type
@@ -595,42 +1031,204 @@ class PytestRunner(BaseExecutor):
             error_message = f"pytest子进程启动失败(参数非法): {exc}"
             logger.error(f"{error_message} | 命令: {command}")
             return ExecutionResult(
-                result="error", error_message=error_message, duration=duration
+                result="error",
+                error_message=error_message,
+                duration=duration,
+                exit_code=None,
+                exit_reason=EXIT_REASON_INVALID_ARGUMENTS,
             )
         duration = time.perf_counter() - start_time
+        exit_reason = EXIT_CODE_REASON_MAP.get(returncode, EXIT_REASON_UNKNOWN_EXIT_CODE)
+        result_value = EXIT_CODE_RESULT_MAP.get(returncode, "error")
 
-        # 退出码映射: 0→passed / 1→failed / 其他→error
-        if completed.returncode == 0:
-            logger.debug(
-                f"pytest执行通过 | 用例: {case.get('case_id')} | 耗时: {duration:.3f}s"
-            )
-            return ExecutionResult(
-                result="passed", error_message=None, duration=duration
-            )
-
-        if completed.returncode == 1:
-            # pytest约定退出码1: 存在失败用例，失败详情在stdout
-            output = (completed.stdout or "").strip() or (completed.stderr or "").strip()
-            message = truncate_output_tail(output) or (
-                f"pytest退出码: {completed.returncode}"
-            )
-            logger.debug(f"pytest执行失败 | 用例: {case.get('case_id')}")
-            return ExecutionResult(
-                result="failed", error_message=message, duration=duration
-            )
-
-        # 其他退出码(2/5等): 用法错误/内部错误/中断，详情在stderr
-        stderr = (completed.stderr or "").strip()
-        message = truncate_output_tail(stderr) or (
-            f"pytest异常退出，退出码: {completed.returncode}"
+        # 输出统一归一：stdout 与 stderr 都要留，Day50 的报告解析器会用到
+        full_output = "\n".join(
+            part for part in ((stdout or "").strip(), (stderr or "").strip()) if part
         )
+        output_tail = truncate_output_tail(full_output)
+
+        if result_value == "passed":
+            logger.debug(
+                f"pytest执行通过 | 用例: {case.get('case_id')} | "
+                f"耗时: {duration:.3f}s | 退出码: {returncode}"
+            )
+            return ExecutionResult(
+                result="passed",
+                error_message=None,
+                duration=duration,
+                exit_code=returncode,
+                exit_reason=exit_reason,
+                output=output_tail,
+            )
+
+        if result_value == "failed":
+            # pytest约定退出码1: 存在失败用例，失败详情在stdout
+            message = truncate_output_tail(full_output) or f"pytest退出码: {returncode}"
+            logger.debug(
+                f"pytest执行失败 | 用例: {case.get('case_id')} | 退出码: {returncode}"
+            )
+            return ExecutionResult(
+                result="failed",
+                error_message=message,
+                duration=duration,
+                exit_code=returncode,
+                exit_reason=exit_reason,
+                output=output_tail,
+            )
+
+        # 其余退出码（2/3/4/5 及未收录值）：这次执行本身没跑成/没测到东西，
+        # 一律 error（下游词表口径），细分语义由 exit_reason + 前缀措辞承载
+        advice = EXIT_CODE_ADVICE_MAP.get(returncode, "")
+        message = truncate_output_tail(full_output) or (
+            f"pytest异常退出，退出码: {returncode}（{exit_reason}）"
+        )
+        error_message = f"pytest异常退出[{exit_reason}]，退出码: {returncode}"
+        if advice:
+            error_message = f"{error_message} | 处置建议: {advice}"
+        error_message = f"{error_message}\n{message}"
         logger.warning(
             f"pytest异常退出 | 用例: {case.get('case_id')} | "
-            f"退出码: {completed.returncode}"
+            f"退出码: {returncode} | 分类: {exit_reason}"
         )
         return ExecutionResult(
-            result="error", error_message=message, duration=duration
+            result="error",
+            error_message=error_message,
+            duration=duration,
+            exit_code=returncode,
+            exit_reason=exit_reason,
+            output=output_tail,
         )
+
+    def kill_process_tree(self, process: subprocess.Popen[str]) -> str:
+        """
+        清理子进程的整棵进程树（Day49 任务一.1）
+
+        为什么必须显式做（`subprocess.run` 的内部行为不够）:
+            run 超时时只 `process.kill()` 直接子进程。pytest 自己 spawn 的
+            xdist worker、被测代码再开的子进程会变孤儿继续跑，占端口、占内存，
+            且在 Windows 上**不会**随父进程退出而自动结束（POSIX 至少还有
+            init 收养+回收）。一批几百条用例跑下来，残留进程会滚雪球。
+
+        参数:
+            process (subprocess.Popen[str]): 已在超时分支中持有的子进程句柄
+
+        返回:
+            str: 清理结果的可读描述（写入超时消息与日志，便于判断是否真的
+                 清干净了，而不是只知道"我们尝试过"）
+
+        异常:
+            无（本方法是清理兜底，绝不因清理失败而抛出——清理失败时返回
+              描述文本，由调用方拼进 error_message）
+        """
+        pid = process.pid
+        # 句柄是假的（单测替身/MagicMock）时直接跳过：拿不到真实 pid，
+        # 调 taskkill 只会得到一条无意义的错误输出，反而污染超时消息
+        if not isinstance(pid, int) or pid <= 0:
+            return f"跳过（未取得真实 pid: {pid!r}）"
+
+        if os.name == "nt":
+            detail = self._kill_tree_windows(pid)
+        else:
+            detail = self._kill_group_posix(process)
+
+        # 树清掉后直接子进程通常已退出，但仍显式 wait 一次：
+        # 不 wait 就返回会让它变成僵尸（POSIX），而僵尸在 /proc 里仍可见，
+        # 任何"跑完看看有没有残留"的排查都会被它误导
+        try:
+            process.wait(timeout=PROCESS_TREE_KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            # 极端情况下树清理没能带走直接子进程，单独补一刀
+            try:
+                process.kill()
+                process.wait(timeout=PROCESS_TREE_KILL_GRACE_SECONDS)
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                detail = f"{detail}；直接子进程补杀仍未退出(pid={pid})"
+        return f"pid={pid} {detail}"
+
+    @staticmethod
+    def _kill_tree_windows(pid: int) -> str:
+        """
+        Windows 侧按父子关系强杀整棵进程树（taskkill /T /F）
+
+        为什么用 taskkill 而不是自己遍历:
+            Windows 没有可移植的"父子关系遍历"标准库接口（psutil 要装第三方
+            依赖，而本项目明确不引入新依赖）；`taskkill /T` 正是系统自带的
+            树杀工具，/T 递归子进程、/F 强制终止。
+
+        参数:
+            pid (int): 直接子进程 pid
+
+        返回:
+            str: taskkill 的输出摘要（成功为"已清理"，失败带退出码）
+
+        异常:
+            无（OSError/超时都被吞掉并转成描述文本）
+        """
+        try:
+            completed = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                encoding=SUBPROCESS_ENCODING,
+                errors=SUBPROCESS_ERRORS,
+                timeout=TASKKILL_TIMEOUT_SECONDS,
+                # 不传 env：taskkill 是系统命令，显式给一份环境反而可能因
+                # 继承到非 ASCII 变量名而出问题
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"taskkill 调用失败: {exc}"
+
+        if completed.returncode == 0:
+            return "taskkill /T /F 已清理整棵进程树"
+        summary = (completed.stdout or completed.stderr or "").strip()
+        return f"taskkill 返回码 {completed.returncode}: {truncate_output_tail(summary, 200)}"
+
+    @staticmethod
+    def _kill_group_posix(process: subprocess.Popen[str]) -> str:
+        """
+        POSIX 侧按进程组终止整棵进程树（SIGTERM → SIGKILL）
+
+        为什么 pgid 直接取 pid 而不是 os.getpgid(pid):
+            起进程时传了 start_new_session=True，子进程 setsid 后成为
+            **会话首进程兼进程组首进程**，其 pgid 恒等于自身 pid。省掉一次
+            系统调用之外更重要的是省掉一个 Windows 上不存在的符号
+            （os.getpgid），从而让这段逻辑能在 Windows 开发机上被测试覆盖。
+
+        为什么是"先温和后强杀"而不是上来就 SIGKILL:
+            被测代码可能在退出钩子里释放端口/落临时文件，一律强杀会让
+            "超时导致的端口占用"看起来像被测代码自己的缺陷，误导排查。
+
+        参数:
+            process (subprocess.Popen[str]): 子进程句柄（取 pid 作为组 id）
+
+        返回:
+            str: 清理结果描述
+
+        异常:
+            无（组不存在/权限不足等都被吞掉并转成描述文本）
+        """
+        kill_group = _POSIX_KILLPG
+        if kill_group is None:
+            return "非 POSIX 平台，无 os.killpg，跳过进程组清理"
+        pgid = process.pid
+        try:
+            kill_group(pgid, signal.SIGTERM)
+        except OSError as exc:
+            return f"发送 SIGTERM 失败: {exc}"
+
+        # 给被测代码一点收尾时间，用轮询而非固定 sleep 赌时序
+        deadline = time.monotonic() + PROCESS_TREE_TERM_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                return f"killpg(SIGTERM, pgid={pgid}) 已清理整棵进程树"
+            time.sleep(PROCESS_TREE_POLL_INTERVAL_SECONDS)
+
+        try:
+            kill_group(pgid, _SIGKILL)
+        except OSError as exc:
+            return f"发送 SIGKILL 失败: {exc}"
+        return f"killpg(SIGTERM→SIGKILL, pgid={pgid}) 已强制清理整棵进程树"
 
 
 def get_executor(kind: str | None = None) -> BaseExecutor:

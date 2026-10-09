@@ -499,16 +499,22 @@ class TestExecutionsTriggerApi:
         )
 
         def _mock_completed(returncode: int, stderr: str = "") -> MagicMock:
-            """构造mock子进程完成对象（returncode/stdout/stderr）"""
-            completed = MagicMock()
-            completed.returncode = returncode
-            completed.stdout = ""
-            completed.stderr = stderr
-            return completed
+            """
+            构造 mock 子进程句柄（Day49 起 PytestRunner 用 Popen 而非 run）
+
+            run_one 现在从 communicate() 拿输出、从 returncode 属性拿退出码，
+            故替身必须同时具备这三样；pid 给 0 让进程树清理走"跳过"守卫，
+            避免单测误杀本机同号进程。
+            """
+            process = MagicMock()
+            process.pid = 0
+            process.returncode = returncode
+            process.communicate.return_value = ("", stderr)
+            return process
 
         # 退出码0 → passed
         with patch(
-            "src.core.executors.subprocess.run",
+            "src.core.executors.subprocess.Popen",
             return_value=_mock_completed(0),
         ):
             exec_result = runner.run_one(case)
@@ -517,7 +523,7 @@ class TestExecutionsTriggerApi:
 
         # 退出码1 → failed（输出为空时兜底退出码文案，保证非空）
         with patch(
-            "src.core.executors.subprocess.run",
+            "src.core.executors.subprocess.Popen",
             return_value=_mock_completed(1),
         ):
             exec_result = runner.run_one(case)
@@ -526,7 +532,7 @@ class TestExecutionsTriggerApi:
 
         # 退出码2 → error（stderr截断2000字存入error_message）
         with patch(
-            "src.core.executors.subprocess.run",
+            "src.core.executors.subprocess.Popen",
             return_value=_mock_completed(2, stderr="usage error: bad option"),
         ):
             exec_result = runner.run_one(case)
