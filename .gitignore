@@ -87,7 +87,7 @@ allure-report/
 # ------------------------------ 本地评估与私有文档（不入库） ------------------------------
 .workbuddy/
 
-# 私有项目管理与AI协作过程文档（不公开）
+# 本地私有工作文档（不入库）
 /PROJECT_PLAN.md
 /PROJECT_CONTEXT.md
 /PROJECT_SPEC.md
