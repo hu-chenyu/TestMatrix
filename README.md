@@ -5,8 +5,7 @@
 > **你的平台绿了，你确定是真绿吗？**
 >
 > 面向互联网接口自动化测试的全链路效能平台：用例管理 → 调度执行 → 报告分析 →
-> Web 可视化 → 通知推送 → CI/CD，Python 全栈自建、单机可跑、零外部依赖起步；
-> 芯片嵌入式板卡测试能力已预留（HTTP / 串口 / Telnet 三协议统一用例模型）。
+> Web 可视化 → 通知推送 → CI/CD，Python 全栈自建、单机可跑、零外部依赖起步。
 >
 > **全项目方法论：约束下量化质量 → 门禁决策**——每个优化阶段产出可复现的前后对比数据，每个能力边界写进 KNOWN_LIMITATIONS。
 
@@ -21,7 +20,7 @@
   少一条即红；零收集不容忍（exit 5 也判红）；mypy 崩溃守卫——类型检查器自身
   报错时 fail-closed 判红，杜绝"工具没跑=检查通过"（源于 CI 级联跳过真实事故）；
 - **1434 条测试 / 98.97% 覆盖 / 0 warning / 0 failed**：CI 双 job 全绿
-  （Python 3.11 主 + 3.12 探测位）；136 次提交，48 天里 47 天有提交（唯一空档是周日）。
+  （Python 3.11 主 + 3.12 探测位）；提交不间断，48 天里 47 天有提交（唯一空档是周日）。
 
 ## 快速开始
 
@@ -115,19 +114,19 @@ docker compose -f docker/docker-compose.yml --profile mysql up -d
 3. **任务不丢、不重复、不静默死亡。**
    队列幂等抢占（同批次不双跑）+ BRPOPLPUSH ack/requeue（worker 崩溃自动补偿）+ 空队列指数退避（防 2 秒 2 万次热转）；Redis 故障自动回退裸线程。
 
-4. **三协议统一模型，不做"又一个 HTTP 平台"。**
-   HTTP（Requests）/ 串口（pyserial）/ Telnet 统一用例与断言模型，芯片板卡测试低成本接入（当前以 `loop://` 伪串口 + 本地 socket 验证——边界如实标注）。
+4. **零外部依赖起步，单机就能跑。**
+   纯 SQLite 即可完整跑通「入库 → 批次 → 执行 → 汇总 → 看板」全链路；Redis / MySQL / Docker 均为可选增强，不需要先搭基础设施。
 
 ## 核心能力
 
 - **数据驱动引擎**：YAML / Excel 外部数据参数化，用例与数据彻底分离；三维筛选（模块/优先级/标签）
 - **用例调度管理**：批次管理、P0-P3 分级执行、dry-run 零副作用预览、CLI/Web 双触发，执行结果与批次汇总全链路入库可追溯
-- **多协议统一封装**：HTTP（Requests）/ 串口（pyserial）/ Telnet 三协议客户端统一封装，芯片板卡测试仅需低成本适配即可接入
+- **HTTP 客户端与安全脱敏**：Requests 统一封装（超时 / 重试 / 错误分类）；日志与报告中的凭据、查询参数、文件路径统一脱敏（含 Windows 路径边界）
 - **报告分析引擎**：Allure 结果解析、通过率/耗时 P95/失败明细统计、模块与优先级分布、趋势数据入库；质量度量（覆盖率趋势/缺陷密度/执行效率）
 - **Web 可视化平台（三页面已交付）**：Dashboard（统计卡片/趋势折线/模块环图/优先级柱图/失败 Top）、用例管理（列表/筛选/CRUD/批量导入）、执行记录（批次列表/详情/触发/SSE 实时日志）
 - **多渠道通知推送**：邮件 HTML 报告（内联 CSS）+ 企微 markdown 摘要、失败@负责人、分级通知策略、失败重试（指数退避）+ 死信记录
-- **真实 pytest 执行（开发中，Day45 起）**：subprocess 同步执行已落地——超时控制 / cwd·env 隔离 / 退出码映射 / cp936 解码 / source_ref 追踪（Day48 两次热修）；规划中 pytest 钩子与自定义插件、xdist 并发、模拟/真实双模式切换、结果归一
-- **进阶工程能力**：Redis 缓存层+任务队列（已交付）、MySQL 深度优化（EXPLAIN/索引，规划中）、AST 精准回归（Day94-95，脚本级：覆盖映射+import 拓扑+影响面反查）、k6 性能压测基线（规划中）
+- **真实 pytest 执行（开发中）**：subprocess 同步执行已落地——超时控制 / cwd·env 隔离 / 退出码映射 / cp936 解码 / source_ref 追踪；规划中 pytest 钩子与自定义插件、xdist 并发、模拟/真实双模式切换、结果归一
+- **进阶工程能力**：Redis 缓存层+任务队列（已交付）、MySQL 深度优化（EXPLAIN/索引，规划中）、AST 精准回归（脚本级：覆盖映射+import 拓扑+影响面反查，规划中）、k6 性能压测基线（规划中）
 - **全链路日志**：Loguru 三通道输出（控制台/全量/错误独立），按天切割、trace_id 用例级追踪
 - **数据持久化**：SQLAlchemy 2.0 ORM，用例/执行记录/缺陷统计三张核心表，SQLite（本地）与 MySQL 8.0（团队共用）一键切换
 
@@ -135,15 +134,15 @@ docker compose -f docker/docker-compose.yml --profile mysql up -d
 
 | 分层 | 技术选型 |
 | --- | --- |
-| 核心语言 | Python 3.11（CI 多版本矩阵；升级路线见开发计划） |
-| 测试框架 | pytest 7.4 →当日最新稳定（预期 9.x，Day74 按插件兼容矩阵确认）+ allure-pytest + pytest-rerunfailures + pytest-cov + pytest-xdist（依赖已随 requirements 集成，Day58 接入 -n 并发） |
-| 协议层 | Requests / pyserial / telnetlib |
+| 核心语言 | Python 3.11（CI 多版本矩阵） |
+| 测试框架 | pytest 7.4 →当日最新稳定（预期 9.x，按插件兼容矩阵确认）+ allure-pytest + pytest-rerunfailures + pytest-cov + pytest-xdist（依赖已随 requirements 集成，并发执行规划中） |
+| 协议层 | Requests |
 | 日志报告 | Loguru / Allure 2.x |
 | 数据驱动 | PyYAML / openpyxl |
 | 数据层 | SQLAlchemy 2.0（SQLite 3 / MySQL 8.0） |
 | 缓存与队列 | Redis（已交付） |
-| Web平台 | Flask 2.3 →3.x（Day75 升级，同链升 Werkzeug/Jinja2）+ Jinja2 + Bootstrap 5 + ECharts 5 |
-| 代码分析 | AST 精准回归（Day94-95，脚本级：覆盖映射+import 拓扑） |
+| Web平台 | Flask 2.3 →3.x（规划升级，同链升 Werkzeug/Jinja2）+ Jinja2 + Bootstrap 5 + ECharts 5 |
+| 代码分析 | AST 精准回归（脚本级：覆盖映射+import 拓扑） |
 | 工程化 | Git / Jenkins / Docker / Docker Compose / k6 |
 
 ## 工程质量与纪律
@@ -158,22 +157,20 @@ docker compose -f docker/docker-compose.yml --profile mysql up -d
 ```
 TestMatrix/
 ├── src/                    # 核心源码
-│   ├── common/             # 公共底层封装（HTTP/串口/Telnet/日志/断言/环境配置）
+│   ├── common/             # 公共底层封装（HTTP/日志/断言/环境配置）
 │   ├── db/                 # 数据持久层（ORM模型 + 会话管理，SQLite/MySQL双模式）
 │   ├── core/               # 平台核心逻辑（数据驱动/用例调度/报告解析/通知推送）
-│   └── web/                # Flask Web可视化平台（三页面已交付，Day41-44）
+│   └── web/                # Flask Web可视化平台（三页面已交付）
 ├── tests/                  # pytest测试用例
-│   ├── api_demo/           # HTTP接口测试Demo（登录/用户查询/健康检查）
-│   └── chip_demo/          # 芯片板卡测试Demo（预留）
+│   └── api_demo/           # HTTP接口测试Demo（登录/用户查询/健康检查）
 ├── testdata/               # 数据驱动测试数据（yaml/ excel/）
 ├── output/                 # 运行产物（日志/Allure结果/报告，不入Git）
 ├── examples/               # 扩展Demo（k6性能脚本）
 ├── docker/                 # 容器化配置（Dockerfile、docker-compose.yml）
-├── docs/                   # 项目文档（core架构设计文档、ADR、bug审计报告）
+├── docs/                   # 项目文档（core架构设计文档、ADR）
 ├── pytest.ini              # pytest核心配置
 ├── .env.example            # 环境变量模板
-├── requirements.txt        # Python依赖清单
-└── PROJECT_SPEC.md         # 项目规格说明书（开发基准）
+└── requirements.txt        # Python依赖清单
 ```
 
 ## 阶段规划
@@ -181,14 +178,15 @@ TestMatrix/
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | 第一阶段 | 架构基座：目录骨架、common封装层、数据持久层、pytest体系、Demo验证 | ✅ 已完成 |
-| 第二阶段 | 核心能力：数据驱动引擎、用例调度、报告解析、通知推送、Flask+Redis后端、Web三页面骨架 | ✅ 已完成（Day1-37） |
-| 第三阶段 | 前端交付：Dashboard四图表、用例管理、执行记录三页面 | ✅ 已完成（Day38-44） |
-| 第四阶段 | 深度能力：真实pytest执行引擎（Day45-64）、Flaky用例治理（Day115-119）、AST精准回归脚本（Day94-95） | 🔄 开发中（Day45 起） |
-| 第五阶段 | 工程化交付：CI/CD（✅ Day38-40 已完成）、Docker三服务编排+Jenkins+k6（Day65-78）、MySQL深度优化（Day90-93）、质量打磨+重构（Day79-89）、演示+博客+交付（Day101-119） | ⏳ 规划中 |
+| 第二阶段 | 核心能力：数据驱动引擎、用例调度、报告解析、通知推送、Flask+Redis后端、Web三页面骨架 | ✅ 已完成 |
+| 第三阶段 | 前端交付：Dashboard四图表、用例管理、执行记录三页面 | ✅ 已完成 |
+| 第四阶段 | 深度能力：真实pytest执行引擎、Flaky用例治理、AST精准回归脚本 | 🔄 开发中 |
+| 第五阶段 | 工程化交付：Docker三服务编排+Jenkins+k6、MySQL深度优化、质量打磨+重构、演示+博客+交付 | ⏳ 规划中 |
 
-> 阶段表说明：CI/CD 已于 Day38-40 交付（`.github/workflows/ci.yml` 五层质量门禁，双 job：3.11 主 + 3.12 探测），三页面于 Day41-44 交付。
+> 阶段表说明：CI/CD 已交付（`.github/workflows/ci.yml` 五层质量门禁，双 job：3.11 主 + 3.12 探测），Web 三页面已交付。
+> 详细路线图与里程碑说明见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
-详细需求基准见 [PROJECT_SPEC.md](PROJECT_SPEC.md)，core 层架构设计见 [docs/core_architecture.md](docs/core_architecture.md)。
+core 层架构设计见 [docs/core_architecture.md](docs/core_architecture.md)。
 
 ---
 

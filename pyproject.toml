@@ -31,7 +31,6 @@ markers = [
     "smoke: 冒烟测试用例，核心链路验证",
     "regression: 回归测试用例，全量功能回归",
     "api: HTTP接口自动化测试",
-    "chip: 芯片嵌入式板卡测试",
     "slow: 耗时较长的用例",
 ]
 norecursedirs = "output docs examples docker .git .idea .vscode venv"
