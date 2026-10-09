@@ -21,7 +21,14 @@ from pathlib import Path
 
 import allure
 import pytest
-from src.core.report_analyzer import AllureResult, ReportAnalyzer
+from src.core.report_analyzer import (
+    AllureResult,
+    BridgeResult,
+    ReportAnalyzer,
+    ReportRepository,
+    bridge_results_dir,
+)
+from src.db.db_session import DatabaseSession
 
 # 最小可用Allure结果JSON模板（覆盖全部核心字段）
 SAMPLE_RESULT = {
@@ -456,3 +463,175 @@ class TestAllureResultModel:
         default_result = AllureResult()
         default_result.labels["tag"] = ["x"]
         assert AllureResult().labels == {}
+
+
+# ---------------------------------------------------------------------------
+# Day50 任务二：Allure 结果桥接（解析 → 聚合 → 入库）
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def temp_db(tmp_path, monkeypatch):
+    """
+    临时SQLite数据库fixture（桥接入库用例独享干净数据库）
+
+    与 tests/test_report_repository_demo.py 用同一套隔离手法：
+    monkeypatch 覆盖环境变量 → reset 引擎单例 → init_db 建表，
+    用例结束后 reset 还原，绝不触碰项目真实库。
+
+    参数:
+        tmp_path (Path): pytest 临时目录fixture
+        monkeypatch (pytest.MonkeyPatch): 环境变量覆写fixture
+
+    返回:
+        Generator[Path, None, None]: yield 临时数据库文件路径
+    """
+    db_file = tmp_path / "test_bridge.db"
+    monkeypatch.setenv("TM_DB_TYPE", "sqlite")
+    monkeypatch.setenv("TM_DB_SQLITE_PATH", str(db_file))
+    DatabaseSession.reset()
+    DatabaseSession.init_db()
+    yield db_file
+    DatabaseSession.reset()
+
+
+@allure.feature("报告解析引擎")
+@allure.story("Day50 结果桥接")
+@allure.severity(allure.severity_level.CRITICAL)
+@pytest.mark.api
+@pytest.mark.regression
+class TestBridgeResultsDir:
+    """bridge_results_dir: 解析→聚合→入库全链路"""
+
+    def test_bridge_parses_aggregates_and_saves(self, tmp_path, temp_db):
+        """
+        端到端：tmp_path 构造2个Allure结果文件 → 桥接 → 解析数/统计/入库
+        三者必须一致
+
+        本例顺带钉死库表字段映射口径（failed 剔除 broken、broken 落
+        error 列）：桥接是这条口径在真实执行链路上的唯一入口，映射错
+        了 Web 报告的"失败数"就会与真实情况系统性偏差。
+
+        参数:
+            tmp_path (Path): 用例级临时目录fixture
+            temp_db (Generator): 临时SQLite库fixture
+        """
+        allure_dir = tmp_path / "allure_results_case_0001"
+        allure_dir.mkdir()
+        for sample in (SAMPLE_RESULT, BROKEN_RESULT):
+            (allure_dir / f"{sample['uuid']}-result.json").write_text(
+                json.dumps(sample), encoding="utf-8"
+            )
+
+        bridge = bridge_results_dir(
+            allure_dir, "RUN-DAY50-0001", remark="pytest执行器桥接冒烟"
+        )
+
+        assert isinstance(bridge, BridgeResult), "桥接必须返回 BridgeResult 三态对象"
+        assert bridge.ok is True, f"桥接不应报错: {bridge.error}"
+        assert bridge.has_result is True
+        assert bridge.parsed_count == 2
+        assert bridge.statistics is not None
+        assert bridge.statistics.total == 2
+        assert bridge.statistics.passed == 1
+        assert bridge.statistics.broken == 1
+
+        # 入库校验：走真实查询接口，而不是直接摸表
+        record = ReportRepository.get_by_execution_id("RUN-DAY50-0001")
+        assert record is not None, "桥接后必须能在 defect_statistics 查到记录"
+        assert record.total_cases == 2
+        assert record.passed == 1
+        assert record.error == 1, "broken 必须映射到 error 列"
+        assert record.failed == 0, "failed 列是剔除 broken 后的纯断言失败数"
+        assert record.remark == "pytest执行器桥接冒烟"
+
+    def test_bridge_skips_missing_directory(self, tmp_path):
+        """
+        目录不存在时返回"无结果"且**不算错误**
+
+        pytest 没产出 Allure 结果是常态（被测文件里没有测试、退出码 4
+        用法错误等）；把它当异常会让每次这类执行都留下一条红色错误日志。
+
+        参数:
+            tmp_path (Path): 用例级临时目录fixture
+        """
+        bridge = bridge_results_dir(tmp_path / "not_exist", "RUN-DAY50-0002")
+
+        assert bridge.ok is True
+        assert bridge.has_result is False
+        assert bridge.statistics is None
+        assert bridge.error == ""
+
+    def test_bridge_skips_directory_without_results(self, tmp_path):
+        """
+        目录存在但无 *-result.json 时同样按"无结果"处理
+
+        同时覆盖"结果文件全部损坏"的相邻分支：文件在但解析不出来，
+        也不能抛异常——那会让单条用例的脏结果升级成整批判 failed。
+
+        参数:
+            tmp_path (Path): 用例级临时目录fixture
+        """
+        empty_dir = tmp_path / "allure_empty"
+        empty_dir.mkdir()
+
+        bridge = bridge_results_dir(empty_dir, "RUN-DAY50-0003")
+        assert bridge.ok is True
+        assert bridge.has_result is False
+
+        broken_dir = tmp_path / "allure_broken"
+        broken_dir.mkdir()
+        (broken_dir / "bad-result.json").write_text("{不是合法 JSON", encoding="utf-8")
+
+        broken_bridge = bridge_results_dir(broken_dir, "RUN-DAY50-0004")
+        assert broken_bridge.ok is True
+        assert broken_bridge.has_result is False
+
+    def test_bridge_reports_duplicate_execution_id(self, tmp_path, temp_db):
+        """
+        批次号重复时如实返回失败原因，绝不静默写入第二行
+
+        defect_statistics.execution_id 有唯一约束且 save_statistics 刻意
+        不做静默更新（批次唯一性由调用方保证）。桥接层若把 IntegrityError
+        吞掉假装成功，调用方就会以为统计已入库——那比报错糟得多。
+
+        参数:
+            tmp_path (Path): 用例级临时目录fixture
+            temp_db (Generator): 临时SQLite库fixture
+        """
+        allure_dir = tmp_path / "allure_results_dup"
+        allure_dir.mkdir()
+        (allure_dir / f"{SAMPLE_RESULT['uuid']}-result.json").write_text(
+            json.dumps(SAMPLE_RESULT), encoding="utf-8"
+        )
+
+        first = bridge_results_dir(allure_dir, "RUN-DAY50-DUP")
+        assert first.ok is True and first.has_result is True
+
+        second = bridge_results_dir(allure_dir, "RUN-DAY50-DUP")
+        assert second.ok is False, "重复批次号必须报告失败"
+        assert "IntegrityError" in second.error
+        assert second.has_result is False
+
+    def test_bridge_reports_empty_execution_id(self, tmp_path, temp_db):
+        """
+        空批次号必须被拒（save_statistics 对空串抛 ValueError）
+
+        桥接层不能把"批次号缺失"悄悄吞掉变成"没入库但也没报错"——
+        执行记录与报告统计的关联键丢了，是排障时最难查的一类问题。
+
+        参数:
+            tmp_path (Path): 用例级临时目录fixture
+            temp_db (Generator): 临时SQLite库fixture
+        """
+        allure_dir = tmp_path / "allure_results_no_exec"
+        allure_dir.mkdir()
+        (allure_dir / f"{SAMPLE_RESULT['uuid']}-result.json").write_text(
+            json.dumps(SAMPLE_RESULT), encoding="utf-8"
+        )
+
+        bridge = bridge_results_dir(allure_dir, "")
+
+        assert bridge.ok is False
+        assert "ValueError" in bridge.error
+        assert bridge.has_result is False

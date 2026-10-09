@@ -29,7 +29,7 @@ on:
 # 测试数下限基线（Day44 P2-15）：只增不减，用于阻断"删测试换绿"。
 # 新增测试后把该值调大到新的收集数；调小需在 PR 中说明等价覆盖理由。
 env:
-  TEST_COUNT_BASELINE: "1445"
+  TEST_COUNT_BASELINE: "1473"
 
 jobs:
   test:

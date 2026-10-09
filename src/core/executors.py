@@ -13,6 +13,14 @@
     - get_executor             执行器工厂（读TM_EXECUTOR环境变量，
                               默认simulated）
 
+功能（真实执行器Phase-1 Day50交付）:
+    - 每次执行写入**独立** Allure 结果目录（output/allure_results_*），
+      并在 pytest 命令行显式覆盖 pytest.ini addopts 里的默认 alluredir
+    - pytest 终端输出经 output_parser 解析为结构化 ParsedResult，
+      随 ExecutionResult 一并返回（原始 output 文本保留不变）
+    - 执行完成后自动调用 report_analyzer.bridge_results_dir 解析本次独立
+      目录并入库 defect_statistics
+
 设计说明:
     - 策略模式: 编排代码（CaseManager._execute_batch_async）只依赖
       BaseExecutor抽象契约，不感知具体执行器实现
@@ -23,6 +31,7 @@
 """
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -30,11 +39,14 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
+from itertools import count
 from pathlib import Path
 
 from src.common.env_manager import PROJECT_ROOT, env_manager
 from src.common.logger import LogManager
 from src.common.source_ref import validate_source_ref
+from src.core.output_parser import ParsedResult, PytestOutputParser
 
 logger = LogManager.get_logger()
 
@@ -169,6 +181,154 @@ CASE_FIELD_MARKERS = "markers"
 CASE_FIELD_KEYWORD = "keyword"
 CASE_FIELD_PATH = "path"
 
+# ---------------------------------------------------------------------------
+# Allure 结果目录隔离（Day50 任务二）
+# ---------------------------------------------------------------------------
+# 每次执行写入独立目录的根目录名（相对项目根）
+ALLURE_DIR_ROOT = "output"
+
+# 独立目录名前缀。prune 时靠它识别"哪些兄弟目录是本机制的产物"，
+# 避免把 output/ 下无关目录（报告归档等）当成陈旧结果删掉。
+ALLURE_DIR_PREFIX = "allure_results_"
+
+# 独立目录名里时间戳的格式（微秒精度）。
+#
+# 为什么必须到微秒: 同一条用例在 1 秒内被重复执行（回归重试、手动连点）
+# 是常态，秒级命名会让两次执行抢同一个目录——而 pytest 的
+# --clean-alluredir 正是"先删后写"，第二次执行会把第一次的结果整个删掉，
+# 且删除动作本身在 Windows 上就是 WinError 145 的竞态来源。
+ALLURE_DIR_TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S-%f"
+
+# 陈旧目录保留数量：超过该数量的旧目录在本次执行后被清理
+ALLURE_DIR_KEEP_COUNT = 10
+
+# 陈旧目录最小存活时长（秒）。只清理"创建已久"的目录，
+# 是为了不误删**并发执行**中正在写入的目录——只要保留数量阈值被
+# 并发数突破，正在跑的目录就可能被排进待删集合，而目录名的可比性
+# 救不了它（另一个进程的执行时刻同样很新）。
+ALLURE_DIR_MIN_AGE_SECONDS = 300
+
+# 同进程内的目录序号自增器（Day50 实测修正）。
+#
+# **为什么时间戳不够**: Windows 系统时钟粒度约 15.6ms（GetSystemTime 的
+# 定时器节拍），`datetime.now()` 的微秒位在同一节拍内**多次调用返回完全
+# 相同的值**——实测连调两次得到同一个 049594。故仅靠时间戳的目录名在
+# "15 毫秒内重复执行同一条用例"这一场景下必然撞名，而撞名意味着第二次
+# 的 --clean-alluredir 会把第一次的结果整个删掉：那正是本机制要消灭的
+# WinError 145 竞态，被绕一圈又回来了。
+#
+# 为什么序号 + pid 两者都要:
+#   - 序号解决**同进程内**的撞名（批次并发是多条 daemon 线程）
+#   - pid 解决**跨进程**的撞名（服务进程 vs CLI 批量执行同一时刻启动）
+# `itertools.count` 的 next() 在 CPython 里是原子的，多线程下安全。
+_ALLURE_DIR_SEQUENCE = count()
+
+
+def build_allure_results_dir(case_id: str, root: str | Path | None = None) -> Path:
+    """
+    为单次执行生成**独立**的 Allure 结果目录（Day50 任务二）
+
+    为什么每次执行都要独立目录（本日存在的唯一理由）:
+        pytest.ini 的 addopts 固定了 `--alluredir=output/allure_results
+        --clean-alluredir`，意味着**所有**执行共用一个目录。后果有两重：
+          1. 结果互相覆盖/混杂——一次执行只剩最后一次写入的结果，
+             而执行记录却按每次执行各存了一条，明细与报告对不上；
+          2. `--clean-alluredir` 在 Windows 上要"先删整个目录"，
+             目录被父 pytest（本轮回归）或另一个执行占着时直接抛
+             WinError 145 / INTERNALERROR，整轮 pytest 全军覆没。
+
+    参数:
+        case_id (str): 用例编号（只用于目录名可读性与排障定位）
+        root (str | Path | None): 结果目录的父目录；None 时取
+                                  项目根下的 output/ 目录
+
+    返回:
+        Path: 尚未创建的独立目录路径（**本方法不创建目录**——
+              目录由 pytest 子进程在写入结果时自行创建，
+              调用方拿到的路径只用于拼命令行与事后回查）
+
+    异常:
+        无
+
+    注意: 本方法只算路径不落盘，是刻意的——build_command 失败、
+    子进程启动失败等场景根本不会有结果写入，提前 mkdir 只会留下一堆
+    空目录。
+
+    目录名唯一性: 序号 + pid 双重保证（见 `_ALLURE_DIR_SEQUENCE` 注释）。
+    目录名按 `用例编号_时间戳_pid_序号` 排列，时间戳定序、序号补齐同节拍
+    内的空档，故 `prune_stale_allure_dirs` 按名称倒序排序仍等于按创建
+    时刻倒序。
+    """
+    base = Path(root) if root is not None else PROJECT_ROOT / ALLURE_DIR_ROOT
+    stamp = datetime.now().strftime(ALLURE_DIR_TIMESTAMP_FORMAT)
+    seq = next(_ALLURE_DIR_SEQUENCE)
+    safe_case_id = "".join(
+        char if char.isalnum() or char in "-_" else "_" for char in str(case_id)
+    )[:48]
+    return base / f"{ALLURE_DIR_PREFIX}{safe_case_id}_{stamp}_{os.getpid()}_{seq}"
+
+
+def prune_stale_allure_dirs(
+    current_dir: Path | None = None,
+    root: str | Path | None = None,
+    keep: int = ALLURE_DIR_KEEP_COUNT,
+) -> list[str]:
+    """
+    清理陈旧的独立 Allure 结果目录（Day50 任务二·步骤3）
+
+    决策: **代码自动清理，保留最近 N 次**，而不是"留给人手动删"。
+        理由是目录隔离把"每次执行一个目录"变成了常态，不清理就等于
+        把一个无上限增长的垃圾堆放进了 output/；而"让人定期手删"这种
+        约定在没有告警的情况下必然被遗忘。
+
+    参数:
+        current_dir (Path | None): 本次执行的目录；强制跳过，绝不删自己
+        root (str | Path | None): 待清理的父目录；None 时取项目根下 output/
+        keep (int): 保留的最近目录数（按目录名倒序取前 keep 个不删）
+
+    返回:
+        list[str]: 已删除的目录名列表（便于日志与排障；删除失败不抛错，
+                   只是不出现在返回值里）
+
+    异常:
+        无（清理是旁路能力，任何异常都吞掉并记 warning）
+    """
+    base = Path(root) if root is not None else PROJECT_ROOT / ALLURE_DIR_ROOT
+    try:
+        if not base.is_dir():
+            return []
+        candidates = sorted(
+            (path for path in base.glob(f"{ALLURE_DIR_PREFIX}*") if path.is_dir()),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        now = time.time()
+        removed: list[str] = []
+        for index, path in enumerate(candidates):
+            if current_dir is not None and path == current_dir:
+                continue
+            if index < keep:
+                continue
+            try:
+                # 存活时长过滤：并发执行中正在写入的目录不能删。
+                # 目录名的排序只反映"创建时刻"，删一个刚被别的进程建出来
+                # 的目录，会让那次执行的结果永远解析不到。
+                if now - path.stat().st_mtime < ALLURE_DIR_MIN_AGE_SECONDS:
+                    continue
+            except OSError:
+                continue
+            # ignore_errors=True 而非 try/except：Windows 上目录可能被
+            # 杀毒/索引服务短时占用，rmtree 会抛 PermissionError，
+            # 而"这次没删掉、下次再删"是完全可接受的结果
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(path.name)
+        if removed:
+            logger.info(f"已清理陈旧Allure结果目录 {len(removed)} 个 | 目录根: {base}")
+        return removed
+    except OSError as exc:
+        logger.warning(f"清理陈旧Allure结果目录失败（不影响执行结果）| {exc}")
+        return []
+
 
 def truncate_output_tail(text: str, limit: int = OUTPUT_TRUNCATE_LENGTH) -> str:
     """
@@ -283,6 +443,93 @@ def decode_subprocess_stream(raw: object) -> str:
     return str(raw)
 
 
+# 选项终止符：其后的元素一律作位置参数（Day44 P1-01 确立）
+OPTION_TERMINATOR = "--"
+
+
+def inject_allure_options(command: list[str], allure_dir: Path) -> list[str]:
+    """
+    把独立 Allure 结果目录注入 pytest 命令行（Day50 任务二）
+
+    为什么**命令行参数能覆盖 pytest.ini 的 addopts**:
+        pytest 把 addopts 展开后放在命令行参数**之前**，而
+        `--alluredir` 是普通的 store 型选项（后写覆盖先写），
+        故命令行里再传一次即可生效。这是官方稳定行为，不依赖插件实现。
+
+    为什么必须插在 `--` **之前**而不是直接 append:
+        `build_command` 产出的命令以 `--` 结尾，其后是执行目标路径。
+        append 会让 `--alluredir=...` 落到终止符之后，被 pytest 当成
+        第二个测试文件路径去收集，报 "file or directory not found"
+        并以退出码 4 收场——与 Day44 P1-01 是同一个坑，只是这次错的是
+        我们自己新加的参数。
+
+    为什么不在 `build_command` 里直接写死:
+        build_command 的命令形状被 5 个历史测试文件逐字断言
+        （test_day43_closing / test_day44_bugfix / test_day47_source_ref /
+        test_pytest_runner / test_web_executions_trigger）。在 run_one 里
+        注入既拿到了隔离效果，又让那些契约断言保持原样成立。
+
+    参数:
+        command (list[str]): build_command 产出的命令（**不被修改**）
+        allure_dir (Path): 本次执行的独立 Allure 结果目录
+
+    返回:
+        list[str]: 注入后的新命令列表；原命令不被就地修改
+
+    异常:
+        无（命令中没有终止符时按"追加到末尾"退化处理，不抛错）
+    """
+    marker = f"--alluredir={allure_dir}"
+    terminator_index = (
+        command.index(OPTION_TERMINATOR)
+        if OPTION_TERMINATOR in command
+        else len(command)
+    )
+    return [
+        *command[:terminator_index],
+        marker,
+        "--clean-alluredir",
+        *command[terminator_index:],
+    ]
+
+
+def resolve_bridge_execution_id(case: dict) -> str:
+    """
+    推导 Allure 桥接使用的执行批次号（Day50 任务二）
+
+    取值优先级:
+        1. 用例 dict 中的 `execution_id`（批次编排层若已带上则直接复用，
+           这样同一批次的统计天然落在同一批次号下）
+        2. 回落到 `pytest-{case_id}`
+
+    为什么回落值是确定性的而不是"每次生成新批次号":
+        `defect_statistics.execution_id` 有唯一约束，且 `save_statistics`
+        刻意不做静默更新（见 ReportRepository 类注释）。若此处每次生成
+        全新批次号，那么**每条用例每跑一次**就会往 defect_statistics 插
+        一行——而这张表是 Web 报告统计的数据源，插进来的单条用例统计会
+        把"批次数""通过率趋势""模块分布"的全部口径撑坏（一条用例被
+        当成一个批次）。用确定性的 `pytest-{case_id}`，重复执行会命中
+        唯一约束抛 IntegrityError，由桥接层捕获后如实记为桥接失败——
+        **没入库要说没入库，而不是写一行看起来很成功的脏统计**。
+        真正的批次号关联留给执行编排层（Day51 执行状态回写时接入）。
+
+    参数:
+        case (dict): 待执行用例字典
+
+    返回:
+        str: 非空批次号字符串（绝不会返回空串——空串会被 save_statistics
+             抛 ValueError）
+
+    异常:
+        无
+    """
+    raw_execution_id = case.get("execution_id")
+    if isinstance(raw_execution_id, str) and raw_execution_id.strip():
+        return raw_execution_id.strip()
+    case_id = str(case.get("case_id") or "").strip() or "unknown"
+    return f"pytest-{case_id}"
+
+
 @dataclass
 class ExecutionResult:
     """
@@ -312,6 +559,17 @@ class ExecutionResult:
         output (str): 子进程输出（已截断）。超时场景保留 kill 前已捕获的
                       部分输出——超时恰恰最需要现场，而空输出会让排障
                       只能靠复现
+        parsed_result (ParsedResult | None): Day50 新增。pytest 终端输出的
+                      结构化解析结果（通过/失败/错误/跳过/警告计数、耗时、
+                      失败用例明细、进度百分比）。**None = 未解析出结果**
+                      （解析失败或子进程根本没跑起来），绝不因此改动
+                      result 判定——result 仍只由退出码决定
+        allure_dir (str): Day50 新增。本次执行的独立 Allure 结果目录
+                      （绝对路径）；未进入子进程执行阶段时为空串
+        bridge_error (str): Day50 新增。Allure 桥接（解析→聚合→入库）
+                      失败原因；空串表示桥接成功或**无需桥接**（目录不存在
+                      / 无结果文件 / 子进程未真正跑完）。桥接失败是旁路
+                      故障，绝不影响 result 与 error_message
     """
 
     result: str
@@ -320,6 +578,9 @@ class ExecutionResult:
     exit_code: int | None = None
     exit_reason: str = ""
     output: str = ""
+    parsed_result: ParsedResult | None = None
+    allure_dir: str = ""
+    bridge_error: str = ""
 
 
 class BaseExecutor(ABC):
@@ -446,6 +707,14 @@ class PytestRunner(BaseExecutor):
         故本类改用 Popen 自行持有句柄（拿得到 pid，这是 run 拿不到的），
         超时后按平台清理整棵进程树：Windows 走 `taskkill /T /F`，
         POSIX 让子进程自成一个进程组后 `killpg`。
+
+    Allure 结果目录隔离与桥接（Day50）:
+        每次执行分配独立目录 `output/allure_results_{case_id}_{时间戳}`
+        并以命令行参数显式覆盖 pytest.ini addopts 里的默认 alluredir。
+        这同时消除两个问题：多次执行结果互相混杂，以及 --clean-alluredir
+        在 Windows 上与共享目录的 WinError 145 竞态（详见
+        `build_allure_results_dir`）。执行完成后由
+        `bridge_allure_results` 自动解析并入库 defect_statistics。
     """
 
     def __init__(
@@ -844,13 +1113,17 @@ class PytestRunner(BaseExecutor):
         执行流程:
             1. build_command拼装命令（执行目标缺失/非法时抛 ValueError，
                此处捕获后降级为该条用例的 error 结果）
-            2. Popen 起子进程并 communicate(timeout=self.timeout)，
+            2. 为本次执行生成独立 Allure 结果目录并注入命令行
+               （Day50 任务二，覆盖 pytest.ini addopts 的默认 alluredir）
+            3. Popen 起子进程并 communicate(timeout=self.timeout)，
                工作目录取 self.cwd（默认项目根），环境变量为 self.env
                叠加当前进程环境
-            3. 超时 → 清理**整棵进程树**（Windows taskkill /T /F、
+            4. 超时 → 清理**整棵进程树**（Windows taskkill /T /F、
                POSIX killpg），保住 kill 前已捕获的部分输出，再降级为
                error + exit_reason=timeout
-            4. 正常收场 → 按退出码映射 result/exit_code/exit_reason
+            5. 正常收场 → 按退出码映射 result/exit_code/exit_reason，
+               解析终端输出为结构化 parsed_result，并把本次独立目录的
+               Allure 结果桥接入库（Day50 任务一、二）
 
         为什么改用 Popen 而不是 subprocess.run（Day49 核心变更）:
             `subprocess.run` 内部超时只做 `process.kill()`，杀的是**直接
@@ -909,6 +1182,13 @@ class PytestRunner(BaseExecutor):
                 exit_code=None,
                 exit_reason=EXIT_REASON_INVALID_CASE,
             )
+
+        # Day50 任务二：为本次执行分配**独立** Allure 结果目录，并在命令行
+        # 显式覆盖 pytest.ini addopts 里的默认 alluredir（命令行参数优先级
+        # 高于 addopts）。放在 build_command 之后而非之内，是为了让
+        # build_command 的命令形状契约与其历史断言保持原样成立。
+        allure_dir = build_allure_results_dir(str(case.get("case_id", "")))
+        command = inject_allure_options(command, allure_dir)
 
         # Day49：从 subprocess.run 改为 Popen，理由见方法 docstring
         process: subprocess.Popen[str] | None = None
@@ -986,6 +1266,10 @@ class PytestRunner(BaseExecutor):
                 exit_code=None,
                 exit_reason=EXIT_REASON_TIMEOUT,
                 output=captured_tail,
+                # 超时场景同样解析：被腰斩的执行只跑了一半，
+                # 恰恰是最需要现场的那一次（Day50 任务一明确要求）
+                parsed_result=self.parse_output(captured_tail),
+                allure_dir=str(allure_dir),
             )
         except OSError as exc:
             # 命令不存在/权限不足等子进程启动异常（如py不在PATH）
@@ -1047,6 +1331,18 @@ class PytestRunner(BaseExecutor):
         )
         output_tail = truncate_output_tail(full_output)
 
+        # Day50 任务一：从终端输出解析出结构化结果（计数/耗时/失败明细）
+        parsed_result = self.parse_output(full_output)
+
+        # Day50 任务二：把本次独立目录的 Allure 结果桥接入库。
+        #
+        # 只有子进程**真正跑完**（走到这里即 returncode 已知）才桥接：
+        # 超时与启动失败分支在此之前已 return，那种执行只产出了半份甚至
+        # 零份 Allure 结果，入库会把"被腰斩的执行"记成一次完整批次统计，
+        # 比不入库更糟。
+        bridge_error = self.bridge_allure_results(allure_dir, case)
+        prune_stale_allure_dirs(current_dir=allure_dir)
+
         if result_value == "passed":
             logger.debug(
                 f"pytest执行通过 | 用例: {case.get('case_id')} | "
@@ -1059,6 +1355,9 @@ class PytestRunner(BaseExecutor):
                 exit_code=returncode,
                 exit_reason=exit_reason,
                 output=output_tail,
+                parsed_result=parsed_result,
+                allure_dir=str(allure_dir),
+                bridge_error=bridge_error,
             )
 
         if result_value == "failed":
@@ -1074,6 +1373,9 @@ class PytestRunner(BaseExecutor):
                 exit_code=returncode,
                 exit_reason=exit_reason,
                 output=output_tail,
+                parsed_result=parsed_result,
+                allure_dir=str(allure_dir),
+                bridge_error=bridge_error,
             )
 
         # 其余退出码（2/3/4/5 及未收录值）：这次执行本身没跑成/没测到东西，
@@ -1097,7 +1399,85 @@ class PytestRunner(BaseExecutor):
             exit_code=returncode,
             exit_reason=exit_reason,
             output=output_tail,
+            parsed_result=parsed_result,
+            allure_dir=str(allure_dir),
+            bridge_error=bridge_error,
         )
+
+    @staticmethod
+    def parse_output(output: str) -> ParsedResult | None:
+        """
+        解析 pytest 终端输出（Day50 任务一）
+
+        参数:
+            output (str): 子进程完整输出文本
+
+        返回:
+            ParsedResult | None: 结构化解析结果；解析过程意外抛错时返回 None
+
+        异常:
+            无（硬契约：解析失败绝不影响执行结果）
+
+        为什么还要在这一层再包一次 try:
+            `PytestOutputParser.parse` 自身已设计为不抛异常，但执行器是
+            **执行链路的最后一道兜底**——解析器未来新增字段处理时引入的
+            任何意外，都不应该让已经跑完的执行丢掉结果。宁可返回 None
+            让调用方看到"未解析"，也不能让异常上抛把整批判 failed。
+        """
+        try:
+            return PytestOutputParser.parse(output)
+        except Exception as exc:
+            logger.warning(
+                f"pytest输出解析异常（不影响执行结果）| "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None
+
+    def bridge_allure_results(self, allure_dir: Path, case: dict) -> str:
+        """
+        把本次执行的独立 Allure 结果目录桥接到统计库（Day50 任务二）
+
+        参数:
+            allure_dir (Path): 本次执行的独立 Allure 结果目录
+            case (dict): 待执行用例字典（用于推导批次号与写备注）
+
+        返回:
+            str: 桥接失败原因；空串表示桥接成功或**无需桥接**
+                （目录不存在 / 目录内无结果文件，均为常态而非故障）
+
+        异常:
+            无（桥接是旁路能力，失败只记日志与返回值，不上抛）
+
+        为什么延迟导入 report_analyzer:
+            该模块体量较大且带 DB 仓储，而执行器本身在只需要"拼命令 +
+            起子进程"的场景（如 CLI 批量执行）也必须可导入。把导入推迟到
+            真正桥接时发生，既避免无谓的导入开销，也避免将来报告层调整
+            依赖时把执行器拖进循环导入。与 report_analyzer 内部对 db 层的
+            延迟导入是同一手法。
+        """
+        try:
+            from src.core.report_analyzer import bridge_results_dir
+
+            bridge = bridge_results_dir(
+                allure_dir,
+                resolve_bridge_execution_id(case),
+                remark=f"pytest执行器桥接 | 用例: {case.get('case_id')}",
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            logger.error(f"Allure结果桥接调用失败 | 目录: {allure_dir} | {error}")
+            return error
+        if bridge.error:
+            return bridge.error
+        if bridge.has_result and bridge.statistics is not None:
+            logger.info(
+                f"Allure结果桥接完成 | 目录: {allure_dir} | "
+                f"结果数: {bridge.parsed_count} | 通过: {bridge.statistics.passed} | "
+                f"失败: {bridge.statistics.failed} | 跳过: {bridge.statistics.skipped}"
+            )
+        else:
+            logger.debug(f"Allure结果无需桥接（目录不存在或无结果文件）| {allure_dir}")
+        return ""
 
     def kill_process_tree(self, process: subprocess.Popen[str]) -> str:
         """

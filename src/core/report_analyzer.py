@@ -45,6 +45,11 @@
 
 规划能力:
     - 测试报告邮件推送（基于smtplib，依赖TM_EMAIL_*配置）
+
+已实现能力（Day50）:
+    - Allure结果桥接（任务二）:
+        * BridgeResult      桥接三态返回（成功有结果/无可桥接内容/失败）
+        * bridge_results_dir 解析→聚合→入库串成一次桥接，绝不抛异常
 """
 
 import json
@@ -1696,3 +1701,130 @@ class ReportRepository:
             # 此处待补充模块级覆盖率数据，禁止编造数值
             "code_coverage": None,
         }
+
+
+# ---------------------------------------------------------------------------
+# Allure 结果桥接（Day50 任务二）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BridgeResult:
+    """
+    Allure 结果桥接的执行结果
+
+    为什么桥接要有一个专用返回值而不是直接返回统计对象:
+        桥接是**旁路能力**（与通知旁路同源铁律），调用方必须能区分
+        「桥接成功并已入库」「没有可桥接的结果」「桥接失败」三态，
+        而这三态在 StatisticsResult 上是同一个类型——用一个裸对象表达
+        三态，调用方只能靠 try/except 或猜 None，迟早写错。
+
+    字段说明:
+        parsed_count   解析出的 Allure 结果条数
+        statistics     聚合后的统计结果；目录不存在/为空时为 None
+                       （表示"没有可桥接的内容"，**不是**错误）
+        error          桥接失败原因（异常类型 + 消息）；空串表示无错误
+    """
+
+    parsed_count: int = 0
+    statistics: StatisticsResult | None = None
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        """
+        桥接是否未出错（注意与"是否有结果"是两回事）
+
+        返回:
+            bool: error 为空串时 True
+
+        异常:
+            无
+        """
+        return not self.error
+
+    @property
+    def has_result(self) -> bool:
+        """
+        是否真的解析并入库了统计结果
+
+        返回:
+            bool: statistics 非 None 时 True
+
+        异常:
+            无
+        """
+        return self.statistics is not None
+
+
+def bridge_results_dir(
+    results_dir: str | Path,
+    execution_id: str,
+    remark: str = "",
+) -> BridgeResult:
+    """
+    把一个 Allure 结果目录「解析 → 聚合 → 入库」串成一次桥接（Day50 任务二）
+
+    为什么要收敛成这一个函数而不是让调用方自己串三步:
+        执行器只该关心**什么时候**桥接，不该关心**怎么**桥接。让
+        `PytestRunner` 直接调 `parse_results_dir` + `ReportStatistics.aggregate`
+        + `ReportRepository.save_statistics`，等于把三步的编排知识复制到
+        每个调用点——而这三步的任何一次改动（字段映射、入库策略、
+        容错范围）都要同步改多处。收敛到报告层后，执行器只需传入
+        "哪个目录 + 哪个批次号"。
+
+    容错约定（**本函数绝不抛异常**）:
+        - 目录不存在 / 目录里没有任何 *-result.json → 返回 has_result=False
+          的成功结果。这不是错误：pytest 未产出 Allure 结果是常态
+          （被测文件里没有测试、退出码 4 用法错误等）。
+        - 解析/聚合/入库任一步异常 → 捕获后写入 `error` 字段并记 error 日志。
+          桥接失败绝不能连带让执行结果丢失。
+
+    批次号唯一性说明:
+        `save_statistics` 对 `execution_id` 建有唯一约束且**刻意不做静默更新**
+        （见 ReportRepository 类注释），重复批次号会抛 IntegrityError。
+        本函数不掩盖它——那属于"批次统计唯一性由调用方保证"的既有契约，
+        调用方需要知道自己这次没入库成功，而不是以为写进去了。
+
+    参数:
+        results_dir (str | Path): Allure 结果目录（Day50 起由执行器为每次
+                                  执行生成的独立目录）
+        execution_id (str): 执行批次号，写入 defect_statistics 的唯一键；
+                            空串会被 save_statistics 抛 ValueError
+        remark (str): 备注信息（写入 defect_statistics.remark）；默认空串
+
+    返回:
+        BridgeResult: 三态桥接结果（成功有结果 / 无可桥接内容 / 失败）
+
+    异常:
+        无（硬契约：桥接是旁路能力，所有异常都转成 BridgeResult.error）
+    """
+    directory = Path(results_dir)
+    if not directory.is_dir():
+        logger.debug(f"桥接跳过：Allure结果目录不存在 | 目录: {directory}")
+        return BridgeResult()
+    if not any(directory.glob(f"*{RESULT_SUFFIX}")):
+        logger.debug(f"桥接跳过：目录内无Allure结果文件 | 目录: {directory}")
+        return BridgeResult()
+
+    try:
+        results = ReportAnalyzer.parse_results_dir(directory)
+        if not results:
+            logger.warning(f"桥接跳过：结果文件全部解析失败 | 目录: {directory}")
+            return BridgeResult()
+        statistics = ReportStatistics.aggregate(results)
+        ReportRepository.save_statistics(
+            stat=statistics,
+            execution_id=execution_id,
+            remark=remark,
+        )
+    except Exception as exc:
+        # 桥接是旁路能力：入库失败只记录，绝不向上抛把执行结果一起带走
+        error = f"{type(exc).__name__}: {exc}"
+        logger.error(
+            f"Allure结果桥接失败 | 目录: {directory} | 批次: {execution_id} | "
+            f"异常: {error}"
+        )
+        return BridgeResult(parsed_count=0, statistics=None, error=error)
+
+    return BridgeResult(parsed_count=len(results), statistics=statistics)
