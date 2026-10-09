@@ -284,7 +284,7 @@ def test_source_ref_persists_over_512_chars(tmp_path: Path, monkeypatch: pytest.
     SQLite 不实现 VARCHAR 长度约束，SQLAlchemy 的 String(512) 在 SQLite 上
     只是声明；真正会拒绝的是 MySQL（非严格模式截断/严格模式报错）。
     本用例把这一事实钉死，避免有人误以为"超长会被库挡住"而在入库前
-    另写一套校验；Day68 切 MySQL 后需按届时实际模式重测。
+    另写一套校验；后续切 MySQL 模式后需按届时实际模式重测。
     """
     db_path = tmp_path / "long_ref.db"
     monkeypatch.setenv("TM_DB_TYPE", "sqlite")
@@ -769,7 +769,7 @@ def test_mysql_mode_skips_migration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backup_dir: Path
 ) -> None:
     """
-    MySQL 模式打印警告并跳过重建（Day68 前不 DROP 生产表）
+    MySQL 模式打印警告并跳过重建（当前阶段不 DROP 生产表）
 
     create_engine 是惰性连接，此处只构造引擎、不会真连 MySQL。
     """

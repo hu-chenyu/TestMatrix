@@ -10,8 +10,8 @@ source_ref 字段数据库迁移模块（Day46）
 方案选择（为何是"重建库"而非 ALTER）:
     当前阶段 SQLite 为主、数据量小（种子库仅数条用例），重建库能拿到
     **与 create_all 完全一致的新表结构**，而 ALTER ADD COLUMN 逐个追加
-    历史遗留的类型/约束会与 models.py 声明漂移。故 Day46-67 走重建库，
-    Day68 切 Alembic 后改用轻量 ALTER 迁移。
+    历史遗留的类型/约束会与 models.py 声明漂移。故当前阶段走重建库，
+    后续如引入 Alembic 等迁移工具后改用轻量 ALTER 迁移。
 
 数据往返保真的实现口径:
     读写两侧**都用裸值进出**（读走 SQLAlchemy 核心 select、结果取 mappings，
@@ -22,7 +22,7 @@ source_ref 字段数据库迁移模块（Day46）
     新增列（source_ref）不在旧库中，由写回时显式补 None。
 
 MySQL 双模式:
-    Day68 前不执行 MySQL 重建（重建 = DROP 全部表，生产数据不可承受），
+    当前阶段不执行 MySQL 重建（重建 = DROP 全部表，生产数据不可承受），
     migrate_add_source_ref() 在 MySQL 模式下仅打印警告并返回，
     待 Alembic 的 ALTER 方案落地后再补。
 """
@@ -547,7 +547,7 @@ def migrate_add_source_ref() -> dict[str, Any]:
     执行 source_ref 字段迁移（重建库方案）
 
     迁移流程:
-        1. 判定后端；MySQL 直接告警返回（Day68 前不做生产重建）
+        1. 判定后端；MySQL 直接告警返回（当前阶段不做生产重建）
         2. 读取旧库全部数据快照
         3. 备份（空库无数据可备份、幂等窗口内已有备份时跳过）
         4. drop_all + create_all 重建为新表结构
@@ -574,10 +574,10 @@ def migrate_add_source_ref() -> dict[str, Any]:
 
     if backend != "sqlite":
         # MySQL 重建等于 DROP 全部表，生产数据不可承受；
-        # Day68 接 Alembic 后改走 ALTER TABLE ADD COLUMN
+        # 后续接入 Alembic 后改走 ALTER TABLE ADD COLUMN
         logger.warning(
             f"当前为 {backend} 模式，source_ref 迁移暂不执行，"
-            f"请等待 Day68 的 Alembic ALTER 迁移方案"
+            f"请等待后续 Alembic ALTER 迁移方案落地"
         )
         return {
             "status": STATUS_UNSUPPORTED,
