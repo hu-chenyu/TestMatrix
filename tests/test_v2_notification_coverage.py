@@ -29,10 +29,10 @@ TestMatrix 大扫除 v2 · 任务一：notification 异常路径覆盖补齐
   是否留痕、是否脱敏"，不触碰真实服务
 - **重试等待用 router.sleeper 注入桩**（记调用次数、零耗时），
   绝不真 sleep：既满足禁固定 sleep 铁律，又不拖慢测试
-- 关键断言对齐 PROJECT_CONTEXT 6.1「通知是旁路能力」：任何单渠道故障都不得
+- 关键断言对齐项目设计原则「通知是旁路能力」：任何单渠道故障都不得
   影响其它渠道，也不得让业务主流程失败
 
-测试铁律（对齐 PROJECT_CONTEXT.md 6.1 + 7.17）
+测试铁律（对齐项目设计原则：通知旁路+日志捕获规范）
 - loguru 日志断言一律用临时 sink，**不得用 caplog**（loguru 不经
   stdlib logging 通道，caplog 返回空列表会让人误判"没记日志"）
 - 无 time.sleep 固定等待，无 print
@@ -440,7 +440,7 @@ class TestSmtpConnectionLifecycle:
         """
         渠道开关关闭时 send 返回 False 且完全不建连
 
-        默认关闭是设计（PROJECT_CONTEXT 6.21 同款：灰度可随时切回），
+        默认关闭是设计（项目灰度设计原则同款：灰度可随时切回），
         关着时不该产生任何 SMTP 连接。
         """
         monkeypatch.setenv("TM_EMAIL_ENABLED", "false")
@@ -764,7 +764,7 @@ class TestRouterIsolation:
         """
         渠道循环内的异常被隔离、其它渠道不受影响（行1618-1623）
 
-        这是 PROJECT_CONTEXT 6.1「通知是旁路能力」的核心守卫：任一渠道环节抛异常
+        这是项目设计原则「通知是旁路能力」的核心守卫：任一渠道环节抛异常
         绝不能连带其它渠道失败，更不能让批次收尾流程崩掉。
 
         **触发方式说明**（本文件最反直觉的一处）: 渠道 try 块内包了

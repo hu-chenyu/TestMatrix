@@ -29,7 +29,7 @@ TestMatrix 大扫除 v2 · 任务一：executions SSE 与入参边缘路径覆�
   不靠真实执行编排造终态：既确定性更高，又避开后台线程与 teardown 竞态（7.12）
 - 事件通道注册表每条用例前后 reset（7.13）
 
-测试铁律（对齐 PROJECT_CONTEXT.md 7.12 / 7.13）
+测试铁律（对齐项目既有测试约定：确定性优先+幂等铁律）
 - 无 time.sleep 固定等待
 - 每条用例独立临时 SQLite 库
 - 通道注册表 autouse 清洁
@@ -375,7 +375,7 @@ class TestSseDegradedBranches:
             staticmethod(lambda _eid: detail),
         )
         # 请求2 的 Last-Event-ID 必须来自请求1 **实际收到的 id**。
-        # v5 修正（Hy4 指出）: 原先硬编码 "live:0"，那与"降级帧是否带
+        # v5 评审修正: 原先硬编码 "live:0"，那与"降级帧是否带
         # id"毫无关系——无论降级帧带不带 db:1，请求2 带的都是 live:0，
         # 撤销修复后本用例照样全绿（空转）。
         #

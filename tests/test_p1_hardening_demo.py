@@ -22,7 +22,7 @@ TestMatrix 阶段B-1: P1止血修复的回归测试
         8. test_worker_survives_non_dict_payload
            队列混入非dict载荷后 worker 线程存活且后续合法任务被消费
 
-测试铁律（对齐 PROJECT_CONTEXT.md 7.12/7.19 + 验收清单第三条）:
+测试铁律（对齐项目既有测试约定：确定性优先+幂等铁律）:
     - 时序/线程用例一律轮询终态，禁止固定 sleep 赌时序
     - worker 线程由 fixture 统一 start/stop，teardown 严格复位，线程绝不跨例
     - 队列与缓存是两个独立单例，setup/teardown 两侧都 reset_backend
@@ -92,7 +92,7 @@ def db_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator:
 
     口径同 worker_client 但不开队列/worker——本组用例同步直调
     _execute_batch_async，验证批次状态机与收尾步骤的确定性行为
-    （PROJECT_CONTEXT.md 7.12 确定性优先）。
+    （项目测试约定：确定性优先）。
 
     参数:
         monkeypatch (pytest.MonkeyPatch): 环境变量覆写fixture

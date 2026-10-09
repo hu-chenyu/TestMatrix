@@ -33,7 +33,7 @@ TestMatrix Day24: 用例执行触发API测试
       （模拟执行0.01s/条必然完成，10次×0.3s预算远超执行耗时）
     - 所有触发过线程的测试结束前轮询至终态，防teardown与
       后台线程竞态（DatabaseSession.reset()期间线程重建引擎
-      可能指向库外文件，见PROJECT_CONTEXT 7.12）
+      可能指向库外文件，按项目测试约定）
 
 测试基建:
     临时SQLite文件库（tmp_path + 前后DatabaseSession.reset()防

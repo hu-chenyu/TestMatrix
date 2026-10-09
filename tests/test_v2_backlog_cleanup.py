@@ -24,7 +24,7 @@ C组 serial_client expect 分支去掉盲等
   提取是否真正生效的直接证据；比断言行为更能防止将来又复制一份
 - C组用 MagicMock 拦截 read_until/read_all，并断言 sleep 未被调用
 
-测试铁律（对齐 PROJECT_CONTEXT.md 7.12/7.13/验收清单第三条）
+测试铁律（对齐项目既有测试约定：确定性优先+幂等铁律）
 - 无 time.sleep 固定等待
 - 不依赖真实串口硬件（全部 MagicMock 桩）
 - 事件通道独立实例，不入全局注册表，零跨例污染

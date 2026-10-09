@@ -34,7 +34,7 @@ TestMatrix 阶段B-2: P2 安全与健壮性修复的回归测试
         24. test_filter_cases_normal_flow_unchanged
         25. test_router_skips_channel_without_message_template
 
-测试铁律（对齐 PROJECT_CONTEXT.md 7.12/7.19 + 验收清单第三条）:
+测试铁律（对齐项目既有测试约定：确定性优先+幂等铁律）:
     - 无固定 sleep 赌时序
     - 每条用例独立临时 SQLite 库，teardown 严格复位引擎与事件通道
     - 全程 fake:// 内存后端，零真实 Redis / 零真实网络

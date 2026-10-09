@@ -28,7 +28,7 @@ TestMatrix 阶段C-2: Redis 任务队列未覆盖分支的补齐测试
     B组每条都用"坏任务 + 好任务"成对入队，以好任务跑到终态作为
     worker 存活的判据——单看坏任务被跳过无法区分"跳过"和"线程已死"。
 
-测试铁律（对齐 PROJECT_CONTEXT.md 7.12/7.16/7.19 + 验收清单第三条）:
+测试铁律（对齐项目既有测试约定：确定性优先+幂等铁律）:
     - 禁 time.sleep(N) 赌时序：一律轮询状态 hash 终态字段
       （finished_at）并设预算上限，worker 由 contextmanager 统一停
     - 每条用例独立 TaskQueueClient 实例 + 独立队列 key，fake 数据零串扰

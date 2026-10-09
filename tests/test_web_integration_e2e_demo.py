@@ -44,7 +44,7 @@ TestMatrix Day28: 跨API端到端集成测试
       对得上，而不是只断言各接口返回200
     - 轮询批次终态一律走GET /api/executions/<id>/status真实HTTP，
       禁止直调CaseManager.get_execution_status（集成测试必须走API
-      层，见PROJECT_CONTEXT 7.12）
+      层，按项目测试约定）
     - 触发后台线程的用例统一_wait_batch_terminal轮询至终态后再断言
       （禁止固定sleep赌时序）；conftest的autouse fixture已全局禁用
       真实通知渠道，触发执行零真实邮件/零网络
@@ -126,7 +126,7 @@ def e2e_client(
     无跨用例残留），前后重置DatabaseSession引擎单例（防Windows
     文件句柄残留与测试间引擎状态污染）；teardown额外复位事件
     通道注册表——触发执行会建通道，终态虽自动清理，多复位一次
-    兜底防daemon线程late publish串测试（见PROJECT_CONTEXT 7.13）；
+    兜底防daemon线程late publish串测试（按项目幂等铁律）；
     清除TM_EXECUTOR环境变量保证未显式传executor的触发确定走
     simulated执行器。
 

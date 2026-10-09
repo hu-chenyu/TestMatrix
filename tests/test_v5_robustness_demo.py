@@ -3,12 +3,12 @@ TestMatrix 大扫除 v5 · Commit C：健壮性修复回归套件
 
 修复来源
 --------
-本文件覆盖 v4 双 AI 交叉审查（MiniMax 20 条 + Hy4-Preview 8 条）中
+本文件覆盖 v4 第四轮交叉评审（28 条）中
 归属 Commit C 的 4 项修复，每项都对应一处**可复现的行为变化**，
 而非注释或风格调整：
 
     1. _bracket_ipv6_host 按冒号数量区分 IPv6 与 host:port 误配
-       （src/db/db_session.py，Hy4-P2）
+       （src/db/db_session.py，评审 P2 项）
     2. get_config 在 TM_ENV 缺省时告警（src/web/config.py，补
        V2-P2-6 残留缺口中最响亮的一环）
     3. SSE 终态事件豁免断点过滤，重连不再零帧（src/web/routes/

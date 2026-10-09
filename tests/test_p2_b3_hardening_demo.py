@@ -25,7 +25,7 @@ TestMatrix 阶段B-3: P2 竞态/串口/通知/状态机修复的回归测试
     F组 P2-39 http_client 重试方法白名单
         16. test_retry_only_for_idempotent_methods
 
-测试铁律（对齐 PROJECT_CONTEXT.md 7.12/7.19 + 验收清单第三条）:
+测试铁律（对齐项目既有测试约定：确定性优先+幂等铁律）:
     - 无固定 sleep 赌时序
     - worker 线程由 fixture 统一启停，teardown 严格复位，线程绝不跨例
     - 每条用例独立临时 SQLite 库

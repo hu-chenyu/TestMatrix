@@ -57,7 +57,7 @@
 注意（并发安全）:
     本脚本会真实写库。**严禁与全量 pytest 并发运行**——pytest 的
     --alluredir 固定指向 output/allure_results，两个进程会互相删/占该
-    目录导致 INTERNALERROR（见 PROJECT_CONTEXT 7.52）。
+    目录导致 INTERNALERROR（见项目已知坑记录）。
 """
 
 import argparse

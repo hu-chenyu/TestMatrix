@@ -220,7 +220,7 @@ flowchart TD
    argparse 在 `--` 之后停止解析选项，其后全部元素都是位置参数。
 2. **目标路径由 `source_ref` 提供**（第 5 章），多用例的 `source_ref` 去重后
    一次性传入，让 pytest 一次收集并跑完。**不再逐条起进程**。
-3. **保留单用例模式**：`case_type=chip`（板卡串口/telnet 用例）需要独占硬件，
+3. **保留单用例模式**：`case_type=chip`（串口/telnet 用例）需要独占硬件，
    仍走"一条用例一个进程"，但这是显式例外而非默认路径。
 4. **`--alluredir` 必须指向批次隔离目录**，不能是共享的 `output/allure_results`
    （理由见 3.6）。

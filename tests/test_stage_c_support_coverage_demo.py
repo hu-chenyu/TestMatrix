@@ -45,7 +45,7 @@ TestMatrix 阶段C-3: 支撑层未覆盖分支的补齐测试（覆盖率安全�
    损坏，没有任何公开 API 能触达，不替换就永远测不到。断言仍只
     校验对外契约（不抛异常、状态符合预期），不锁死内部实现。
 
-测试铁律（对齐 PROJECT_CONTEXT.md 7.12/7.16/7.19）:
+测试铁律（对齐项目既有测试约定：确定性优先+幂等铁律）:
     - 事件通道用独立 EventChannel 实例（不入全局注册表），零串扰
     - 缓存用独立 CacheClient 实例 + 独立 fake 后端
     - 子进程调用一律 monkeypatch 拦截，绝不真起 py 进程
@@ -115,7 +115,7 @@ def _exception_app(config_name: str) -> Any:
 
 class _LogCapture:
     """
-    loguru 日志捕获器（context manager，PROJECT_CONTEXT 7.17 标准做法）
+    loguru 日志捕获器（context manager，项目日志捕获标准做法）
 
     为什么不用 pytest 的 caplog: loguru 不经过 stdlib logging 的 handler
     体系，caplog 抓不到任何记录，会得到一个永远为空的列表并据此误判

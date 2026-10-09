@@ -55,7 +55,7 @@ def _bracket_ipv6_host(host: str) -> str:
     解析端口会得到 '::1:3306' 并抛
     `ValueError: invalid literal for int() with base 10`。
 
-    **必须按冒号数量区分两种形态**（v5 修正 Hy4-P2）:
+    **必须按冒号数量区分两种形态**（v5 健壮性评审 P2 项）:
         - `count(":") > 1`  -> IPv6 字面量，补方括号
         - `count(":") == 1` -> host:port **误配**（端口另有
           TM_DB_MYSQL_PORT 配置项）。原判定只看"含冒号"，会把
