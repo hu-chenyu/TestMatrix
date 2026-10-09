@@ -336,7 +336,7 @@ class TestBackfillClassification:
     assert classify_case(
       {
         "case_id": "TM-B-0001",
-        "name": "板卡上电自检",
+        "name": "设备上电自检",
         "module": "硬件",
         "case_type": "chip",
         "description": "上电后读取寄存器",
