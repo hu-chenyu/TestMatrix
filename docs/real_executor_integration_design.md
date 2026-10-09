@@ -3,7 +3,7 @@
 > **文件性质**：设计文档（设计日产出，Day45 不含任何 `src/` 实现代码）
 > **适用范围**：真实执行器 Phase-1（Day46-54），为后续 9 天的实现提供唯一设计依据
 > **关联 ADR**：`docs/adr/ADR-001-real-executor-integration.md`（关键决策点与备选方案）
-> **关联实验**：`docs/ast_regression_poc_report.md`（Day45 AST 精准回归 POC 实验记录）
+> **关联实验**：`scripts/ast_regression_poc.py` + `tests/test_ast_regression_poc.py`（AST 精准回归 POC 实验代码）
 
 ---
 

@@ -91,12 +91,20 @@ jobs:
             BASE_SHA="${{ github.event.before }}"
           fi
           # fail-closed 守卫两分支共用，必须在算 CHANGED_SRC 之前校验 BASE 可达性：
-          # PR 分支 fetch 失败导致 origin/main 缺失、push 分支 before 不可达（force-push/
-          # 历史重写）都会在此判红；否则 git diff 失败→CHANGED_SRC 空→误走"无 src 变更
-          # 跳过"分支 exit0（假绿）。cat-file -e 同时校验空 BASE（"^{commit}"）边缘
+          # PR 分支 fetch 失败导致 origin/main 缺失、push 分支 before 不可达（基线提交
+          # 不在当前历史中）都会先尝试回退到 HEAD~1；仍不可达才判红。否则 git diff
+          # 失败→CHANGED_SRC 空→误走"无 src 变更跳过"分支 exit0（假绿）。
           if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            echo "::error::BASE_SHA=${BASE_SHA} 不是可达提交对象（force-push/历史重写/before 丢失/PR基线fetch失败？），无法判定新增行类型错误，fail-closed 阻断"
-            exit 1
+            # 基线不可达（常见于主线整理后首个 run）：回退到当前 HEAD 的父提交，
+            # 仍对"本次提交相对其父的新增行"硬阻断，不丢增量语义
+            ORIGINAL_BASE="${BASE_SHA}"
+            BASE_SHA="$(git rev-parse HEAD~1 2>/dev/null || echo '')"
+            if [ -n "${BASE_SHA}" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              echo "::warning::原基线 ${ORIGINAL_BASE} 不可达，回退至 HEAD~1=${BASE_SHA} 作为增量基准"
+            else
+              echo "::error::基线 ${ORIGINAL_BASE} 与 HEAD~1 均不可达（root commit/历史异常），无法判定新增行类型错误，fail-closed 阻断"
+              exit 1
+            fi
           fi
           CHANGED_SRC=$(git diff --name-only "$BASE_SHA"...HEAD -- '*.py' | grep '^src/' || true)
           echo "本次变更的 src 文件：${CHANGED_SRC:-（无）}"

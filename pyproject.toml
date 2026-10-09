@@ -34,9 +34,8 @@ markers = [
     "slow: 耗时较长的用例",
 ]
 norecursedirs = "output docs examples docker .git .idea .vscode venv"
-# 失败用例自动重跑 2 次、间隔 1 秒（偶发抖动自动恢复）
-reruns = 2
-reruns_delay = 1
+# 失败用例不自动重跑（与 pytest.ini 一致；reruns 由 pytest.ini 统一管控，此处仅作同口径备份）
+reruns = 0
 # 日志格式与 Loguru 风格保持统一
 log_cli = false
 log_cli_level = "INFO"
