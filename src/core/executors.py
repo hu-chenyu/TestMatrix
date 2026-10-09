@@ -493,7 +493,7 @@ def inject_allure_options(command: list[str], allure_dir: Path) -> list[str]:
     ]
 
 
-def resolve_bridge_execution_id(case: dict) -> str:
+def resolve_bridge_execution_id(case: dict[str, object]) -> str:
     """
     推导 Allure 桥接使用的执行批次号（Day50 任务二）
 
@@ -1433,7 +1433,7 @@ class PytestRunner(BaseExecutor):
             )
             return None
 
-    def bridge_allure_results(self, allure_dir: Path, case: dict) -> str:
+    def bridge_allure_results(self, allure_dir: Path, case: dict[str, object]) -> str:
         """
         把本次执行的独立 Allure 结果目录桥接到统计库（Day50 任务二）
 
