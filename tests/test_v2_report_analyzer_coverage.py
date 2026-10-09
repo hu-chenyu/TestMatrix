@@ -34,7 +34,7 @@ TestMatrix 大扫除 v2 · 任务一：report_analyzer 边缘路径覆盖补齐
 - 断言一律校验"异常照原样上抛且不吞掉"，不锁死日志文案全文。
 - 不覆盖的语句：无。本文件 29 条目标语句全部可测。
 
-测试铁律（对齐 PROJECT_CONTEXT.md 7.16）
+测试铁律（对齐项目既有测试约定：数据隔离）
 - 每条涉及数据库的用例独立临时 SQLite 库，teardown 严格 reset
 - 无 time.sleep 固定等待，无 print
 """
