@@ -13,6 +13,11 @@
 串口用 pyserial `loop://` 伪串口、Telnet 用本地 socket 模拟验证；
 暂无真机设备验证条件，真机适配需在具备设备后按实测补验。
 
+**Python 版本兼容性**：`telnetlib` 已在 Python 3.13 移除（PEP 594），
+当前 Telnet 客户端在 3.13+ 下实例化时抛 `RuntimeError` 明确指引迁移（非裸崩），
+主链路（执行/解析/报告/Web/队列）不受影响。迁移至 `telnetlib3` 或 socket 自实现
+排 v3.6 Day74（与 Python 升级同批）。
+
 ## 3. 不迁 FastAPI / asyncio
 
 见 ADR-0001。当前 Flask 同步模型已满足单机工具定位，
