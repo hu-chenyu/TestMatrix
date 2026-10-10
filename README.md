@@ -1,6 +1,6 @@
 # TestMatrix 通用自动化测试效能平台
 
-[![CI](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/) [![tests 1434](https://img.shields.io/badge/tests-1434%20passed-brightgreen)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![coverage 98.97%](https://img.shields.io/badge/coverage-98.97%25-brightgreen)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml)
+[![CI](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/) [![tests 1473](https://img.shields.io/badge/tests-1473%20passed-brightgreen)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![coverage 99.05%](https://img.shields.io/badge/coverage-99.05%25-brightgreen)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml)
 
 > **你的平台绿了，你确定是真绿吗？**
 >
@@ -16,11 +16,11 @@
   多条"常量断言冒充行为覆盖"的用例——把常量改成 1e-9 等效关闭，测试照样绿，
   分支实测 0 覆盖。没被变异验证校准过的覆盖率，只是行覆盖率，不是行为覆盖率；
   过程中两次推翻自己的审查结论并留痕，不悄悄改写；
-- **CI 会拦住"删测试换绿"**：测试收集总数下限断言（基线 1434，只增不减），
+- **CI 会拦住"删测试换绿"**：测试收集总数下限断言（基线 1473，只增不减），
   少一条即红；零收集不容忍（exit 5 也判红）；mypy 崩溃守卫——类型检查器自身
   报错时 fail-closed 判红，杜绝"工具没跑=检查通过"（源于 CI 级联跳过真实事故）；
-- **1434 条测试 / 98.97% 覆盖 / 0 warning / 0 failed**：CI 双 job 全绿
-  （Python 3.11 主 + 3.12 探测位）；提交不间断，48 天里 47 天有提交（唯一空档是周日）。
+- **1473 条测试 / 99.05% 覆盖 / 0 warning / 0 failed**：CI 双 job 全绿
+  （Python 3.11 主 + 3.12 探测位）；提交不间断（唯一空档为 2026-09-06 周日）。
 
 ## 快速开始
 
@@ -106,7 +106,7 @@ docker compose -f docker/docker-compose.yml --profile mysql up -d
 "跑出来的结论凭什么可信"：
 
 1. **CI 不允许靠删测试变绿。**
-   多数仓库的覆盖率门禁只卡百分比——删掉 10 条测试，覆盖率从 88% 升到 89%，绿灯反而更亮。TestMatrix 的 CI 里有一条测试总数下限断言：1434 是下限，删一条就红。
+   多数仓库的覆盖率门禁只卡百分比——删掉 10 条测试，覆盖率从 88% 升到 89%，绿灯反而更亮。TestMatrix 的 CI 里有一条测试总数下限断言：1473 是下限，删一条就红。
 
 2. **覆盖率数字是被变异验证校准过的。**
    变异验证会主动改坏生产代码、确认用例真的会红。我们第一次跑它就打穿了多条"常量断言冒充行为覆盖"的用例——把常量改成 1e-9 等效关闭，测试照样绿，分支实测 0 覆盖。没被变异验证校准过的覆盖率，只是行覆盖率，不是行为覆盖率。
@@ -148,7 +148,7 @@ docker compose -f docker/docker-compose.yml --profile mysql up -d
 ## 工程质量与纪律
 
 - **CI 五层门禁**：ruff 不豁免 → mypy 新增行硬阻断（崩溃即红）→ 覆盖率 85% 硬门禁 + 测试收集总数下限断言 → pip-audit 高危 fail-closed（豁免单必须带未过期的过期日）→ 探测版本不阻断
-- **五轮质量大扫除**：79 条 bug 逐轮清零，安全类修复逐条变异验证，覆盖率 93%→98.97%，测试 497→1434
+- **五轮质量大扫除**：79 条 bug 逐轮清零，安全类修复逐条变异验证，覆盖率 93%→99.05%，测试 497→1473
 - **能力边界公开**：每个能力边界写进 KNOWN_LIMITATIONS，不做无证据承诺
 - **ADR 即时写**：架构决策发生当天写进 docs/adr/，不事后统一补写
 
