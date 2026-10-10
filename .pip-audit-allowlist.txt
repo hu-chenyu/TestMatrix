@@ -18,7 +18,7 @@ pytest==7.4.4 # 豁免原因：PYSEC-2026-1845（UNIX /tmp/pytest-of-{user} 固�
 
 PyMySQL==1.1.0 # 豁免原因：PYSEC-2026-502（escape_dict 不转义字典 key 致 SQL 注入，修复于 1.1.1）；已 grep 核实 src/ 从不 import pymysql、不调用 escape_dict，数据库访问全部经 SQLAlchemy 2.0 ORM/表达式（参数化），全库仅有两处 text("SELECT 1") 常量健康检查语句不含任何外部输入，漏洞触达路径不存在；patch 升级 1.1.1 待与 MySQL 链路统一验证，过期日：2026-11-10，修复计划：Day74 升级窗口升至 PyMySQL 1.1.1 并补一轮 MySQL 模式联调
 
-Flask==2.3.3 # 豁免原因：PYSEC-2026-2151（session 键级访问漏设 Vary: Cookie 致缓存可能含敏感信息，修复于 3.1.3，2.3.x 线无修复版）；利用前提苛刻：部署在不忽略带 Cookie 响应的缓存代理之后+应用不设 Cache-Control+仅访问 session 键不读值不改写；本项目为无服务端会话的无状态 JSON API（不读写 Flask session、无登录态），Web 层未配置缓存代理拓扑，实际暴露面为零；当前明确不升级 Flask，过期日：2026-11-10，修复计划：按项目升级计划 Flask 2.3→3.x 升级时同步消除
+Flask==2.3.3 # 豁免原因：PYSEC-2026-2151（session 键级访问漏设 Vary: Cookie 致缓存可能含敏感信息，修复于 3.1.3，2.3.x 线无修复版）；利用前提苛刻：部署在不忽略带 Cookie 响应的缓存代理之后+应用不设 Cache-Control+仅访问 session 键不读值不改写；本项目为无服务端会话的无状态 JSON API（不读写 Flask session、无登录态），Web 层未配置缓存代理拓扑，实际暴露面为零；当前明确不升级 Flask，过期日：2026-11-10，修复计划：Flask 大版本冻结期不消除，D75 冻结期 CVE 核查复核（不升级）；若未来解冻升级再同步
 
 python-dotenv==1.0.0 # 豁免原因：PYSEC-2026-2270（set_key()/unset_key() 跨设备 rename 回退时跟随符号链接可覆写任意文件，修复于 1.2.2；本地攻击者需能在 .env 所在目录预置符号链接）；已 grep 核实 src/ 只调用 load_dotenv() 读取配置，从不调用 set_key/unset_key 改写 .env，漏洞函数不在调用面内；运行账户对配置目录也无其他本地用户写入，过期日：2026-11-10，修复计划：Day74 升级窗口升至 python-dotenv 1.2.x
 

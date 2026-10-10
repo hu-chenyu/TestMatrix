@@ -1,6 +1,6 @@
 # ADR-0001: Web 框架选型——Flask 2.3 而非 FastAPI
 
-- 状态：已接受（Day75 计划升级 Flask 3.x，本决策不变）
+- 状态：已接受（维持 Flask 2.3 冻结；2026-10 v3.6 共识取消 3.x 升级，D75 改冻结期 CVE 核查）
 - 日期：2026-09-07（Day17）；追溯补录于 2026-09-27（Day37）
 
 ## 背景与问题
@@ -28,5 +28,4 @@ Web 后端（Day17 启动）需要一个 Python Web 框架承载：多页面后�
 - 正向：同步栈与后台线程模型（`_execute_batch_async`/event_bus/task_queue worker）天然契合；
   SSE 三分支（实时订阅/终态补发/DB 重建）实现直接；依赖面小。
 - 负向：Flask 2.3 自 3.0（2023-09）起无安全 backport；无自动 OpenAPI（API.md 人工维护）。
-- 后续动作：Day75 升级 Flask 3.x，**必须同链升 Werkzeug≥3.1 / Jinja2 / itsdangerous / blinker**，
-  CI 矩阵分支验证，绿了才合；telnet 之外的 3.13 兼容性在 Day74-75 升级窗口统一验证。
+- 后续动作：经 v3.6 共识调整，Flask 大版本冻结，D75 仅做 Werkzeug/Jinja2/itsdangerous/blinker CVE 核查，不升级 3.x（升级收益低于回归风险）；3.13 兼容性在 Day74 Python 升级窗口统一验证。
