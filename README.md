@@ -158,7 +158,7 @@ docker compose -f docker/docker-compose.yml --profile mysql up -d
 | 数据驱动 | PyYAML / openpyxl |
 | 数据层 | SQLAlchemy 2.0（SQLite 3 / MySQL 8.0） |
 | 缓存与队列 | Redis（已交付） |
-| Web平台 | Flask 2.3 →3.x（规划升级，同链升 Werkzeug/Jinja2）+ Jinja2 + Bootstrap 5 + ECharts 5 |
+| Web平台 | Flask 2.3（大版本冻结，D75 冻结期 CVE 核查，不升级 3.x）+ Jinja2 + Bootstrap 5 + ECharts 5 |
 | 代码分析 | AST 精准回归（脚本级：覆盖映射+import 拓扑） |
 | 工程化 | Git / Jenkins / Docker / Docker Compose / k6 |
 
