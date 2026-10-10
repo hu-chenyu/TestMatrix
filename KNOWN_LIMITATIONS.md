@@ -34,3 +34,17 @@
 SQLite 本地库的 schema 迁移当前通过 `src/db/migration.py` 重建库方案执行，
 全新 clone 用户首次运行 `init_db()` 自动建表。
 后续如引入迁移工具（Alembic）再改用轻量 ALTER 迁移（当前未排期）。
+
+## 6. Windows 本地全量 pytest 偶发 allure 目录竞态（负载敏感 flake）
+
+**现象**：Windows 本机高 IO 负载下全量运行时，`tests/test_day44_bugfix_demo.py::test_real_subprocess_failed`
+偶发判定为 `error` 而非 `failed`（嵌套 pytest 与外层 allure 写盘竞争固定目录
+`output/allure_results`，触发 `--clean-alluredir` 互删/互占 → INTERNALERROR，退出码 3 被归为 error）。
+
+**复现特征**：非确定性——串行全量可复现 1473 全绿，高 IO 并行下偶发 1 败；
+CI（ubuntu-24.04）不受影响（文件系统时序差异）。`pytest.ini` L57-58 已记录
+WinError 145 已知问题与手动处置（删目录后重跑）。
+
+**修复排期**：v3.6 Day53（conftest per-run 唯一 alluredir，消除嵌套 pytest 与外层
+会话的目录竞争）。在 D53 修复前，Windows 本地全量以串行执行为准，偶发失败
+重跑即可；不得因此调整 CI 基线或测试数。
