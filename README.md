@@ -37,6 +37,8 @@
 
 项目已在 PyPI 预留包名 **`testopshub`**（当前 v0.0.4 为占位包，用于包名预留；正式功能将随项目里程碑逐步发布）。
 
+> 命名对应：PyPI 分发名 `testopshub`、Python 导入名 `testopshub`，均对应本项目 **TestMatrix**（项目仓库名与对外品牌名）。
+
 ```bash
 # 占位包（当前无可调用功能，仅用于包名预留）
 pip install testopshub
