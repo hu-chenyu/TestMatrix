@@ -11,7 +11,7 @@
 | --- | --- | --- | --- |
 | [0001](0001-flask-vs-fastapi.md) | Web 框架选型：Flask 2.3 而非 FastAPI | 2026-09-07（Day17，追溯补录于 Day37） | 已接受；维持 2.3 冻结（原"升级 3.x"经 v3.6 共识取消），D75 冻结期 CVE 核查 |
 | [0002](0002-redis-queue-design.md) | 任务调度用 LPUSH/BRPOP list 队列而非 pub/sub；event_bus 与 task_queue 并存 | 2026-09-15/09-22（Day25/Day32，追溯补录于 Day37） | 已接受 |
-| [ADR-001](ADR-001-real-executor-integration.md) | 真实执行器接入的关键技术选型（subprocess 而非内嵌 pytest API / 独立 alluredir / 输出解析器设计） | 2026-10-05（Day45，设计日即时写） | 已接受；命名待 Day54 复盘时统一为 0003 编号体系 |
+| [ADR-001](ADR-001-real-executor-integration.md) | 真实执行器接入的关键技术选型（subprocess 而非内嵌 pytest API / 独立 alluredir / 输出解析器设计） | 2026-10-05（Day45，设计日即时写） | 已接受；命名待 D59 复盘时统一为 0003 编号体系（插件打包+ADR-0004+001→0003 重编号） |
 
 ## 模板
 
