@@ -33,6 +33,17 @@
 - Python 3.11+
 - （可选）Allure 命令行工具（生成 HTML 报告用）：[安装指引](https://allurereport.org/docs/install-for-windows/)
 
+### PyPI 包
+
+项目已在 PyPI 预留包名 **`testopshub`**（当前 v0.0.4 为占位包，用于包名预留；正式功能将随项目里程碑逐步发布）。
+
+```bash
+# 占位包（当前无可调用功能，仅用于包名预留）
+pip install testopshub
+```
+
+> 当前推荐通过 `git clone` + `pip install -r requirements.txt` 方式运行（见下方 3 步运行）；正式功能发布后将支持 `pip install testopshub` 直接安装使用。
+
 ### 3 步运行（30 秒看到结果）
 
 ```bash
