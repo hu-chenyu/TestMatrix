@@ -12,15 +12,15 @@
 [project]
 name = "TestMatrix"
 version = "0.1.0"
-description = "通用自动化测试效能平台"
+description = "测试可信度治理平台"
 requires-python = ">=3.11"
 
 # ------------------------------ pytest 配置（与 pytest.ini 同口径备份） ------------------------------
 [tool.pytest.ini_options]
 # 仅识别 tests/ 目录下的用例文件，避免误收集 src/ 业务代码
 testpaths = ["tests"]
-# 将 src 目录加入 sys.path；实际运行以 pytest.ini 的 pythonpath=. 为准（用例统一 from src.xxx 导入）
-pythonpath = ["src"]
+# 将项目根目录加入 sys.path（与 pytest.ini 一致；用例统一 from src.xxx 导入）
+pythonpath = ["."]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
