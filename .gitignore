@@ -98,3 +98,6 @@ allure-report/
 /docs/frontend_phase_review_*.md
 /docs/ast_regression_poc_report.md
 /docs/presentations/
+# 本地调研与评估文档（不入库）
+/docs/TestMatrix_重排方案_*.md
+/docs/TestMatrix_*评估_*.md
