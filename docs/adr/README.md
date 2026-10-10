@@ -29,7 +29,6 @@
 
 ## 后续待写（按排期触发，当日建档）
 
-- Day45：真实执行器为何用 subprocess 而非内嵌 pytest API
 - Day57：pytest 插件 vs 钩子的选型取舍
 - Day71：Jenkins 与 GitHub Actions 的分工
 - AST 量化实验后：为何覆盖映射为主而非纯 AST
