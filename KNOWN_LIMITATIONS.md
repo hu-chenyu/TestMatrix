@@ -52,6 +52,20 @@ SQLite 本地库的 schema 迁移当前通过 `src/db/migration.py` 重建库方
 Windows 本机连续 3 次全量 1473 全绿"）。在 D53 修复前，Windows 本地全量以串行
 执行为准，偶发失败重跑即可；不得因此调整 CI 基线或测试数。
 
+**同族另一例（缓存基准穿透用例，四轮全量实跑 1 红 3 绿）**：
+`tests/test_benchmark_cache_demo.py:358`
+`test_runner_penetration_empty_result_and_invalidation` 在 Windows 全量套件中偶发失败
+（失败轮 1 failed / 1472），**单测隔离连跑 5/5 全绿**，其余三轮全量全绿。
+机理是 fakeredis 单例 `cache_client` 与同类 TTL 用例共享状态，叠加全量套件的用例执行
+顺序，偶发落在 TTL 边界上。Linux CI 不受影响（未复现）。
+
+该用例自身有**两处自相矛盾的注释**：`L364` docstring 声明"此处不等待 sleep"，
+`L369` 注释却写"TTL 子场景会 sleep 1.5s"——这正是后人无法据代码复现判断的直接原因，
+两处均需订正（订正本身应作为该 flaky 的修复动作之一，否则重跑仍无法定位）。
+
+处置与上条同口径：**不阻断 CI、不调整测试数基线、不加重跑掩盖**，挂 Flaky 治理专项
+与 D53 同批处理。这也是本项目"禁 flaky"铁律下已登记的第 2 例未收敛项。
+
 ## 7. Web 层无鉴权（单机 / 受信网络定位）
 
 本条**不是新披露**：无鉴权这一边界此前已声明四处，但分散在 API 文档首屏、运行时告警、

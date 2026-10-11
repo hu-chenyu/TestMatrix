@@ -97,8 +97,7 @@ allure-report/
 /docs/ast_*report*.md
 /docs/presentations/
 # 本地调研与评估文档（不入库）
-/docs/TestMatrix_重排方案_*.md
-/docs/TestMatrix_*评估_*.md
+/docs/TestMatrix_*.md
 
 # 发布合规词表（本地维护，不入库）
 #  与 AquaMind 的 .wordlist.local 同源，跨仓库共享一份禁忌词表。
