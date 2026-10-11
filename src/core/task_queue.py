@@ -40,8 +40,11 @@ payload约定（与_execute_batch_async真实签名严格对齐）:
 """
 
 import json
+import os
+import socket
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -135,6 +138,63 @@ CLAIM_TTL_SECONDS = 3600
 # 300 秒足以覆盖绝大多数正常批次，同时让崩溃恢复足够快。
 STALE_PROCESSING_SECONDS = 300
 
+# ===========================================================================
+# 在途归属与心跳（Day51 任务二 a/d）
+# ===========================================================================
+#
+# 为什么心跳判据要独立于 STALE_PROCESSING_SECONDS：
+#   后者衡量的是"任务被取出后多久还没结束"，用的是 started_at；
+#   而崩溃补偿真正要回答的问题是"**持任务的 worker 还活着吗**"。
+#   一个批次可能正常跑十几分钟（started_at 早就超过阈值），只要 worker
+#   一直在刷新心跳，它就绝不该被当成崩溃残留重投——否则每次长批次都会
+#   在自己跑到一半时被复制一份并发执行。两者混用会把"慢"误判成"死"。
+
+# 心跳判定陈旧的 TTL（秒）。与心跳间隔的关系是 **至少 3 倍余量**：
+# 只要 worker 还活着，心跳就会每 HEARTBEAT_INTERVAL_SECONDS 刷新一次，
+# 于是最坏情况下（在刷新瞬间被调度挂起）也有 2 个间隔的容差，
+# 不会因为一次 GC 停顿或一次 Redis 抖动就误判崩溃。
+# 取 60 秒的依据：小于它则真实执行的大批次更容易被误判（宁可重投也不
+# 丢任务），大于它则崩溃后要等更久才能恢复；60 秒与 CLAIM_TTL_SECONDS
+# 的量级关系是"心跳比抢占短一个数量级"，保证补偿窗口先于幂等窗口到期。
+HEARTBEAT_TTL_SECONDS = 60.0
+
+# 心跳刷新间隔（秒）。worker 执行任务期间由独立心跳线程按此周期刷新。
+# 必须显著小于 HEARTBEAT_TTL_SECONDS（取其 1/4），留足容忍抖动余量。
+HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+# 在途状态 hash 中表示归属与心跳的字段名（单一事实来源）
+FIELD_WORKER_ID = "worker_id"
+FIELD_HEARTBEAT_AT = "heartbeat_at"
+FIELD_REQUEUE_COUNT = "requeue_count"
+
+# 单个任务的最大重入队次数（Day51 任务二 c）
+#
+# 为什么必须有上界：崩溃补偿是"至少一次"语义的兜底，若某条任务因任何
+# 原因永远无法真正跑完（载荷里带了一个必炸的执行目标、批次行已被删除、
+# DB 持续不可达），没有上界就会形成"重投→崩溃→重投→崩溃"的永动循环，
+# 把 worker 的空闲轮次全部吃掉并持续刷 WARNING。
+# 取 3 的依据：崩溃补偿真正要救的是"进程被杀"这类一次性的偶发故障，
+# 3 次重投足以覆盖"连续重启 3 次"的极端运维场景；仍失败即视为需要人工
+# 介入，进入死信而不是继续自动重试。
+MAX_REQUEUE_ATTEMPTS = 3
+
+# 死信状态（写入调度层状态 hash，仅用于标记需人工干预）
+#
+# 刻意**不进入** STATUS_PENDING/RUNNING/FINISHED/FAILED 四态词表：
+# 那是"任务真实执行结果"的取值域，而死信是"补偿机制放弃了"的标记，
+# 两者语义不同。权威的业务状态仍以 SQLite 批次行为准。
+STATUS_DEAD_LETTER = "dead_letter"
+
+# 重入队幂等守卫 key 的存活秒数
+#
+# 守卫防的是"同一条在途任务被重复投进队列"（两个 worker 同时扫描到它，
+# 或上一轮重投尚未完成时下一轮又扫到）——那会让队列里出现两条同一批次号
+# 的消息，被先后消费成两次执行。TTL 取 STALE_PROCESSING_SECONDS 是为了
+# 与陈旧判定同节奏：守卫过期后任务若仍在途（说明上一轮重投后仍没跑完）
+# 仍可被再次补偿，**不会因为守卫而永久丢任务**（守卫未抢到时在途条目
+# 原样留在 list 中，下一轮扫描还会再看到它）。
+REQUEUE_GUARD_TTL_SECONDS = STALE_PROCESSING_SECONDS
+
 
 def task_status_key(execution_id: str) -> str:
     """
@@ -166,6 +226,97 @@ def task_claim_key(execution_id: str) -> str:
         无
     """
     return f"tm:claim:{execution_id}"
+
+
+def task_requeue_guard_key(execution_id: str) -> str:
+    """
+    构造重入队幂等守卫的Redis key（纯函数，Day51）
+
+    **刻意与 `task_claim_key` 分开**，两者防的是完全不同的故障：
+
+        tm:claim:{id}    —— 防"同一批次被两条链路同时执行"（Day45 问题2）。
+                           由 _execute_batch_async 在执行入口抢占，
+                           批次终态时释放，TTL 覆盖整个批次时长。
+        tm:requeue:{id}  —— 防"同一条在途任务被重复投进队列"（Day51）。
+                           由 requeue_stale 在重投前抢占，短 TTL。
+
+    为什么绝不能复用 claim key：requeue_stale 若去 SET claim key，
+    要么永远抢不到（旧 worker 正持有，重投被自己挡住、白丢补偿机会），
+    要么覆盖写入（旧 worker 的执行期保护被抹掉，新消费者直接双跑）。
+    两个 key 的语义与生命周期都不同，复用会把"防双跑"变成"制造双跑"。
+
+    参数:
+        execution_id (str): 执行批次号
+
+    返回:
+        str: "tm:requeue:{execution_id}"
+
+    异常:
+        无
+    """
+    return f"tm:requeue:{execution_id}"
+
+
+def generate_worker_id() -> str:
+    """
+    生成 worker 唯一标识（纯函数，Day51）
+
+    组成 "主机名-pid-短随机串" 三段：
+        - 主机名：跨进程区分（同一台机器上可能同时跑着 web 进程内 worker
+          与 scripts/start_worker.py 起的独立 worker 进程）
+        - pid：同一主机内的进程区分
+        - 随机短串：同一进程内**反复重建 worker**（Day44 起 stop_worker
+          后可再次 start_worker）时的区分
+
+    只取 8 位随机后缀不是为了美观：它只需让"同机同 pid 的先后两个
+    worker 实例"区分开即可，长度越长只增加状态 hash 的体积而无收益。
+
+    参数:
+        无
+
+    返回:
+        str: 形如 "host-12345-a1b2c3d4" 的 worker 标识
+
+    异常:
+        无（gethostname 失败时回落空串，标识退化为 "pid-rand" 仍可用）
+    """
+    try:
+        hostname = socket.gethostname()
+    except OSError:
+        # 拿不到主机名不该让 worker 起不来：标识退化为 "pid-随机串"
+        # 仍然满足"同一进程内唯一"这一最低要求
+        hostname = ""
+    return f"{hostname}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+
+def _parse_int_field(value: object, default: int = 0) -> int:
+    """
+    把状态 hash 字段解析为整数（脏值安全，纯函数）
+
+    Redis hash 里的一切都是 str，但**不保证是我们自己写的**——队列是
+    跨进程共享的持久存储，外部写入/历史版本残留都可能留下空串、空格、
+    甚至非数字文本。直接 int(...) 会在补偿路径上抛 ValueError，而这条
+    路径的失败后果是"崩溃任务再也捞不回来"（补偿机制自己崩了）。
+
+    故解析失败一律回落默认值（重投次数 0），让扫描继续。
+
+    参数:
+        value (object): 待解析的字段值
+        default (int): 解析失败时的回落值，默认 0
+
+    返回:
+        int: 解析成功返回整数；失败返回 default
+
+    异常:
+        无
+    """
+    if isinstance(value, bool):
+        # bool 是 int 子类，isinstance(True, int) 为真但语义不是计数
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def failure_backoff_seconds(consecutive_failures: int) -> float:
@@ -657,6 +808,13 @@ class TaskQueueClient:
         不再持有它。执行崩溃时不会调用，任务留在在途 list 等
         requeue_stale 回收。
 
+        **调用顺序铁律（Day51）**：终态必须先落库再 ack。
+        先 ack 会让任务同时从"在途 list"和"可被 requeue_stale 扫到"
+        两个维度消失，而此时业务终态若还没写成功（或写失败了），
+        批次就永久停在 running —— 没有任何补偿路径能把它捞回来。
+        正常收尾请直接用 `complete_task()`，它把"写终态 → ack"封成
+        一条调用链，调用方无法写错顺序。
+
         参数:
             无
 
@@ -671,6 +829,192 @@ class TaskQueueClient:
         if removed:
             self._last_dequeued_raw = None
         return removed
+
+    def mark_in_flight(self, execution_id: str, worker_id: str) -> bool:
+        """
+        标记任务进入在途执行态：running + worker_id 归属 + 初始心跳
+
+        Day51 任务二 (a)：worker 把任务从队列取出后**立即**写这一笔，
+        让"谁正在执行哪条任务"成为可查询的事实，而不是只能靠
+        processing list 里那条匿名报文去猜。
+
+        为什么归属信息落在状态 hash 而不塞进 processing list 的报文：
+        processing list 的元素是原始 JSON 报文，ack 依赖 `LREM` 精确
+        匹配这条报文串；往里塞 worker_id 就得重写报文，等于把"确认语义"
+        和"执行元数据"耦合在一起。状态 hash 本身就是按批次号组织的
+        在途记录，worker_id / 心跳挂在它上面，processing list 只负责
+        "成员资格"，两者职责不重叠。
+
+        参数:
+            execution_id (str): 执行批次号
+            worker_id (str): 执行该任务的 worker 标识
+
+        返回:
+            bool: 写入成功 True；批次号为空/后端不可用/Redis 异常 False
+                  （False 不阻断执行：归属信息缺失只会让补偿机制更保守）
+
+        异常:
+            无
+        """
+        if not execution_id:
+            return False
+        now = datetime.now().isoformat()
+        backend = self._get_backend()
+        if backend is None:
+            return False
+        try:
+            backend.hset(
+                task_status_key(execution_id),
+                mapping={
+                    "status": STATUS_RUNNING,
+                    "started_at": now,
+                    FIELD_WORKER_ID: worker_id,
+                    FIELD_HEARTBEAT_AT: now,
+                },
+            )
+            backend.expire(task_status_key(execution_id), TASK_STATUS_TTL_SECONDS)
+            return True
+        except redis.RedisError as exc:
+            logger.warning(
+                f"在途归属标记写入失败（不影响任务执行）| "
+                f"execution_id={execution_id} | worker={worker_id} | {exc}"
+            )
+            return False
+
+    def heartbeat(self, execution_id: str) -> bool:
+        """
+        刷新在途任务的心跳时间（worker 执行期间周期调用，Day51 任务二 d）
+
+        心跳是"worker 还活着"的唯一可观测证据：任务被取出时只写一次
+        初始心跳，此后只要 worker 仍在执行批次，就由独立心跳线程按
+        HEARTBEAT_INTERVAL_SECONDS 周期刷新。requeue_stale 判陈旧时
+        **优先看心跳**，心跳新鲜就不重投——这样一批正常跑十几分钟的大
+        批次不会因为 started_at 超阈值而被复制成并发双跑。
+
+        参数:
+            execution_id (str): 执行批次号
+
+        返回:
+            bool: 刷新成功 True；批次号为空/无在途记录/后端不可用/
+                  Redis 异常 False
+
+        异常:
+            无
+        """
+        if not execution_id:
+            return False
+        backend = self._get_backend()
+        if backend is None:
+            return False
+        try:
+            backend.hset(
+                task_status_key(execution_id),
+                key=FIELD_HEARTBEAT_AT,
+                value=datetime.now().isoformat(),
+            )
+            return True
+        except redis.RedisError as exc:
+            # 心跳刷新失败只记 debug：连续失败会让最后一次心跳变陈旧、
+            # 任务被当成崩溃残留重投（宁可重投也不丢任务），但单次失败
+            # 远没到需要人工介入的程度，刷 warning 只会污染日志
+            logger.debug(
+                f"心跳刷新失败 | execution_id={execution_id} | {exc}"
+            )
+            return False
+
+    def acquire_requeue_guard(self, execution_id: str) -> bool:
+        """
+        抢占重入队幂等守卫（SETNX + TTL，Day51 任务二 c）
+
+        重投前必须先抢到守卫，否则同一条在途任务会被重复投进队列：
+        两个 worker 同时扫到它、或一轮扫描未完成时下一轮又扫到，
+        都会各自 LPUSH 一次，队列里就出现两条同批次号的消息，
+        被先后消费成两次执行（明细去重只能挡住重复落库，挡不住
+        两次真实执行 + 两次 Allure 桥接）。
+
+        参数:
+            execution_id (str): 执行批次号
+
+        返回:
+            bool: 抢到守卫（此前无人持有/上次守卫已过期）True；
+                  已被他人持有 False；后端不可用时**返回 True**
+                  （守卫只是防重复的优化，不该在 Redis 故障时把
+                   补偿机制整个变成不可用，见 claim 的同款理由）
+
+        异常:
+            无
+        """
+        if not execution_id:
+            return False
+        backend = self._get_backend()
+        if backend is None:
+            return True
+        try:
+            acquired = backend.set(
+                task_requeue_guard_key(execution_id),
+                "1",
+                nx=True,
+                ex=REQUEUE_GUARD_TTL_SECONDS,
+            )
+        except redis.RedisError as exc:
+            logger.warning(
+                f"重入队守卫抢占异常，按放行处理 | "
+                f"execution_id={execution_id} | {exc}"
+            )
+            return True
+        return bool(acquired)
+
+    def complete_task(
+        self,
+        execution_id: str,
+        terminal_status: str,
+        error: str | None = None,
+        state_confirmed: bool = True,
+    ) -> bool:
+        """
+        写终态 + ack 在同一条调用链内完成（Day51 任务二 b）
+
+        这是"ack 与状态回写联动"的唯一入口，把**顺序**变成调用方
+        无法写错的结构约束：先 set_status 落终态，再 ack 移除在途条目。
+
+        不允许反过来做的原因：ack 一旦完成，任务就从在途 list 消失，
+        requeue_stale 再也扫不到它；若此刻业务终态还没写成功，
+        批次会永久停在 running，没有任何补偿路径能捞回来——
+        而"状态没写成"恰恰是数据库异常时最可能发生的事。
+
+        state_confirmed=False 表示**没能确认业务终态已落库**
+        （批次行查不到、状态查询抛错、或查询到的不是终态）。
+        此时仍然写调度层的终态（让任务不至于在状态 hash 上永远停在
+        running），但**拒绝 ack**：让在途条目留在 list 里，由
+        requeue_stale 按心跳 TTL 重新投回，走"至少一次"而不是
+        "至多一次"。代价是可能重跑一次，收益是绝不静默丢任务。
+
+        参数:
+            execution_id (str): 执行批次号
+            terminal_status (str): 调度层终态 finished/failed/dead_letter
+            error (str | None): 终态错误原因，None 表示不写该字段
+            state_confirmed (bool): 业务终态是否已确认落库
+
+        返回:
+            bool: 终态写入且 ack 完成 True；拒绝 ack 或写入失败 False
+
+        异常:
+            无（内部全部异常自兜底，失败只反映在返回值与日志上）
+        """
+        self.set_status(
+            execution_id,
+            terminal_status,
+            finished_at=datetime.now().isoformat(),
+            error=error,
+        )
+        if not state_confirmed:
+            logger.error(
+                f"业务终态未确认落库，拒绝ack（在途条目保留待崩溃补偿重投）| "
+                f"execution_id={execution_id} | 调度层终态={terminal_status} | "
+                f"原因={error or '未提供'}"
+            )
+            return False
+        return self.ack()
 
     def _discard_from_processing(self, raw_payload: str) -> bool:
         """
@@ -692,25 +1036,51 @@ class TaskQueueClient:
             logger.warning(f"在途任务移除失败 | {exc}")
             return False
 
-    def requeue_stale(self, max_age_seconds: float = STALE_PROCESSING_SECONDS) -> int:
+    def requeue_stale(
+        self,
+        max_age_seconds: float = STALE_PROCESSING_SECONDS,
+        heartbeat_ttl_seconds: float = HEARTBEAT_TTL_SECONDS,
+    ) -> int:
         """
-        把在途 list 中停留过久的任务重新投回任务队列（崩溃补偿）
+        把在途 list 中心跳超时的任务重新投回任务队列（崩溃补偿，Day51 任务二 c）
 
         无 ack 的后果（Day45 问题4）：旧的 BRPOP 弹出即删，进程被 kill
         时批次永久停在 pending/running，状态 hash 24h 后过期，无任何
         补偿路径。改 BRPOPLPUSH 后任务同时留在在途 list，本方法在
-        worker 每轮空闲时调用，把超过 max_age_seconds 的在途任务重投。
+        worker 每轮空闲时调用，把心跳超时的在途任务重投。
 
-        判定"停留过久"用调度状态 hash 的 started_at/queued_at 时间戳，
-        缺失则视为陈旧（宁可重投一次，也不要永久丢任务——重复执行由
-        execution_id 幂等抢占与明细去重兜住）。
+        **陈旧判据改为"优先看心跳"**（Day51）：
+            1) 有心跳记录 -> 只看最后一次心跳距今是否超过
+               heartbeat_ttl_seconds；worker 只要还在执行批次就由心跳
+               线程持续刷新，心跳新鲜即判为"仍有人在管"，绝不重投；
+            2) 无心跳字段（老数据/状态 hash 已过期）-> 回落到 started_at /
+               queued_at 的停留时长判据（Day45 口径）；
+            3) 状态 hash 整体缺失 / 时间戳不可解析 -> 视为陈旧（宁可重投
+               一次也不要永久丢任务，重复执行由 execution_id 幂等抢占与
+               明细去重兜住）。
+
+        **四道闸：重投是双刃剑，既能救回崩溃任务，也能制造双跑与永动重投**
+            ① 幂等守卫：重投前 SETNX tm:requeue:{id}，抢不到就跳过，防同
+               一条在途任务被重复 LPUSH（两个 worker 同时扫到它）。守卫
+               **用独立 key、绝不复用 tm:claim:**——复用会抹掉旧 worker
+               的执行期保护，双跑反而被这次"补偿"制造出来。
+            ② 次数上界：超过 MAX_REQUEUE_ATTEMPTS 次转入死信标记，不再
+               自动重投，防永动重投刷屏与空转。
+            ③ 先移出在途再入队：顺序反了会在本轮 requeue_stale 里再次扫
+               到自己，形成同轮自环。
+            ④ 坏消息就地 LREM：无人能真正执行的报文重投只会形成永动循环。
 
         参数:
-            max_age_seconds (float): 在途最大停留秒数，默认
-                                      STALE_PROCESSING_SECONDS
+            max_age_seconds (float): 心跳缺失时的兜底停留时长阈值（秒），
+                默认 STALE_PROCESSING_SECONDS
+            heartbeat_ttl_seconds (float): 心跳陈旧阈值（秒），默认
+                HEARTBEAT_TTL_SECONDS
 
         返回:
-            int: 成功重新投回的任务条数
+            int: 成功重新投回的任务条数（死信与守卫未抢到者不计入）
+
+        异常:
+            无（Redis 异常一律降级为 0 条重投，不向上抛）
         """
         backend = self._get_backend()
         if backend is None:
@@ -738,43 +1108,93 @@ class TaskQueueClient:
             if not execution_id:
                 self._discard_from_processing(raw)
                 continue
-            if not self._is_stale_in_flight(execution_id, max_age_seconds):
+            status = self.get_status(execution_id) or {}
+            if not self._is_stale_in_flight(
+                execution_id,
+                max_age_seconds,
+                heartbeat_ttl_seconds,
+                status=status,
+            ):
                 continue
-            # 先移出在途再入队：顺序反了会在本轮 requeue_stale 里
-            # 再次扫到自己，形成同轮自环
+            # 闸②：重投次数上界。超过即转死信等待人工干预——某条任务反复
+            # 崩溃必有根因（载荷带必炸的执行目标、批次行已删、DB 持续不可
+            # 达），自动重试只会掩盖它并持续刷日志
+            attempts = _parse_int_field(status.get(FIELD_REQUEUE_COUNT))
+            if attempts >= MAX_REQUEUE_ATTEMPTS:
+                self._discard_from_processing(raw)
+                self.set_status(
+                    execution_id,
+                    STATUS_DEAD_LETTER,
+                    error=f"重入队次数已达上限 {MAX_REQUEUE_ATTEMPTS}，判定为死信",
+                    **{FIELD_REQUEUE_COUNT: attempts},
+                )
+                logger.error(
+                    f"在途任务重入队次数超上限，转入死信（不再自动补偿）| "
+                    f"execution_id={execution_id} | 已重投: {attempts} 次"
+                )
+                continue
+            # 闸①：幂等守卫。抢不到说明别的 worker 或上一轮已处理过这条
+            # 任务，跳过；此时**不动在途条目**，下轮扫描仍能看到它，
+            # 守卫过期后仍可补偿，不会因守卫把任务永久钉死
+            if not self.acquire_requeue_guard(execution_id):
+                continue
+            # 闸③：先移出在途再入队，顺序反了会在本轮扫到自己形成自环
             self._discard_from_processing(raw)
             try:
                 backend.lpush(self.queue_key, raw)
             except redis.RedisError as exc:
                 logger.warning(f"陈旧任务重新入队失败 | {exc}")
                 continue
+            attempts += 1
+            self.set_status(
+                execution_id,
+                STATUS_PENDING,
+                error=f"心跳超时已重新入队（第 {attempts} 次）",
+                **{FIELD_REQUEUE_COUNT: attempts},
+            )
             requeued += 1
             logger.warning(
-                f"在途任务超时已重新入队（worker 崩溃补偿） | "
-                f"execution_id={execution_id} | 阈值: {max_age_seconds}s"
+                f"在途任务心跳超时已重新入队（worker 崩溃补偿）| "
+                f"execution_id={execution_id} | 阈值: {heartbeat_ttl_seconds}s | "
+                f"第 {attempts} 次重投"
             )
         return requeued
 
-    def _is_stale_in_flight(self, execution_id: str, max_age_seconds: float) -> bool:
+    def _is_stale_in_flight(
+        self,
+        execution_id: str,
+        max_age_seconds: float,
+        heartbeat_ttl_seconds: float = HEARTBEAT_TTL_SECONDS,
+        status: dict[str, Any] | None = None,
+    ) -> bool:
         """
-        判定在途任务是否已停留过久（内部方法）
+        判定在途任务是否已心跳超时（内部方法）
 
         参数:
             execution_id (str): 执行批次号
-            max_age_seconds (float): 阈值秒数
+            max_age_seconds (float): 心跳缺失时的兜底停留时长阈值（秒）
+            heartbeat_ttl_seconds (float): 心跳陈旧阈值（秒）
+            status (dict | None): 已读入的任务状态 hash 快照；None 时本
+                方法自行读取（便于调用方在一轮扫描里复用同一份快照）
 
         返回:
-            bool: 超过阈值返回 True；状态 hash 缺失/时间不可解析也返回
+            bool: 心跳超时返回 True；状态 hash 缺失/时间戳不可解析也返回
                   True（宁可重投，重复执行由幂等抢占兜住）
         """
-        status = self.get_status(execution_id)
+        status = self.get_status(execution_id) if status is None else status
         if not status:
             return True
-        started = status.get("started_at") or status.get("queued_at")
-        if not started:
+        # 心跳优先：有心跳记录就只看心跳，不受 started_at 影响。这是
+        # "跑得慢 != 死了"的判据——一批正常执行十几分钟的批次，
+        # started_at 早已超过 max_age_seconds，但心跳持续刷新，必须判为
+        # 未陈旧，否则每次长批次都会被复制一份并发起双跑。
+        heartbeat_value = status.get(FIELD_HEARTBEAT_AT)
+        stamp_value = heartbeat_value or status.get("started_at") or status.get("queued_at")
+        if not stamp_value:
             return True
+        threshold = heartbeat_ttl_seconds if heartbeat_value else max_age_seconds
         try:
-            stamp = datetime.fromisoformat(str(started))
+            stamp = datetime.fromisoformat(str(stamp_value))
         except (ValueError, TypeError):
             return True
         # 时间戳可能带时区标识（tz-aware），而 datetime.now() 是 naive：
@@ -784,7 +1204,7 @@ class TaskQueueClient:
         if stamp.tzinfo is not None:
             return True
         elapsed = (datetime.now() - stamp).total_seconds()
-        return elapsed > max_age_seconds
+        return elapsed > threshold
 
     # ------------------------------------------------------------------
     # 任务状态hash（调度层快查，权威状态仍在SQLite批次表）
@@ -954,7 +1374,10 @@ class TaskWorker:
     """
 
     def __init__(
-        self, queue_client: TaskQueueClient, stop_event: threading.Event
+        self,
+        queue_client: TaskQueueClient,
+        stop_event: threading.Event,
+        worker_id: str | None = None,
     ) -> None:
         """
         初始化worker
@@ -963,15 +1386,136 @@ class TaskWorker:
             queue_client (TaskQueueClient): 队列客户端实例
             stop_event (threading.Event): 停止信号（set后循环在
                                            下一个BRPOP超时边界退出）
+            worker_id (str | None): worker 唯一标识；None 时按
+                                    "主机名-pid-随机串" 自动生成
+                                    （Day51：任务一被谁执行必须是可查事实）
 
         返回:
-            无
+            None
 
         异常:
             无
         """
         self.queue_client = queue_client
         self.stop_event = stop_event
+        # Day51 任务二 (d)：worker 身份。任务一被取出即写入在途状态
+        # hash 的 worker_id 字段，排障时能直接回答"这条任务卡在哪个
+        # worker 上"，而不是面对一个匿名报文猜。
+        self.worker_id = worker_id if worker_id else generate_worker_id()
+        # 当前正在执行的批次号（None 表示空闲）。心跳线程只刷新它，
+        # 避免在空闲期给无关批次写心跳。
+        self._current_execution_id: str | None = None
+        # 心跳线程与其独立停止信号（按任务起停，见 _heartbeat_loop）
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_stop: threading.Event | None = None
+
+    @property
+    def heartbeat_interval(self) -> float:
+        """
+        心跳刷新间隔秒数（TM_TASK_HEARTBEAT_INTERVAL，默认15s）
+
+        取值必须显著小于 HEARTBEAT_TTL_SECONDS（默认60s），否则
+        "刷新间隔 >= 陈旧阈值"会让每个正常执行的批次都在两次刷新之间
+        被 requeue_stale 误判为崩溃。这里做一次夹逼：配置值若大于
+        TTL 的一半则夹到 TTL/2，宁可刷新勤快也不误判崩溃。
+
+        参数:
+            无
+
+        返回:
+            float: 心跳间隔秒数
+        """
+        configured = env_manager.get_float(
+            "TM_TASK_HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL_SECONDS
+        )
+        if configured <= 0:
+            return HEARTBEAT_INTERVAL_SECONDS
+        return min(configured, HEARTBEAT_TTL_SECONDS / 2)
+
+    def _heartbeat_loop(self, stop_signal: threading.Event) -> None:
+        """
+        心跳刷新线程主体（Day51 任务二 d）
+
+        为什么必须是独立线程而不是"每处理完一条用例刷新一次"：
+        _execute_batch_async 是**同步阻塞**的一次性调用——worker 主循环
+        在它返回之前根本拿不到控制权，而真实执行的一条用例可能跑几十秒
+        到几分钟。只在用例之间刷新的话，一批里只要有单条慢用例，
+        心跳就会在它执行期间完全停摆，requeue_stale 会在它跑到一半时
+        把任务重投出去——**补偿机制自己制造了它本该防止的双跑**。
+
+        用 Event.wait 而非 time.sleep：停止信号一置位就立即唤醒，
+        不会让收尾多等一个心跳周期。
+
+        **线程按任务起停（而不是随 worker 常驻）**：心跳只在"确实有任务
+        在执行"时才有意义，空闲期常驻一个空转线程纯属浪费；更实际的原因
+        是它必须有自己的停止信号——复用 worker 的 stop_event 会让心跳
+        的等待与主循环的**故障退避**混在同一个事件上（既有 Day44 回归
+        用例正是按"退避恰好触发 1 次"断言的，两者共用会让判据失效）。
+
+        参数:
+            stop_signal (threading.Event): 本次任务的停止信号（执行收尾时置位）
+
+        返回:
+            None
+
+        异常:
+            无（循环体逐轮兜底，任何异常都不得让心跳线程静默死亡）
+        """
+        while not stop_signal.is_set():
+            # wait 返回 True 表示收到停止信号，立即退出，不多等一个周期
+            if stop_signal.wait(self.heartbeat_interval):
+                break
+            execution_id = self._current_execution_id
+            if not execution_id:
+                # 空闲期没有在途任务，无需心跳
+                continue
+            try:
+                self.queue_client.heartbeat(execution_id)
+            except Exception as exc:  # noqa: BLE001 心跳线程绝不能因单轮异常退出
+                logger.debug(
+                    f"心跳线程单轮刷新异常（继续下一轮）| "
+                    f"execution_id={execution_id} | {exc}"
+                )
+
+    def _start_heartbeat(self) -> None:
+        """
+        任务开始执行时拉起心跳线程（内部方法）
+
+        参数:
+            无
+
+        返回:
+            None
+        """
+        self._stop_heartbeat()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(self._heartbeat_stop,),
+            name="tm-task-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_heartbeat(self) -> None:
+        """
+        任务收尾时停掉心跳线程并等待其退出（内部方法）
+
+        参数:
+            无
+
+        返回:
+            None
+        """
+        thread = self._heartbeat_thread
+        self._heartbeat_thread = None
+        if self._heartbeat_stop is not None:
+            self._heartbeat_stop.set()
+            self._heartbeat_stop = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=self.heartbeat_interval + 1.0)
+            if thread.is_alive():
+                logger.warning("心跳线程未在预算内退出，已按daemon随进程退出")
 
     def run(self) -> None:
         """
@@ -992,8 +1536,27 @@ class TaskWorker:
 
         logger.info(
             f"任务队列worker已启动 | 队列key={self.queue_client.queue_key} | "
-            f"BRPOP超时={self.queue_client.brpop_timeout}s"
+            f"BRPOP超时={self.queue_client.brpop_timeout}s | "
+            f"worker_id={self.worker_id} | "
+            f"心跳间隔={self.heartbeat_interval}s"
         )
+        self._consume_loop(CaseManager)
+
+    def _consume_loop(self, case_manager_cls: Any) -> None:
+        """
+        worker 消费主循环（Day51：与心跳启动解耦，便于统一收尾）
+
+        参数:
+            case_manager_cls (Any): CaseManager 类对象（延迟导入后传入，
+                显式传参而非循环内重复 import）
+
+        返回:
+            None
+
+        异常:
+            无（循环内全部异常捕获并记录，保证线程不崩）
+        """
+        CaseManager = case_manager_cls
         while not self.stop_event.is_set():
             # 结构性兜底（Day44 P3-01）：本 docstring 承诺"循环内全部异常
             # 捕获并记录，保证线程不崩"，但修复前只有 _execute_batch_async
@@ -1057,13 +1620,20 @@ class TaskWorker:
                     self.queue_client.ack()
                     continue
 
-                # 调度状态置running并记开始时间
-                self.queue_client.set_status(
-                    execution_id,
-                    STATUS_RUNNING,
-                    started_at=datetime.now().isoformat(),
+                # 在途归属 + 初始心跳（Day51 任务二 a/d）：
+                # 任务一被取出就立刻记录"谁在执行"与"最后一次心跳"，
+                # 而不是等执行结束才写状态——worker 在此之后任何时刻
+                # 崩溃，requeue_stale 都已有一条带归属的陈旧记录可判
+                self._current_execution_id = execution_id
+                self.queue_client.mark_in_flight(execution_id, self.worker_id)
+                # 心跳线程按任务起停（Day51）：只在真正执行批次期间存在，
+                # 空闲期不空转，也不会把心跳等待与主循环的故障退避混在
+                # 同一个 stop_event 上
+                self._start_heartbeat()
+                logger.info(
+                    f"worker开始执行任务 | execution_id={execution_id} | "
+                    f"worker_id={self.worker_id}"
                 )
-                logger.info(f"worker开始执行任务 | execution_id={execution_id}")
             except Exception as exc:  # noqa: BLE001 线程绝不能因单轮异常退出
                 logger.error(
                     f"worker单轮处理异常（已跳过本轮，循环继续）| "
@@ -1087,19 +1657,39 @@ class TaskWorker:
                     f"worker执行任务抛异常（执行体应已兜底置failed）| "
                     f"execution_id={execution_id} | {task_error}"
                 )
+            finally:
+                # 执行结束即停止心跳：再往后刷新就成了给一个已经收尾的
+                # 批次续命，会把"worker 还活着"这个信号错误延长到收尾之后
+                self._current_execution_id = None
+                self._stop_heartbeat()
 
             # 终态以SQLite批次表权威状态为准（执行体保证落终态），
             # Redis hash只是调度层镜像；查询失败按failed兜底记录
             terminal_status = STATUS_FINISHED
             terminal_error: str | None = task_error
+            # state_confirmed：业务终态是否**已确认落库**。这是 Day51
+            # ack 联动守卫的判据——ack 之后任务会同时从在途 list 与
+            # requeue_stale 的视野里消失，此时若终态其实没写成功
+            # （批次行查不到 / 状态查询抛错 / 查到的不是终态），
+            # 批次就永久停在 running 且无任何补偿路径能捞回来。
+            state_confirmed = False
             try:
                 batch_status = CaseManager.get_execution_status(execution_id)
                 if batch_status is not None:
-                    if batch_status.get("status") == "failed":
+                    batch_state = batch_status.get("status")
+                    state_confirmed = batch_state in ("finished", "failed")
+                    if batch_state == "failed":
                         terminal_status = STATUS_FAILED
                         # 优先记录批次表中的批次级error_message
                         terminal_error = (
                             task_error or batch_status.get("error_message")
+                        )
+                    elif not state_confirmed:
+                        # 批次行存在却仍是非终态（pending/running）：
+                        # 执行体承诺会落终态，此刻没落即状态写入失效
+                        terminal_status = STATUS_FAILED
+                        terminal_error = (
+                            task_error or f"批次状态未达终态: {batch_state}"
                         )
                 else:
                     terminal_status = STATUS_FAILED
@@ -1108,24 +1698,26 @@ class TaskWorker:
                 terminal_status = STATUS_FAILED
                 terminal_error = task_error or f"终态查询异常: {exc}"
 
-            self.queue_client.set_status(
+            # 终态写入与 ack 收成一条调用链（Day51 任务二 b）：
+            # complete_task 内部固定"先落终态、再移出在途"的顺序，
+            # 调用方无法把两者写反；state_confirmed=False 时它拒绝 ack，
+            # 把在途条目留给 requeue_stale 走"至少一次"而非"至多一次"
+            acked = self.queue_client.complete_task(
                 execution_id,
                 terminal_status,
-                finished_at=datetime.now().isoformat(),
                 error=terminal_error,
+                state_confirmed=state_confirmed,
             )
-            # 确认在途任务（Day45 问题4）：执行已收尾（无论终态是
-            # finished 还是 failed，任务都不会再被重投），把它从在途 list
-            # 移除。不 ack 的话它会一直留在那里，直到超过
-            # STALE_PROCESSING_SECONDS 被 requeue_stale 当成"崩溃残留"
-            # 重投一次——等于每批任务都白跑第二遍。
-            self.queue_client.ack()
             # 释放幂等抢占（Day45 问题2）：批次已终态，允许同批次被
             # 重新执行（如失败后人工重跑），否则 claim 会把重试也挡住。
+            # 刻意在 complete_task 之后释放：claim 是"正在执行"的保护，
+            # 终态未确认前就释放会让重投回来的任务立刻二次抢到 claim
+            # 而与本次执行并发。
             self.queue_client.release_claim(execution_id)
             logger.info(
                 f"worker任务结束 | execution_id={execution_id} | "
-                f"终态={terminal_status}"
+                f"终态={terminal_status} | 终态已确认={state_confirmed} | "
+                f"已ack={acked}"
             )
 
         logger.info("任务队列worker已停止")
