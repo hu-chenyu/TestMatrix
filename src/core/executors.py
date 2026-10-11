@@ -493,6 +493,36 @@ def inject_allure_options(command: list[str], allure_dir: Path) -> list[str]:
   ]
 
 
+def compose_bridge_note(bridge_error: str) -> str:
+  """
+  把 Allure 桥接失败原因拼成可落库的提示后缀（Day51）
+
+  为什么需要它：桥接失败此前只活在 `ExecutionResult.bridge_error` 字段
+  与日志里，而编排层落库只取 result/duration/error_message 三个字段
+ ——桥接失败意味着"这次执行的结果没进统计表"，可执行者从看板与明细
+  里看不到任何痕迹，只会得出"报告数据对不上"的结论而查不到根因
+  （Day50 登记的 P3 可见性遗留项）。
+
+  刻意只挂到 failed/error 结果上：passed 的用例 error_message 按契约
+  必须为 None，给它塞一句桥接失败会把"用例通过"与"结果没入库"两件事
+  混进同一个字段，反而更难读。passed 的桥接失败仍留在
+  ExecutionResult.bridge_error 与 error 日志里。
+
+  收敛成独立纯函数而不是就地拼串：两个返回分支都要用到它，抽出来才能
+  被单测直接覆盖（内联拼接的分支只有真跑子进程才走得到）。
+
+  参数:
+    bridge_error (str): 桥接失败原因；空串表示成功或无需桥接
+
+  返回:
+    str: 可直接追加到 error_message 的后缀；无失败时返回空串
+
+  异常:
+    无
+  """
+  return f"\n[Allure结果桥接失败] {bridge_error}" if bridge_error else ""
+
+
 def resolve_bridge_execution_id(case: dict[str, object]) -> str:
   """
   推导 Allure 桥接使用的执行批次号（Day50 任务二）
@@ -511,7 +541,11 @@ def resolve_bridge_execution_id(case: dict[str, object]) -> str:
     当成一个批次）。用确定性的 `pytest-{case_id}`，重复执行会命中
     唯一约束抛 IntegrityError，由桥接层捕获后如实记为桥接失败——
     **没入库要说没入库，而不是写一行看起来很成功的脏统计**。
-    真正的批次号关联留给执行编排层（Day51 执行状态回写时接入）。
+
+    Day51 起，批次编排层（`CaseManager._execute_batch_async`）在逐条
+    执行前把真实 `execution_id` 并进用例字典，因此**批次执行链路上
+    每条用例的桥接都落在真实批次号下**，回落值只剩"脱离编排单独调
+    run_one"（CLI/脚本/单测）这一种场景才会命中。
 
   参数:
     case (dict): 待执行用例字典
@@ -1342,6 +1376,8 @@ class PytestRunner(BaseExecutor):
     # 比不入库更糟。
     bridge_error = self.bridge_allure_results(allure_dir, case)
     prune_stale_allure_dirs(current_dir=allure_dir)
+    # Day51：桥接失败对用户可见（详见 compose_bridge_note 的理由）
+    bridge_note = compose_bridge_note(bridge_error)
 
     if result_value == "passed":
       logger.debug(
@@ -1368,7 +1404,7 @@ class PytestRunner(BaseExecutor):
       )
       return ExecutionResult(
         result="failed",
-        error_message=message,
+        error_message=message + bridge_note,
         duration=duration,
         exit_code=returncode,
         exit_reason=exit_reason,
@@ -1387,7 +1423,7 @@ class PytestRunner(BaseExecutor):
     error_message = f"pytest异常退出[{exit_reason}]，退出码: {returncode}"
     if advice:
       error_message = f"{error_message} | 处置建议: {advice}"
-    error_message = f"{error_message}\n{message}"
+    error_message = f"{error_message}\n{message}{bridge_note}"
     logger.warning(
       f"pytest异常退出 | 用例: {case.get('case_id')} | "
       f"退出码: {returncode} | 分类: {exit_reason}"

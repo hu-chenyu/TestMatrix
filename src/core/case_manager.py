@@ -102,9 +102,10 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import case, func, or_
+from sqlalchemy import Table, case, func, or_
+from sqlalchemy import update as sa_update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from src.common.logger import LogManager
@@ -164,6 +165,29 @@ VALID_TRIGGERS = ("manual", "cli", "web", "ci")
 
 # 单条执行结果合法值
 VALID_RESULTS = ("passed", "failed", "error", "skipped")
+
+# 批次状态合法值（Day51：状态机的取值域，单一事实来源）
+VALID_BATCH_STATUSES = ("pending", "running", "finished", "failed")
+
+# 批次状态机合法流转表（Day51 任务一）
+#
+# 语义：pending（已受理待执行）-> running（worker 已开始执行）
+#    -> finished（全部完成）/ failed（异常或有失败用例）
+#
+# 为什么终态是**吸收态**（后继集合为空）：批次一旦落终态，它汇总的
+# 就是那一次的完整结果，重新置成 running 会让"已完成的批次又跑了一遍"
+# 这类状态凭空出现——而状态查询接口直查批次行不做任何校验，客户端
+# 拿到的是"finished"却带着半截新计数，报表口径直接失真。
+#
+# 同态自环只对 pending/running 开放（幂等重入：崩溃补偿重投后重新
+# 执行同一条任务时，批次行已停在 running，重入是合法的；而把
+# finished 重新置 running 永远不合法）。
+BATCH_STATE_TRANSITIONS: dict[str, frozenset[str]] = {
+  "pending": frozenset({"pending", "running", "failed"}),
+  "running": frozenset({"running", "finished", "failed"}),
+  "finished": frozenset(),
+  "failed": frozenset(),
+}
 
 # description字段中标签暂存格式的前缀（与_build_description写入格式对齐）
 TAGS_PREFIX = "标签:"
@@ -1400,7 +1424,7 @@ class CaseManager:
     error_message: str | None = None,
     environment: str | None = None,
     executor: str | None = None,
-  ) -> None:
+  ) -> bool:
     """
     记录单条用例执行结果
 
@@ -1427,7 +1451,15 @@ class CaseManager:
                   缺省处理口径同 environment
 
     返回:
-      None
+      bool: 明细已落库 True；因 (execution_id, case_id) 重复被
+        去重跳过时 False（Day51 新增）。
+
+        **为什么需要这个返回值**：崩溃补偿会把未完成的批次重投
+        一次，重投后的批次会**重跑全部用例**（载荷里是完整用例
+        列表），而已写过的明细会被上面的去重逻辑跳过。若调用方
+        无从区分"写入了"与"被跳过"，批次进度就会按执行次数
+        而不是按明细条数累加——重跑过的批次进度虚高。Day52 的
+        kill -9 恢复门禁正是这条路径，故此返回值是该门禁的前置条件。
 
     异常:
       CaseManagerError: result非法 / 批次号或用例编号为空 /
@@ -1495,7 +1527,7 @@ class CaseManager:
             f"批次: {execution_id} | 用例: {case_id} | "
             f"结果: {result} | 既有明细id: {existing.id}"
           )
-          return
+          return False
         # environment/executor 缺省时从批次行取真实值（Day44 P2-03）。
         # 批次行也不存在（历史/CLI 直调路径）则留 None，交给 ORM 的
         # 列默认值，与修复前的行为保持一致，不制造新的数据缺口。
@@ -1545,6 +1577,7 @@ class CaseManager:
       f"执行结果已入库 | 批次: {execution_id} | 用例: {case_id} | "
       f"结果: {result} | 耗时: {duration:.3f}s"
     )
+    return True
 
   @classmethod
   def _aggregate_execution_results(
@@ -2208,10 +2241,14 @@ class CaseManager:
         return
 
       # a. 置running + 记录批次开始时间
+      # 走 transition_batch_state 而非裸写 _update_batch_status：
+      # 状态机守卫在这里生效（pending/finished/failed 都不允许
+      # 再回到 running），守卫拒绝时抛 CaseManagerError 并被下面
+      # 的顶层 except 统一兜成 failed 收尾
       # 顺带取回批次元信息（Day44 热修 P2-1）：_update_batch_status
       # 本来就要 SELECT 这一行，返回值里多带了 environment/executor，
       # 下面逐条明细直接透传，record_execution 就不必为每条用例再查一次。
-      batch_meta = cls._update_batch_status(
+      batch_meta = cls.transition_batch_state(
         execution_id, status="running", started_at=datetime.now()
       ) or {}
       batch_environment = batch_meta.get("environment")
@@ -2235,11 +2272,18 @@ class CaseManager:
       # b. 经工厂取执行器后逐用例执行并立即落明细
       #  （单用例异常同样走兜底转批次failed，当前粒度为批次级）
       executor = get_executor(executor_kind)
+      completed_in_process = 0
       for case in cases:
         case_start = datetime.now()
-        exec_result = executor.run_one(case)
+        # Day51：把真实批次号带进用例字典。执行器据此把 Allure
+        # 结果桥接到**真实批次**的 defect_statistics 行，而不是
+        # 回落成 "pytest-{case_id}" 的单条用例批次——后者会在看板
+        # 上多出一个"无明细批次"，把批次数/通过率趋势口径撑坏
+        # （Day50 登记的 P2 收口项）
+        case_with_batch = {**case, "execution_id": execution_id}
+        exec_result = executor.run_one(case_with_batch)
         case_end = datetime.now()
-        cls.record_execution(
+        detail_written = cls.record_execution(
           execution_id=execution_id,
           case_id=str(case.get("case_id", "")),
           case_name=str(case.get("name", "")),
@@ -2253,6 +2297,17 @@ class CaseManager:
           environment=batch_environment,
           executor=batch_executor,
         )
+        # 批次进度增量回写（Day51 任务一）：只有明细真正落库才
+        # 累加——重投重跑时 record_execution 会按 (批次号, 用例号)
+        # 去重跳过，按执行次数累加会让进度虚高
+        if detail_written:
+          completed_in_process += 1
+          cls.update_batch_progress(execution_id, exec_result.result)
+          logger.info(
+            f"批次进度更新 | 批次: {execution_id} | "
+            f"本进程已完成: {completed_in_process}/{len(cases)} | "
+            f"本条结果: {exec_result.result}"
+          )
         # 事件埋点: 单条用例执行完成（与明细表同口径字段）
         cls._publish_execution_event(
           execution_id,
@@ -2270,7 +2325,8 @@ class CaseManager:
       summary = cls.finish_execution(execution_id)
 
       # d. 置finished + 冗余统计（批次状态查询免聚合直查）
-      cls._update_batch_status(
+      # 走 transition_batch_state：守卫保证 running 才能落 finished
+      cls.transition_batch_state(
         execution_id,
         status="finished",
         passed=summary["passed"],
@@ -2373,7 +2429,7 @@ class CaseManager:
           "pass_rate": failed_summary["pass_rate"],
         }
       try:
-        cls._update_batch_status(
+        cls.transition_batch_state(
           execution_id,
           status="failed",
           error_message=error_summary,
@@ -2511,6 +2567,7 @@ class CaseManager:
     skipped: int | None = None,
     pass_rate: float | None = None,
     error_message: str | None = None,
+    enforce_transitions: bool = False,
   ) -> dict[str, Any] | None:
     """
     更新批次状态与冗余统计（内部方法）
@@ -2518,6 +2575,12 @@ class CaseManager:
     仅更新显式传入（非None）的字段，其余字段保持不变；
     批次行不存在时记warning后静默返回（防御性容错，
     不阻断调用链——明细写入仍可正常完成）。
+
+    enforce_transitions=True 时启用状态机守卫（Day51）：在**本方法
+    本来就要做的那次 SELECT 上**顺带校验，非法流转抛 CaseManagerError
+    且不写库。**守卫刻意不复用一次额外查询**——Day44 P2-1 刚把
+    批次元信息 SELECT 从"每条用例查一次（N+1）"压到"每次状态更新一次
+    （恒 2 次）"，任何为守卫新增的查询都会把那个不变量重新打破。
 
     参数:
       execution_id (str): 执行批次号
@@ -2530,6 +2593,8 @@ class CaseManager:
       skipped (int | None): 跳过数，None不更新
       pass_rate (float | None): 通过率，None不更新
       error_message (str | None): 批次级异常信息，None不更新
+      enforce_transitions (bool): 是否启用状态机守卫，默认 False
+        （裸写语义保持 Day24 以来的既有契约不变）
 
     返回:
       dict[str, Any] | None: 本次读到的批次元信息
@@ -2537,8 +2602,9 @@ class CaseManager:
         批次行不存在时为 None（调用方需自行决定兜底）
 
     异常:
-      CaseManagerError: 数据库操作异常时抛出
-               （由调用方决定兜底策略）
+      CaseManagerError: 数据库操作异常时抛出；
+               enforce_transitions=True 且流转非法时抛出
+               （均由调用方决定兜底策略）
     """
     meta: dict[str, Any] | None = None
     # 归一：带空白的批次号此前查不到批次行，只 warning 返回 None——
@@ -2567,6 +2633,27 @@ class CaseManager:
           "environment": batch_row.environment,
           "executor": batch_row.executor,
         }
+        # 状态机守卫（Day51）：复用上面那次 SELECT 读到的当前状态，
+        # 零额外查询。非法流转时**先抛错再赋值**，保证批次行不被改动
+        if enforce_transitions:
+          current = batch_row.status
+          allowed = BATCH_STATE_TRANSITIONS.get(
+            current if isinstance(current, str) else ""
+          )
+          if allowed is None or status not in allowed:
+            logger.error(
+              f"批次状态非法流转被拒绝 | 批次: {execution_id} | "
+              f"当前状态: {current} | 目标状态: {status}"
+            )
+            raise CaseManagerError(
+              f"批次状态非法流转: {current} -> {status}",
+              context={
+                "operation": "transition_batch_state",
+                "execution_id": execution_id,
+                "current_status": str(current),
+                "target_status": status,
+              },
+            )
         batch_row.status = status
         if started_at is not None:
           batch_row.started_at = started_at
@@ -2598,6 +2685,260 @@ class CaseManager:
         },
       ) from exc
     return meta
+
+  @classmethod
+  def _is_valid_batch_transition(cls, current: object, target: str) -> bool:
+    """
+    判定批次状态流转是否合法（内部纯函数，Day51 任务一）
+
+    唯一的流转判定口径：状态机守卫、transition_batch_state 与
+    其测试全部走这一个函数。**判据散落两处就等于没有判据**——
+    这是本项目反复踩过的形态（脱敏表、批次号归一、退出码词表
+    都是同一类问题的不同外壳）。
+
+    未知取值一律判为不合法：批次行 status 是数据库里的自由文本，
+    外部写入/历史脏数据都可能给出词表外的值，此时宁可拒绝流转
+    也不能"放行"——放行意味着拿未知状态去做状态更新。
+
+    参数:
+      current (object): 批次当前状态（允许非字符串，见下）
+      target (str): 目标状态
+
+    返回:
+      bool: 流转合法 True；非法 False
+    """
+    if not isinstance(current, str):
+      return False
+    allowed = BATCH_STATE_TRANSITIONS.get(current)
+    if allowed is None:
+      return False
+    return target in allowed
+
+  @classmethod
+  def transition_batch_state(
+    cls,
+    execution_id: str,
+    status: str,
+    started_at: datetime | None = None,
+    finished_at: datetime | None = None,
+    passed: int | None = None,
+    failed: int | None = None,
+    error: int | None = None,
+    skipped: int | None = None,
+    pass_rate: float | None = None,
+    error_message: str | None = None,
+  ) -> dict[str, Any] | None:
+    """
+    带状态机守卫的批次状态流转（Day51 任务一对外入口）
+
+    与 `_update_batch_status` 的分工：
+      - `_update_batch_status` 是**裸写**，不做合法性判断，保持
+       Day24 起的既有语义与既有测试契约不变；
+      - 本方法是**受控流转**，先查当前状态、校验流转合法，
+       再委托裸写。执行编排链路的四处状态写入全部走本方法。
+
+    为什么必须守：状态查询接口（GET /api/executions/<id>/status）
+    直查批次行、零校验零聚合。一个 finished 批次被重新置成
+    running，在客户端看来就是"已完成的批次又开始了"，而它的
+    passed/failed 冗余计数还停留在上一次执行的结果上——
+    报表口径与真实执行结果就此对不上，且没有任何日志线索指向
+    是谁改的状态。
+
+    **守卫不吞异常**：非法流转抛 CaseManagerError，由调用方
+    （_execute_batch_async 的顶层 except）统一兜成批次 failed。
+    这里若只记 warning 就返回，非法流转会"看起来成功"，
+    状态机守卫就退化成了装饰。
+
+    参数:
+      execution_id (str): 执行批次号（内部归一，带空白等价于干净号）
+      status (str): 目标状态，取值见 VALID_BATCH_STATUSES
+      其余参数: 与 `_update_batch_status` 同义（None 表示该字段不变）
+
+    返回:
+      dict[str, Any] | None: 本次读到的批次元信息（environment/executor）；
+        批次行不存在时为 None（记 warning 后返回，与裸写一致）
+
+    异常:
+      CaseManagerError: status 非法取值，或当前状态到目标状态的
+        流转不在 BATCH_STATE_TRANSITIONS 允许集合内
+    """
+    if status not in VALID_BATCH_STATUSES:
+      raise CaseManagerError(
+        f"批次目标状态非法: {status!r}，"
+        f"合法取值: {list(VALID_BATCH_STATUSES)}",
+        context={
+          "operation": "transition_batch_state",
+          "execution_id": execution_id,
+          "target_status": status,
+        },
+      )
+    # 守卫在 `_update_batch_status` 内部、它本来就有的那次 SELECT 上
+    # 完成（enforce_transitions=True）。**这里绝不能再单独查一次当前
+    # 状态**：Day44 P2-1 已把批次元信息 SELECT 压到"每次状态更新一次，
+    # 与用例数无关"，多一次查询就把那个不变量重新打破（Day44 两条
+    # 回归用例正是按"恒为 2 次"断言的）。
+    return cls._update_batch_status(
+      cls._normalize_batch_id(execution_id, "transition_batch_state"),
+      status=status,
+      started_at=started_at,
+      finished_at=finished_at,
+      passed=passed,
+      failed=failed,
+      error=error,
+      skipped=skipped,
+      pass_rate=pass_rate,
+      error_message=error_message,
+      enforce_transitions=True,
+    )
+
+  @classmethod
+  def update_batch_progress(
+    cls, execution_id: str, result: str, delta: int = 1, snapshot: bool = False
+  ) -> dict[str, Any] | None:
+    """
+    增量累加批次执行进度（Day51 任务一）
+
+    每条用例执行完成后调用一次，把该条的结果计入批次行冗余统计
+    （passed/failed/error/skipped），并据此刷新 pass_rate。
+    执行中的批次因此随时可查"已完成/总数/通过/失败"的实时进度，
+    而不必等整批跑完才从明细表聚合。
+
+    **为什么是 SQL 层自增而不是"读出来 +1 再写回"**：
+    读改写模式下，两个并发调用会读到同一个旧值、各自加一后写回，
+    后写者覆盖先写者——进度计数凭空少一条，而批次行看起来一切
+    正常（不是错值，是**丢失**）。`SET passed = passed + 1` 由数据库
+    保证原子性，SQLite 与 MySQL 都支持这个写法。
+
+    **为什么不是"全量重算"**（任务书明确禁止）：全量重算要从
+    test_executions 明细表 COUNT 一次全批次行数——那是 O(N) 查询；
+    每条用例完成后都做一次，整批执行退化成 O(N²) 的查询量，而且
+    此时明细行还没提交完（record_execution 与本方法不在同一事务），
+    重算出来的进度还会比真实值小。
+
+    **整条路径零 SELECT**（snapshot=False 时）：计数与通过率都在
+    同一条 UPDATE 的表达式里算完，通过率用 CASE 表达式避开除零。
+    这不是洁癖——Day44 P2-1 明确消除过"批次元信息 SELECT 随用例数
+    线性增长"的 N+1，并有两条回归用例按"恒为 2 次"断言；逐用例
+    回写若带一次读回，这个不变量会被原地打破。snapshot=True 仅供
+    需要返回快照的调用方（如测试/运维查询）显式取用。
+
+    参数:
+      execution_id (str): 执行批次号（内部归一）
+      result (str): 本条用例的执行结果，取值见 VALID_RESULTS
+      delta (int): 累加步长，默认 1（批量补记时可传 N）
+      snapshot (bool): 是否额外读回一行并返回进度快照，默认 False
+        （热路径必须保持 False，见上文）
+
+    返回:
+      dict[str, Any] | None: snapshot=True 时的进度快照
+        {"status", "total_cases", "completed", "passed", "failed",
+         "error", "skipped", "pass_rate"}；
+        snapshot=False 时恒为 None（写库已生效，只是没读回）；
+        批次行不存在时为 None
+
+    异常:
+      CaseManagerError: result 非法取值 / 数据库异常
+    """
+    if result not in VALID_RESULTS:
+      raise CaseManagerError(
+        f"进度累加的结果值非法: {result!r}，合法取值: {list(VALID_RESULTS)}",
+        context={
+          "operation": "update_batch_progress",
+          "execution_id": execution_id,
+          "result": result,
+        },
+      )
+    execution_id = cls._normalize_batch_id(execution_id, "update_batch_progress")
+    # 计数映射：error 同时计入 failed 与 error 两个桶（口径同 6.3
+    # "failed 合计 = failed + broken"），否则进度里的失败数会与
+    # 终态汇总的 failed 对不上
+    increments: dict[str, int] = {"passed": 0, "failed": 0, "error": 0, "skipped": 0}
+    if result == "passed":
+      increments["passed"] = delta
+    elif result == "failed":
+      increments["failed"] = delta
+    elif result == "error":
+      increments["failed"] = delta
+      increments["error"] = delta
+    else:
+      increments["skipped"] = delta
+    if delta <= 0:
+      return None
+
+    # __table__ 在 SQLAlchemy 2.0 的类型标注里是 FromClause，而
+    # sa_update/where 收的是 TableClause|FromClause 子类——这里显式
+    # 收窄成 Table（运行期就是同一个对象），好过一条 type: ignore
+    table = cast(Table, TestExecutionBatch.__table__)
+    try:
+      with DatabaseSession.session_scope() as session:
+        # UPDATE 的 SET 表达式一律引用**行更新前**的列值，故
+        # (passed + 1) / (passed + failed + skipped + 1) 算的是
+        # "累加之后的口径"，不需要先读回旧值。
+        # 乘 1.0 是必须的：SQLite 的整数除数会截断，5/3 会算成 1。
+        denominator = (
+          table.c.passed
+          + increments["passed"]
+          + table.c.failed
+          + increments["failed"]
+          + table.c.skipped
+          + increments["skipped"]
+        )
+        numerator = table.c.passed + increments["passed"]
+        changed = session.execute(
+          sa_update(table)
+          .where(table.c.execution_id == execution_id)
+          .values(
+            **{
+              name: table.c[name] + amount
+              for name, amount in increments.items()
+              if amount
+            },
+            pass_rate=case(
+              (denominator > 0, numerator * 1.0 / denominator),
+              else_=0.0,
+            ),
+          )
+        ).rowcount
+        if not changed:
+          logger.warning(
+            f"批次行不存在，进度更新跳过 | 批次: {execution_id}"
+          )
+          return None
+        if not snapshot:
+          return None
+        row = (
+          session.query(TestExecutionBatch)
+          .filter_by(execution_id=execution_id)
+          .first()
+        )
+        if row is None:
+          return None
+        # 已完成数 = passed + failed + skipped（error 已含在
+        # failed 桶内，与终态汇总同一口径，不重复计一次）
+        completed = int(row.passed) + int(row.failed) + int(row.skipped)
+        return {
+          "status": row.status,
+          "total_cases": int(row.total_cases),
+          "completed": completed,
+          "passed": int(row.passed),
+          "failed": int(row.failed),
+          "error": int(row.error),
+          "skipped": int(row.skipped),
+          "pass_rate": float(row.pass_rate or 0.0),
+        }
+    except SQLAlchemyError as exc:
+      logger.error(
+        f"批次进度更新数据库异常 | 批次: {execution_id} | "
+        f"结果: {result} | {exc}"
+      )
+      raise CaseManagerError(
+        f"批次进度更新数据库异常: {exc}",
+        context={
+          "operation": "update_batch_progress",
+          "execution_id": execution_id,
+          "result": result,
+        },
+      ) from exc
 
   # ------------------------------------------------------------------
   # 批次完成通知集成（第二阶段Day15）
