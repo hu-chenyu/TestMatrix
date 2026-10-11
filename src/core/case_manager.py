@@ -2849,9 +2849,9 @@ class CaseManager:
         },
       )
     execution_id = cls._normalize_batch_id(execution_id, "update_batch_progress")
-    # 计数映射：error 同时计入 failed 与 error 两个桶（口径同 6.3
-    # "failed 合计 = failed + broken"），否则进度里的失败数会与
-    # 终态汇总的 failed 对不上
+    # 计数映射：error 同时计入 failed 与 error 两个桶——运行中进度的
+    # completed 口径需把 error 计入失败合计（否则已完成数会少算 error 用例）；
+    # 终态 finished/failed 时由权威聚合整体覆盖各计数字段，此处为运行中临时口径
     increments: dict[str, int] = {"passed": 0, "failed": 0, "error": 0, "skipped": 0}
     if result == "passed":
       increments["passed"] = delta
