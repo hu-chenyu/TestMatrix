@@ -1,11 +1,12 @@
-# TestMatrix 通用自动化测试效能平台
+# TestMatrix 测试可信度治理工具
 
 [![CI](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/) [![tests 1473](https://img.shields.io/badge/tests-1473%20passed-brightgreen)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![coverage 99.05%](https://img.shields.io/badge/coverage-99.05%25-brightgreen)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml)
 
 > **你的平台绿了，你确定是真绿吗？**
 >
-> 面向互联网接口自动化测试的全链路效能平台：用例管理 → 调度执行 → 报告分析 →
+> 面向互联网接口自动化测试的**可信度治理**平台：用例管理 → 调度执行 → 报告分析 →
 > Web 可视化 → 通知推送 → CI/CD，Python 全栈自建、单机可跑、零外部依赖起步。
+> 核心不是"跑得多快"，而是"跑完的结论能不能信"。
 >
 > **全项目方法论：约束下量化质量 → 门禁决策**——每个优化阶段产出可复现的前后对比数据，每个能力边界写进 KNOWN_LIMITATIONS。
 
@@ -19,8 +20,11 @@
 - **CI 会拦住"删测试换绿"**：测试收集总数下限断言（基线 1473，只增不减），
   少一条即红；零收集不容忍（exit 5 也判红）；mypy 崩溃守卫——类型检查器自身
   报错时 fail-closed 判红，杜绝"工具没跑=检查通过"（源于 CI 级联跳过真实事故）；
-- **1473 条测试 / 99.05% 覆盖 / 0 warning / 0 failed**：CI 双 job 全绿
+- **1473 条测试 / 99.05% 覆盖（CI 口径） / 0 warning / 0 failed**：CI 双 job 全绿
   （Python 3.11 主 + 3.12 探测位）；提交不间断（唯一空档为 2026-09-06 周日）。
+  覆盖率三口径：CI Linux **99.05%**（src 语句 5176 stmt / 49 miss，门禁仅 85）；
+  Windows 本机 **98.9-99.1% 运行间波动**（同机四轮实跑 miss 数 51↔52↔56 漂移，
+  主因时序敏感用例分支命中差异，非平台差异）；对外统一口径写"≈99%"。
 - **测试文件命名约定**：`tests/*_demo.py` 为每日修复对应的回归用例（真实断言，非示例脚本），
   命名源于"修复即回归"的开发纪律；以 mock 为主（含少量真启本机子进程的端到端用例
   与本地回环服务端验证），无真实外部网络/设备/服务连接；核心验收点坚持真实执行，
