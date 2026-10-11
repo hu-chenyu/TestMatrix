@@ -196,6 +196,38 @@ STATUS_DEAD_LETTER = "dead_letter"
 REQUEUE_GUARD_TTL_SECONDS = STALE_PROCESSING_SECONDS
 
 
+# ===========================================================================
+# claim 属主校验（Day52 P2 修复）
+# ===========================================================================
+#
+# Day51 收口时 deepseek + evolving 双方共同发现的问题：`release_claim` 是
+# **无条件 DEL**，而 worker 主循环每轮收尾都调用它——**包括"入口被 claim
+# 挡下、零用例执行"的那一轮**。后果是：被挡的消费者会 DEL 掉自己并不持有
+# 的旧 worker claim，使 claim 层对"进程冻结但未死透"的防护只持续一个重投
+# 周期（守卫 TTL 300s 过后第二次重投即可真实双跑）。
+#
+# 但它**不能被简单删掉**：真 kill -9 场景下，旧 worker 带着未释放的 claim
+# 消失，claim 的 TTL 是 CLAIM_TTL_SECONDS(3600s)。若无条件释放被移除，
+# 重投回来的任务会被这道 3600s 的闸挡住，3 次重投全部落空、先转死信——
+# 崩溃补偿能力反而没了。于是统一方案是三件事一起做：
+#
+#   1. claim 占用时 `SET value=<worker_id> NX EX <ttl>`：把"谁持有"变成
+#      可比对的事实，而不是固定字符串 "1"（那让属主无从判断）；
+#   2. 释放时属主比对删除（compare-and-del）：只删自己持有的 claim，
+#      被挡轮次释放不动别人的保护；
+#   3. requeue_stale 判定属主死亡后**显式接管**那条无人认领的 claim，
+#      让重投回来的任务能重新抢占——这是崩溃恢复能在 claim TTL 内发生的
+#      必要条件。
+#
+# 为什么 compare-and-del 用 WATCH/MULTI/EXEC 而不是 Lua 脚本：
+#   项目测试后端是 fakeredis，本机 **未安装 lupa**（实测 `EVAL` 直接返回
+#   "unknown command `eval`"），Lua 方案会让全部队列用例在 CI 集体变红，
+#   且补 lupa 属于新增测试依赖（requirements.txt 不在当日白名单）。
+#   WATCH/MULTI/EXEC 是 Redis 原生 CAS 语义：WATCH 之后若该 key 被任何
+#   人改动，EXEC 直接失败并抛 WatchError，天然堵住"GET 与 DEL 之间属主
+#   被改"的竞态（已实测：跨连接抢占后 EXEC 抛错，新属主的 claim 存活）。
+
+
 def task_status_key(execution_id: str) -> str:
     """
     构造任务状态hash的Redis key（纯函数）
@@ -395,6 +427,18 @@ class TaskQueueClient:
         # BRPOPLPUSH 把任务移入 processing list 后，需在执行完成后用
         # 同一报文串 LREM 掉。保留 dequeue 的 dict | None 签名不变。
         self._last_dequeued_raw: str | None = None
+        # 本进程内执行者的身份（Day52 P2）：claim/release_claim 未显式
+        # 传 worker_id 时用它做属主比对。
+        #
+        # 为什么挂在客户端上而不是只作为方法参数：真正调用 claim() 的是
+        # `case_manager._execute_batch_async`（Day45 埋点），那处**不在
+        # Day52 的改动白名单内**，不能为了传 worker_id 去改它。于是身份
+        # 由持有客户端的 worker 在构造时登记一次——一个进程一个客户端、
+        # 一个 worker，登记与读取同属一方，不存在错配。
+        #
+        # 缺省空串表示"无登记身份"：裸线程链路（无 worker）走的就是这条
+        # 路径，此时 claim 与 release 的属主都是空串、仍然自洽。
+        self.worker_id: str = ""
 
     # ------------------------------------------------------------------
     # 消费侧故障状态（worker 退避判据，Day45 问题1）
@@ -1138,6 +1182,27 @@ class TaskQueueClient:
             # 守卫过期后仍可补偿，不会因守卫把任务永久钉死
             if not self.acquire_requeue_guard(execution_id):
                 continue
+            # 闸⑤（Day52 P2 修复）：死亡属主的 claim 显式接管。
+            #
+            # 为什么必须在重投**之前**完成：重投回来的任务会先走
+            # `claim()` 才进入执行体，若此时旧 worker 遗留的 claim 还在
+            # （TTL 3600s），它会被当场挡下——3 次重投全部落空、先进死信，
+            # 崩溃补偿等于没有。上一行那句"守卫过期后仍可补偿"在这里
+            # 同样不成立：挡住它的是 claim 而不是守卫。
+            #
+            # 为什么由 requeue_stale 释放、而不是让每个 worker 各自为政：
+            # 本方法已经用**心跳陈旧**判定过属主死亡，它是在替系统做
+            # 死亡认定，据此接管那条无人认领的 claim 是合法且必要的；
+            # 与之相对，worker 收尾时释放自己并不持有的 claim（被挡轮次）
+            # 没有任何认定依据，必须被属主校验挡下。
+            dead_owner = str(status.get(FIELD_WORKER_ID) or "")
+            if not self._takeover_stale_claim(execution_id, dead_owner):
+                logger.warning(
+                    f"陈旧任务接管 claim 失败（属主已易主），跳过本轮重投 | "
+                    f"execution_id={execution_id} | 判定死亡的属主="
+                    f"{dead_owner or '(未知)'}"
+                )
+                continue
             # 闸③：先移出在途再入队，顺序反了会在本轮扫到自己形成自环
             self._discard_from_processing(raw)
             try:
@@ -1277,15 +1342,25 @@ class TaskQueueClient:
     # ------------------------------------------------------------------
     # 幂等抢占（Day45 全量审查 问题2）
     # ------------------------------------------------------------------
-    def claim(self, execution_id: str, ttl_seconds: int = CLAIM_TTL_SECONDS) -> bool:
+    def claim(
+        self,
+        execution_id: str,
+        ttl_seconds: int = CLAIM_TTL_SECONDS,
+        worker_id: str | None = None,
+    ) -> bool:
         """
-        以批次号做幂等抢占（SETNX + TTL），防同一批次被双跑
+        以批次号做幂等抢占（SET NX + TTL），value 存属主 worker_id（Day52 P2）
 
         要解决的场景：enqueue 的 lpush 已在 Redis 生效，但应答因
         socket_timeout 超时抛错 → enqueue 返回 False → 路由用**同一
         execution_id** 起裸线程；此时消息仍在队列里等 worker 消费 →
         同一批次被执行两次，明细双写、计数翻倍、通过率被污染。
         两条链路谁先抢到 claim 谁执行，后到者直接放弃。
+
+        **value 为什么必须存属主而不是固定 "1"（Day52）**：属主是
+        release_claim 做 compare-and-del 的唯一判据。存固定串时任何
+        worker 读到的都是同一个值，"这条 claim 是不是我的"根本无从判断，
+        属主校验形同虚设。
 
         队列未启用（后端不可用）时**一律返回 True**：此时只有路由的裸线程
         一条路径，不存在双跑；用"抢不到就不执行"去阻断默认链路会
@@ -1294,6 +1369,8 @@ class TaskQueueClient:
         参数:
             execution_id (str): 执行批次号
             ttl_seconds (int): claim 存活秒数，默认 CLAIM_TTL_SECONDS
+            worker_id (str | None): 属主标识；None 时取客户端登记的
+                `self.worker_id`（裸线程链路为空串，两侧仍自洽）
 
         返回:
             bool: 抢到（此前无人持有）返回 True；已被他人持有返回 False；
@@ -1304,9 +1381,13 @@ class TaskQueueClient:
         backend = self._get_backend()
         if backend is None:
             return True
+        owner = self._resolve_owner(worker_id)
         try:
             acquired = backend.set(
-                task_claim_key(execution_id), "1", nx=True, ex=ttl_seconds
+                task_claim_key(execution_id),
+                owner,
+                nx=True,
+                ex=ttl_seconds,
             )
         except redis.RedisError as exc:
             # 抢占本身故障：按"放行"处理并在日志留痕。理由同上——
@@ -1319,27 +1400,192 @@ class TaskQueueClient:
             return True
         return bool(acquired)
 
-    def release_claim(self, execution_id: str) -> bool:
+    def _resolve_owner(self, worker_id: str | None) -> str:
         """
-        释放幂等抢占（批次进入终态后调用，允许同批次被重新执行）
+        解析属主标识：显式参数优先，其次客户端登记身份（内部方法）
+
+        参数:
+            worker_id (str | None): 显式传入的属主；None 表示未显式指定
+
+        返回:
+            str: 属主标识串（可能是空串，表示"无登记身份"）
+        """
+        if worker_id is not None:
+            return str(worker_id)
+        return str(self.worker_id)
+
+    def _compare_and_del_claim(
+        self, backend: Any, execution_id: str, expected_owner: str
+    ) -> bool | None:
+        """
+        属主比对删除（compare-and-del，WATCH/MULTI/EXEC 原子提交）
+
+        为什么必须是事务而不是"GET 之后 DEL"：两次命令之间 claim 可能
+        已被 requeue_stale 接管为新属主，此时那个迟到的 DEL 会删掉**别人
+        的**保护，等于把刚建立的闸又拆了。WATCH 让"读到的属主"与"被删的
+        属主"之间不存在窗口——期间 key 被改动，EXEC 直接抛 WatchError。
+
+        三态返回而非 bool，是为了把"读不到属主"与"属主不符"分开：两者
+        的安全方向相反（见 release_claim 与 _takeover_stale_claim 的处置）。
+
+        参数:
+            backend (Any): 已构建的 Redis 后端
+            execution_id (str): 执行批次号
+            expected_owner (str): 期望的属主标识
+
+        返回:
+            bool | None: True=确认删除（含"本无 claim，已处于可重执行状态"）；
+                False=属主不符或事务被抢占，未删除；
+                None=无法读取属主（后端未提供事务管线或 Redis 异常），
+                调用方须按各自的安全方向处置
+
+        异常:
+            无（Redis 异常一律降级为 None，不向上抛）
+        """
+        key = task_claim_key(execution_id)
+        # 能力探测：精简替身/受限实现可能只提供部分命令。缺事务管线时
+        # 无法做"读属主 + 条件删"，返回 None 让调用方 fail-closed，
+        # 绝不退化成无条件 DEL（那正是本方法要修的缺陷）
+        pipeline_factory = getattr(backend, "pipeline", None)
+        if pipeline_factory is None:
+            return None
+        try:
+            with pipeline_factory() as pipe:
+                try:
+                    pipe.watch(key)
+                    # watch 模式下 pipeline 立即执行：此刻读到的值就是
+                    # EXEC 将要保护的那个值
+                    current = pipe.get(key)
+                    if current is None:
+                        pipe.unwatch()
+                        return True
+                    if str(current) != expected_owner:
+                        pipe.unwatch()
+                        return False
+                    pipe.multi()
+                    pipe.delete(key)
+                    deleted = pipe.execute()
+                except redis.WatchError:
+                    # WATCH 期间 key 被他人改动：属主已易主，本轮放弃删除
+                    return False
+        except redis.RedisError as exc:
+            logger.warning(
+                f"claim 属主比对异常，无法判定 | "
+                f"execution_id={execution_id} | {exc}"
+            )
+            return None
+        return bool(deleted)
+
+    def release_claim(self, execution_id: str, worker_id: str | None = None) -> bool:
+        """
+        释放幂等抢占（属主比对删除，批次进入终态后调用）
+
+        只删**自己持有**的 claim：worker 主循环每轮收尾都会调用本方法，
+        其中包括"入口被别的 worker 的 claim 挡下、零用例执行"的那一轮。
+        修复前的无条件 DEL 会让那一轮把别人的保护拆掉，使 claim 层对
+        "进程冻结但未死透"的防护只剩一个重投周期（Day52 P2）。
+
+        读不到属主时**拒绝释放**（fail-closed）：无法确认归属就不动手，
+        最坏结果是这条 claim 留到 TTL 自然过期（3600s）后自动放行，
+        而误删的后果是双跑防线被当场拆除。
 
         参数:
             execution_id (str): 执行批次号
+            worker_id (str | None): 期望属主；None 时取客户端登记身份
 
         返回:
-            bool: 释放成功 True；后端不可用/异常 False
+            bool: 删除成功或本就无 claim True；属主不符/读不到属主/
+            后端不可用/批次号为空 False
+
+        异常:
+            无（内部全部降级为 False，不向上抛）
         """
         if not execution_id:
             return False
         backend = self._get_backend()
         if backend is None:
             return False
-        try:
-            backend.delete(task_claim_key(execution_id))
-            return True
-        except redis.RedisError as exc:
-            logger.warning(f"释放幂等抢占失败 | execution_id={execution_id} | {exc}")
+        expected_owner = self._resolve_owner(worker_id)
+        outcome = self._compare_and_del_claim(backend, execution_id, expected_owner)
+        if outcome is None:
+            logger.warning(
+                f"claim 属主不可读，拒绝释放（保守：宁可等 TTL 过期也不误删他人保护）| "
+                f"execution_id={execution_id} | 期望属主={expected_owner or '(空)'}"
+            )
             return False
+        if outcome is False:
+            logger.warning(
+                f"拒绝释放非自有 claim（被挡轮次不得拆掉他人幂等保护）| "
+                f"execution_id={execution_id} | 期望属主={expected_owner or '(空)'}"
+            )
+            return False
+        return True
+
+    def _takeover_stale_claim(self, execution_id: str, dead_owner: str) -> bool:
+        """
+        接管"已判定属主死亡"的 claim（重投前置，Day52 P2）
+
+        只允许在调用方**已经用心跳陈旧判定过属主死亡**之后调用——这是
+        它与 `release_claim` 的根本区别：release_claim 是 worker 清理
+        自己的东西，只能凭属主比对动手；本方法是替系统执行死亡认定后
+        回收无主资源，两者的授权来源根本不同。
+
+        属主比对仍有意义：如果 claim 的属主与被判死的属主不一致，说明
+        期间已经有别的 worker 重新抢到了它（上一轮重投已被消费），此时
+        释放就会拆掉那个**活着**的 worker 的保护，必须放弃并跳过本轮。
+
+        读不到属主时按"无活属主"继续（与 release_claim 的 fail-closed
+        方向相反）：这里的对手方是"崩溃后无人回收的任务"，读不到属主若
+        就不动，等于把唯一能救回任务的路径掐断；而认错代价由
+        MAX_REQUEUE_ATTEMPTS 与明细分桶去重兜住。
+
+        参数:
+            execution_id (str): 执行批次号
+            dead_owner (str): 本方法上游判定为死亡的属主标识；
+                空串表示状态 hash 里没有 worker_id 记录（老数据/
+                状态 hash 已过期），无法比对属主
+
+        返回:
+            bool: 接管成功（含"本就无 claim"）True；属主已易主 False
+
+        异常:
+            无（Redis 异常降级为"继续"，不阻断重投）
+        """
+        backend = self._get_backend()
+        if backend is None:
+            return True
+        key = task_claim_key(execution_id)
+        # 能力探测：精简替身/受限实现可能不提供 GET，读不到属主即按
+        # "无活属主"继续（方向说明见上方 docstring）
+        getter = getattr(backend, "get", None)
+        if getter is None:
+            return True
+        try:
+            current = getter(key)
+        except redis.RedisError as exc:
+            logger.warning(
+                f"接管前读取 claim 属主失败，按无活属主继续重投 | "
+                f"execution_id={execution_id} | {exc}"
+            )
+            return True
+        if current is None:
+            return True
+        if dead_owner and str(current) != dead_owner:
+            return False
+        try:
+            backend.delete(key)
+        except redis.RedisError as exc:
+            logger.warning(
+                f"死亡属主 claim 接管失败（重投后可能被该 claim 挡住）| "
+                f"execution_id={execution_id} | 判定死亡的属主="
+                f"{dead_owner or '(未知)'} | {exc}"
+            )
+            return True
+        logger.warning(
+            f"已接管判定死亡属主的 claim，使重投任务可重新抢占 | "
+            f"execution_id={execution_id} | 原属主={current}"
+        )
+        return True
 
 
 class TaskWorker:
@@ -1402,6 +1648,12 @@ class TaskWorker:
         # hash 的 worker_id 字段，排障时能直接回答"这条任务卡在哪个
         # worker 上"，而不是面对一个匿名报文猜。
         self.worker_id = worker_id if worker_id else generate_worker_id()
+        # Day52 P2：把身份登记到队列客户端上，供 claim/release_claim 在
+        # 未显式传参时做属主比对。真正的 claim() 调用点在
+        # `case_manager._execute_batch_async`（不在当日白名单），只能靠
+        # 客户端持有身份把这条链路接起来——一个进程一个客户端一个 worker，
+        # 登记方与读取方同属一方，不存在把 A 的身份用到 B 上的可能
+        self.queue_client.worker_id = self.worker_id
         # 当前正在执行的批次号（None 表示空闲）。心跳线程只刷新它，
         # 避免在空闲期给无关批次写心跳。
         self._current_execution_id: str | None = None
@@ -1713,11 +1965,15 @@ class TaskWorker:
             # 刻意在 complete_task 之后释放：claim 是"正在执行"的保护，
             # 终态未确认前就释放会让重投回来的任务立刻二次抢到 claim
             # 而与本次执行并发。
-            self.queue_client.release_claim(execution_id)
+            #
+            # Day52 P2：显式带上 worker_id 做属主比对。这一轮若是被别的
+            # worker 的 claim 挡下（零用例执行），比对会失败并原样保留
+            # 那道保护——这正是修复前无条件 DEL 造成的双跑缺口。
+            released = self.queue_client.release_claim(execution_id, self.worker_id)
             logger.info(
                 f"worker任务结束 | execution_id={execution_id} | "
                 f"终态={terminal_status} | 终态已确认={state_confirmed} | "
-                f"已ack={acked}"
+                f"已ack={acked} | claim已释放={released}"
             )
 
         logger.info("任务队列worker已停止")
