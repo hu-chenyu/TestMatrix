@@ -84,19 +84,27 @@ allure-report/
 .workbuddy/
 
 # 本地私有工作文档（不入库）
-/PROJECT_PLAN.md
-/PROJECT_CONTEXT.md
-/PROJECT_SPEC.md
+#   本节一律写成通配模式而非具体文件名：本文件是被跟踪的，写死路径等于在公开仓库里
+#   逐字公布私有文件叫什么。宽一点无害（多忽略几个文件不会丢东西）。
+/*PLAN*.md
+/*CONTEXT*.md
+/*SPEC*.md
 /DAILY_*.md
 /docs/DAILY_*.md
 /docs/bug_audit_report_*
 /docs/day44_*review*.md
 /docs/frontend_phase_review_*.md
-/docs/ast_regression_poc_report.md
+/docs/ast_*report*.md
 /docs/presentations/
 # 本地调研与评估文档（不入库）
 /docs/TestMatrix_重排方案_*.md
 /docs/TestMatrix_*评估_*.md
+
+# 发布合规词表（本地维护，不入库）
+#   与 AquaMind 的 .wordlist.local 同源，跨仓库共享一份禁忌词表。
+#   写成通配而非具体文件名：.gitignore 入库，写死等于公开词表文件叫什么。
+#   /.*.local 同时兜底 .env.local 等一切根目录 *.local 本地产物（多忽略无害）。
+/.*.local
 
 # ------------------------------ PyPI 打包产物（不入库） ------------------------------
 pypi/
