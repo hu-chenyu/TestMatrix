@@ -1,5 +1,5 @@
 """
-TestMatrix Day52: claim 属主校验与释放防护回归用例（4 条）
+TestMatrix Day52: claim 属主校验与释放防护回归用例（6 条）
 
 Day52 开工前必处理的 P2（deepseek + evolving 在 Day51 复核中共同发现）：
 
@@ -12,7 +12,7 @@ Day52 开工前必处理的 P2（deepseek + evolving 在 Day51 复核中共同�
     消失，claim TTL 是 3600s；若无条件释放被移除，重投回来的任务会被这道
     闸挡住、3 次重投全部落空先转死信——崩溃补偿等于没有。
 
-四条用例分别钉住统一方案的三个动作 + 各自的"变异存活"对照：
+六条用例分别钉住统一方案的三个动作、降级口径与存活属主保护：
 
     1. 属主比对释放：worker B 释放 worker A 的 claim 必须被拒绝，
        而 A 释放自己的必须成功（否则"永远拒绝"也能让本条变绿）
@@ -23,6 +23,11 @@ Day52 开工前必处理的 P2（deepseek + evolving 在 Day51 复核中共同�
        claim，重投的任务才抢得到；不接管则被 3600s 的旧 claim 挡死
     4. 被挡轮次不得释放非自有 claim（worker 级）：跑**真实消费循环**，
        A 在执行中被 B 撞上，B 整轮收尾后 A 的 claim 必须原样存活
+    5. 存活属主保护：心跳新鲜的批次根本进不了接管段；属主失配时按
+       fail-open 接管（Day52-fix P2-2，见 `_takeover_stale_claim` docstring），
+       但**心跳新鲜**这条"活人不被接管"的前置闸必须仍然拦住
+    6. 降级路径：读不到属主时 `release_claim` 拒绝释放（fail-closed）、
+       `_takeover_stale_claim` 继续重投（fail-open），两个相反方向都要钉住
 
 时间处理铁律（沿用 Day51）：
     - 禁 time.sleep 赌时序，一律轮询 + 预算上限；
@@ -518,21 +523,29 @@ class TestClaimOwnerGuard:
             "P2 核心断言：A 的 claim 必须原样存活，修复前此处会被 DEL 成 None"
         )
 
-    @allure.story("worker A 仍在执行时其 claim 不得被任何路径释放")
+    @allure.story("心跳新鲜的存活属主不被接管；属主失配时按心跳超时 fail-open 接管")
     @allure.severity(allure.severity_level.CRITICAL)
     @pytest.mark.regression
     def test_存活属主的claim不被requeue_stale释放(
         self, pair_clients: tuple[TaskQueueClient, TaskQueueClient]
     ) -> None:
         """
-        接管的前置是"属主确实死了"，活着的人不能被接管
+        fail-open 之所以安全，全靠"心跳新鲜"这道前置闸
 
-        两条独立路径分别钉住：
-            1. 心跳新鲜 → 根本不进接管段（在途条目与 claim 都原样保留）；
-            2. 心跳陈旧但 claim 属主与判定死亡的属主不一致 → 属主比对拦下，
-               本轮跳过重投。这条是接管的牙齿：去掉比对后，requeue_stale
-               会把**另一个活着的 worker** 的 claim 一并接管掉，双跑防线
-               由此被补偿机制自己拆掉——与修复前的缺陷同源，只是换了个方向。
+        两条路径必须一起看，单独看任一条都会得出相反的错误结论：
+
+            1. 心跳新鲜 → 根本不进接管段（在途条目与 claim 原样保留）。
+               **这条才是"活人不被接管"的真正保障**：只要 worker 还活着，
+               它的心跳线程就会持续刷新 heartbeat_at，requeue_stale 永远不会
+               走到接管这一步。
+            2. 心跳已陈旧、但 claim 属主与状态 hash 属主失配 → **fail-open
+               继续接管**（Day52-fix P2-2）。失配的主因是被挡轮次覆写：
+               `mark_in_flight` 在 claim 之前执行，被挡下的 worker 早已把
+               状态 hash 的 worker_id 写成自己，于是"状态 hash 属主"根本不是
+               死亡者，claim 的实际属主才是。此时若跳过，崩溃恢复就从 60s
+               退化到 claim TTL 3600s，3 次重投全被挡、先转死信。
+
+        第 2 条与第 1 条构成一组对照：判据是**心跳**，不是"属主字段等不等"。
         """
         client_a, client_b = pair_clients
 
@@ -560,7 +573,7 @@ class TestClaimOwnerGuard:
             len(client_a._backend.lrange(client_a.processing_key, 0, -1)) == 1
         ), "未被重投的任务必须原样留在在途 list"
 
-        # ---- 路径2：心跳陈旧，但 claim 属主已不是被判死的那个 ----
+        # ---- 路径2：心跳陈旧 + 属主失配（被挡轮次覆写）→ fail-open 接管 ----
         stale_id = "RUN-D52-MISMATCH"
         client_a._backend.lpush(
             client_a.processing_key, json.dumps(_payload(stale_id))
@@ -571,16 +584,20 @@ class TestClaimOwnerGuard:
             started_at=_backdated(3600),
             **{FIELD_WORKER_ID: "worker-a", FIELD_HEARTBEAT_AT: _backdated(3600)},
         )
-        # 状态 hash 记的属主是 worker-a，实际持有 claim 的是 worker-b：
-        # 期间属主已被换过（上一轮重投被消费），此刻接管就会拆掉活人的保护
+        # 状态 hash 记的是 worker-a（被挡轮次覆写的假象），claim 实际属主是
+        # worker-b（真正死掉的那个）。心跳已陈旧，接管必须照常进行。
         assert client_b.claim(stale_id) is True
         assert client_b._backend.get(task_claim_key(stale_id)) == "worker-b"
 
-        assert client_b.requeue_stale() == 0, (
-            "claim 属主与判定死亡的属主不一致时必须跳过本轮重投"
+        assert client_b.requeue_stale() == 1, (
+            "心跳已陈旧时即使属主失配也必须接管并重投："
+            "跳过会让崩溃恢复退化到 claim TTL 3600s"
         )
-        assert client_b._backend.get(task_claim_key(stale_id)) == "worker-b", (
-            "属主已易主时接管必须放弃：拆掉活人的 claim 等于制造双跑"
+        assert client_b._backend.get(task_claim_key(stale_id)) is None, (
+            "接管后 claim 必须消失，重投任务才抢得到"
+        )
+        assert client_b.claim(stale_id) is True, (
+            "接管后重投任务必须能重新抢占（崩溃恢复的前提）"
         )
 
     @allure.story("读不到属主时释放拒绝、接管不阻断重投")
