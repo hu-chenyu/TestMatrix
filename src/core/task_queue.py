@@ -1196,13 +1196,12 @@ class TaskQueueClient:
       # 与之相对，worker 收尾时释放自己并不持有的 claim（被挡轮次）
       # 没有任何认定依据，必须被属主校验挡下。
       dead_owner = str(status.get(FIELD_WORKER_ID) or "")
-      if not self._takeover_stale_claim(execution_id, dead_owner):
-        logger.warning(
-          f"陈旧任务接管 claim 失败（属主已易主），跳过本轮重投 | "
-          f"execution_id={execution_id} | 判定死亡的属主="
-          f"{dead_owner or '(未知)'}"
-        )
-        continue
+      # 接管恒放行（Day52-fix P2-2 起）：属主失配也继续接管，调用方
+      # 不再需要"接管失败就跳过"的分支。保留该分支只会留下一段永远
+      # 走不到的死代码——`_takeover_stale_claim` 的每条出口都返回 True
+      # （后端不可用/读不到属主/删除异常均按 fail-open 放行），留着它
+      # 既无法被测试覆盖，也让人误以为"接管仍可能失败并中止重投"。
+      self._takeover_stale_claim(execution_id, dead_owner)
       # 闸③：先移出在途再入队，顺序反了会在本轮扫到自己形成自环
       self._discard_from_processing(raw)
       try:
@@ -1530,11 +1529,18 @@ class TaskQueueClient:
     自己的东西，只能凭属主比对动手；本方法是替系统执行死亡认定后
     回收无主资源，两者的授权来源根本不同。
 
-    属主比对仍有意义：如果 claim 的属主与被判死的属主不一致，说明
-    期间已经有别的 worker 重新抢到了它（上一轮重投已被消费），此时
-    释放就会拆掉那个**活着**的 worker 的保护，必须放弃并跳过本轮。
+    属主比对仍要读，但**失配时按 fail-open 继续接管**（Day52-fix P2-2）：
+    比对失配最常见的成因不是"有活人抢走了 claim"，而是**被挡轮次覆写**——
+    `mark_in_flight` 在 `_execute_batch_async`（内部 claim）**之前**执行，
+    于是被 A 的 claim 挡下的 B 早已把状态 hash 的 worker_id 写成自己。
+    此时 `dead_owner` 是 B（被挡者），claim 实际属主才是真正死掉的 A。
 
-    读不到属主时按"无活属主"继续（与 release_claim 的 fail-closed
+    为什么失配仍可安全接管：调用方已用心跳判过超时（>60s），而**活着的**
+    worker 其心跳线程会持续刷新 heartbeat_at，根本走不到这一步。故失配时
+    claim 的实际属主几乎必然就是死亡者，按它接管才对；若坚持失配即跳过，
+    崩溃恢复会从 60s 退化到 claim TTL 3600s，且 3 次重投全被挡、先转死信。
+
+    读不到属主时同样按"无活属主"继续（与 release_claim 的 fail-closed
     方向相反）：这里的对手方是"崩溃后无人回收的任务"，读不到属主若
     就不动，等于把唯一能救回任务的路径掐断；而认错代价由
     MAX_REQUEUE_ATTEMPTS 与明细分桶去重兜住。
@@ -1546,7 +1552,10 @@ class TaskQueueClient:
         状态 hash 已过期），无法比对属主
 
     返回:
-      bool: 接管成功（含"本就无 claim"）True；属主已易主 False
+      bool: 接管是否放行。本方法**恒返回 True**——失配也接管，
+        只有"后端不可用/读不到属主"等情形才会在更早的分支提前返回，
+        但那些分支同样返回 True；保留 bool 是为了与调用方的
+      闸位语义对齐（调用方据此决定要不要跳过本轮重投）
 
     异常:
       无（Redis 异常降级为"继续"，不阻断重投）
@@ -1571,7 +1580,23 @@ class TaskQueueClient:
     if current is None:
       return True
     if dead_owner and str(current) != dead_owner:
-      return False
+      # 失配 → fail-open 继续接管（Day52-fix P2-2）。
+      #
+      # 失配的主因是"被挡轮次覆写属主"：mark_in_flight 在 claim 之前
+      # 执行，被 A 的 claim 挡下的 B 早已把状态 hash 的 worker_id 写成
+      # 自己，于是 dead_owner=B 而 claim 实际属主=真正死掉的 A。
+      # 若在这里 return False，崩溃恢复就从心跳 TTL 的 60s 退化到
+      # claim TTL 的 3600s，且 3 次重投全被这道闸挡下、先转死信。
+      #
+      # 之所以敢 fail-open：调用方已判过心跳超时（>60s），而**活着**的
+      # worker 其心跳线程会持续刷新 heartbeat_at，根本走不到这一步。
+      # 即"claim 实际属主"比"状态 hash 属主"更接近真正的死亡者。
+      logger.warning(
+        f"接管时 claim 属主与状态 hash 属主不一致（多为被挡轮次覆写所致），"
+        f"按心跳超时判定 fail-open 接管 | execution_id={execution_id} | "
+        f"claim属主={current} | 状态hash属主={dead_owner}"
+      )
+      # 不 return：继续向下执行 DELETE
     try:
       backend.delete(key)
     except redis.RedisError as exc:
