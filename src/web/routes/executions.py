@@ -128,6 +128,16 @@ EVENT_ID_NAMESPACES = (EVENT_ID_NAMESPACE_LIVE, EVENT_ID_NAMESPACE_DB)
 # 保证流式响应不被缓冲、生产方线程得以持续publish
 FRAME_INTERVAL_SECONDS = 0.05
 
+# 输出流的帧间让出间隔（秒，Day53-fix P2-a）: 刻意与 /events 的
+# FRAME_INTERVAL_SECONDS=0.05 **分开**——0.05s 是给结构化事件（频率低、
+# 每批几十条）设计的，直接套到逐行输出上等于给每条流加 **20 行/s 的硬上限**：
+# 回放满环 2000 行要 100s，实时高频输出时消费游标持续滞后、环静默淘汰丢行。
+# 取 0 的三条依据：①一帧就是一整行输出，行间本就夹着子进程管道读的真实 IO；
+# ②Werkzeug 开发服务器的响应体写入是无缓冲的（BaseHTTPRequestHandler 的
+# wbufsize=0），每次 yield 直接落到 socket，不需要靠 sleep 触发 flush；
+# ③time.sleep(0) 仍会归还 GIL，不会把生产方线程饿死。
+OUTPUT_FRAME_INTERVAL_SECONDS = 0.0
+
 # 心跳间隔（秒）: 运行中批次订阅空闲超过该时长时发送一条
 # ": heartbeat"注释帧保活（防中间代理/负载均衡掐断空闲连接）；
 # 注释帧不带id行，不会推进客户端的Last-Event-ID游标
@@ -605,7 +615,7 @@ def _format_sse_frame(
   event_type: str,
   data: dict[str, Any],
   event_id: int | None = None,
-  namespace: str = EVENT_ID_NAMESPACE_LIVE,
+  namespace: str | None = EVENT_ID_NAMESPACE_LIVE,
 ) -> str:
   """
   格式化单条SSE帧（内部方法）
@@ -625,6 +635,14 @@ def _format_sse_frame(
   都不发，终态事件永久丢失、EventSource 无限重连。带前缀后重连方能
   明确自己身处哪套体系，跨体系时按"全量重发"处理而非错误比较。
 
+  namespace=None 时输出**裸整数** id（`id: {事件序号}`，Day53-fix P1）:
+  /events 的 live:/db: 前缀是"防跨体系错误比较"的有意设计，解析端
+  `_parse_last_event_id_header` 配套把裸整数按 live 兜底，两者自洽。
+  但输出流（/executions/<id>/output）的行序号是**另一套独立编号**，
+  复用它默认的 live: 前缀会让浏览器回传的 `Last-Event-ID: live:5` 落进
+  输出流的裸整数解析器 → 解析失败 → 每次重连都全量回放（最多 2000 行）。
+  故输出流显式传 namespace=None，让"发出去的 id"与"能解析的 id"同构。
+
   参数:
     event_type (str): 事件类型（合法取值见
              event_bus.VALID_EVENT_TYPES）
@@ -633,8 +651,9 @@ def _format_sse_frame(
     event_id (int | None): 事件序号（命名空间内的序号），
                None时不输出id行（降级帧向后兼容
                Day25三要素格式）
-    namespace (str): 编号体系标识，live=实时流通道序号，
-             db=DB重建合成序号
+    namespace (str | None): 编号体系标识，live=实时流通道序号，
+                db=DB重建合成序号；None=不带命名空间的
+                裸整数 id（输出流专用，见上）
 
   返回:
     str: 单条完整SSE帧文本（以空行结尾）
@@ -645,6 +664,8 @@ def _format_sse_frame(
   payload = json.dumps(data, ensure_ascii=False)
   if event_id is None:
     return f"event: {event_type}\ndata: {payload}\n\n"
+  if namespace is None:
+    return f"event: {event_type}\nid: {event_id}\ndata: {payload}\n\n"
   return (
     f"event: {event_type}\nid: {namespace}:{event_id}\ndata: {payload}\n\n"
   )
@@ -1118,6 +1139,15 @@ def _parse_last_output_id_header() -> int:
   `/events` 的 `{namespace}:{seq}` 是两套独立编号体系，故各有各的解析：
   混用解析器会让重连锚点被错误解释成 0 或某个命名空间序号。
 
+  为什么额外容忍 `live:{seq}`（Day53-fix P1）: 修复前本接口发出的 id
+  复用了 `_format_sse_frame` 默认的 live: 命名空间，浏览器会原样回传
+  `Last-Event-ID: live:5`；本函数当时只做 `int()` 直转 → 抛错 → 返回 0
+  → 每次重连全量回放（最多 2000 行），断点续传在真实浏览器下从不生效。
+  修复采取"两头都修"：发帧侧改发裸整数（namespace=None），解析侧额外
+  剥掉这一个已知前缀，让修复前建立的在途连接也能接续上。
+  只认这一个前缀（不认 db: 等其它命名空间）——其余形态按"无法解释"
+  处理，宁可全量回放也不猜一个错误锚点。
+
   参数:
     无（从 request.headers 读取）
 
@@ -1130,8 +1160,12 @@ def _parse_last_output_id_header() -> int:
   raw_value = request.headers.get("Last-Event-ID")
   if raw_value is None:
     return 0
+  anchor = str(raw_value).strip()
+  legacy_prefix = f"{EVENT_ID_NAMESPACE_LIVE}:"
+  if anchor.startswith(legacy_prefix):
+    anchor = anchor[len(legacy_prefix) :]
   try:
-    seq = int(str(raw_value).strip())
+    seq = int(anchor)
   except (TypeError, ValueError):
     return 0
   return seq if seq > 0 else 0
@@ -1271,7 +1305,11 @@ def stream_execution_output(execution_id: str) -> Response:
   分帧口径:
     event: output\\nid: {行序号}\\ndata: {"seq","source","line"}\\n\\n
     event: output_end\\ndata: {"reason","lines"}\\n\\n
-  （id 行仅在实时/回放分支输出；终帧不带 id——它不是序列中的一帧，
+    : heartbeat\\n\\n（空闲保活注释帧，SSE 规范里以冒号开头）
+  （id 行仅在实时/回放分支输出，且是**裸整数行序号**——与 /events 的
+   `{namespace}:{seq}` 是两套体系，故两端的"发"与"解析"必须同构，
+   Day53-fix P1 的根因就是发出去的是 live:N 而解析端只认裸整数；
+   终帧与心跳帧都不带 id——它们不是输出序列中的一帧，
    重复送达幂等，不推进客户端游标）
 
   分支口径:
@@ -1287,8 +1325,12 @@ def stream_execution_output(execution_id: str) -> Response:
   （批次开始/单条用例完成/终态），本接口推**原始逐行输出**。
   前端日志弹窗同时订阅两条流，任一断开不影响另一条。
 
-  SSE 资源保护与 /events 同口径: 复用同一份单 IP 并发订阅配额与
-  单流最长存活时间（无鉴权服务下的拒绝服务防线，见 KNOWN_LIMITATIONS 第 7 节）。
+  SSE 资源保护与 /events 同口径: 复用同一份单 IP 并发订阅配额、
+  单流最长存活时间与**空闲心跳帧**（无鉴权服务下的拒绝服务防线，
+  死连接只有靠心跳才能被发现并回收，见 KNOWN_LIMITATIONS 第 7 节）。
+  节流口径与 /events **刻意不同**（Day53-fix P2-a）: 逐行输出用
+  OUTPUT_FRAME_INTERVAL_SECONDS（=0），不用 /events 的 0.05s，
+  否则等于给每条流加 20 行/s 的硬上限。
 
   参数:
     execution_id (str): 执行批次号（URL 路径参数）
@@ -1373,10 +1415,11 @@ def stream_execution_output(execution_id: str) -> Response:
       return
 
     stream_started = time.monotonic()
+    last_activity = stream_started
     emitted = 0
     for item in bus.subscribe(last_seq=resume_seq, tick=True):
       if item is None:
-        # 心跳节拍（0.5s 一次）：顺带判批次终态与单流存活上界。
+        # 心跳节拍（0.5s 一次）：顺带判批次终态、单流存活上界与心跳保活。
         #
         # 为什么把终态判定放在节拍里而不是每次收到行才判: 批次最后
         # 一条用例跑完后不会再产生输出行，若只在"收到行"时判终态，
@@ -1388,24 +1431,39 @@ def stream_execution_output(execution_id: str) -> Response:
             reason="batch_terminal", lines=emitted
           )
           return
-        if time.monotonic() - stream_started >= SSE_MAX_LIFETIME_SECONDS:
+        now = time.monotonic()
+        if now - stream_started >= SSE_MAX_LIFETIME_SECONDS:
           yield _format_output_end_frame(reason="lifetime_exceeded", lines=emitted)
           logger.info(
             f"输出流达到最长存活时间，主动收流 | 批次: {execution_id}"
           )
           return
+        # 空闲保活（Day53-fix P2-b，与 /events 同口径）: 注释帧以冒号
+        # 开头、不带 id 行，浏览器 EventSource 静默忽略且不推进游标。
+        # 没有它时，客户端断开要等存活上界（30 分钟）才发现，死连接
+        # 长期钉住单 IP 的 5 个名额 → 合法重连被 429；中间代理也可能
+        # 掐断长时间无字节的"空闲"连接。
+        if now - last_activity >= HEARTBEAT_INTERVAL_SECONDS:
+          yield ": heartbeat\n\n"
+          last_activity = now
         continue
       emitted += 1
       yield _format_sse_frame(
         OUTPUT_LINE_EVENT_TYPE,
         {"seq": item.seq, "source": item.source, "line": item.line},
         event_id=item.seq,
+        # 裸整数 id：输出流的行序号是独立编号体系，带命名空间前缀
+        # 会让浏览器回传的 Last-Event-ID 无法被本流解析（P1 根因）
+        namespace=None,
       )
-      if time.monotonic() - stream_started >= SSE_MAX_LIFETIME_SECONDS:
+      now = time.monotonic()
+      last_activity = now
+      if now - stream_started >= SSE_MAX_LIFETIME_SECONDS:
         yield _format_output_end_frame(reason="lifetime_exceeded", lines=emitted)
         return
-      # 帧间让出 GIL，防开发服务器把流式响应缓冲成一次性输出
-      time.sleep(FRAME_INTERVAL_SECONDS)
+      # 帧间让出 GIL（Day53-fix P2-a）: sleep(0) 级即可，不能用 /events
+      # 的 0.05s——那会给逐行输出加 20 行/s 硬上限，回放 2000 行要 100s
+      time.sleep(OUTPUT_FRAME_INTERVAL_SECONDS)
 
   response = Response(
     stream_with_context(output_generator()), mimetype="text/event-stream"
