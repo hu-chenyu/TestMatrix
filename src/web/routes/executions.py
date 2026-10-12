@@ -52,6 +52,7 @@
 """
 
 import json
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -60,6 +61,7 @@ from typing import Any
 
 from flask import Blueprint, Response, abort, request, stream_with_context
 
+from src.common.env_manager import env_manager
 from src.common.logger import LogManager
 from src.core.case_manager import (
   MAX_PAGE_SIZE,
@@ -69,7 +71,11 @@ from src.core.case_manager import (
   NoCasesSelectedError,
 )
 from src.core.event_bus import get_channel
-from src.core.executors import VALID_EXECUTORS
+from src.core.executors import (
+  VALID_EXECUTORS,
+  arm_output_capture,
+  get_output_bus,
+)
 from src.core.task_queue import STATUS_PENDING, task_queue_client
 from src.web.exceptions import NotFoundError, ValidationError
 from src.web.pagination import parse_int_param, parse_page_param
@@ -82,6 +88,21 @@ from src.web.utils import sanitize_log_field
 logger = LogManager.get_logger()
 
 executions_bp = Blueprint("executions", __name__, url_prefix="/api/executions")
+
+# Day53: 执行器双模式切换蓝图（/api/executor）。
+#
+# 为什么单独开一个蓝图而不是塞进 executions_bp: 模式是**全局执行配置**，
+# 不是"某个批次"的子资源；挂在 /api/executions/mode 下会与
+# `/<execution_id>` 动态规则在语义上撞车（静态规则虽优先，读代码的人却要
+# 停下来确认一次）。独立前缀让 URL 与语义一致。
+executor_bp = Blueprint("executor", __name__, url_prefix="/api/executor")
+
+# 执行器模式的环境变量键：执行器工厂 get_executor 在未显式指定类型时
+# 就是读它（env_manager.get 实时读 os.getenv，故写入即生效）。
+EXECUTOR_MODE_ENV_KEY = "TM_EXECUTOR"
+
+# 未配置任何模式时的默认执行器（与 get_executor 的兜底口径一致）
+DEFAULT_EXECUTOR_MODE = "simulated"
 
 # 分页参数默认值（与cases.py口径一致）
 DEFAULT_PAGE = 1
@@ -420,6 +441,14 @@ def trigger_execution():
   # 单worker串行消费；未启用或enqueue失败（Redis故障）时
   # fallback原裸线程——任务不丢、接口不500（铁律）
   execution_id = result["execution_id"]
+  # Day53 任务二：在**调度之前**开启本批次的原始输出捕获。
+  #
+  # 为什么必须在调度前而不是等前端连上 SSE 再开: 执行器在每条用例的
+  # run_one 开头一次性决定"逐行读还是 communicate 一次性读"。晚开一步，
+  # 先跑的那几条用例的输出就永久丢了——而开局恰恰是最需要现场的一段。
+  # 开启后写入的是有界环（OUTPUT_RING_MAXLEN），无订阅者时不产生任何推送，
+  # 只是定长内存；批次结束后的通道由 arm 时的空闲回收负责收口。
+  arm_output_capture(execution_id)
   queued = False
   if task_queue_client.enabled:
     # payload严格对齐_execute_batch_async真实签名:
@@ -1064,4 +1093,379 @@ def stream_execution_events(execution_id: str):
   else:
     response.call_on_close(lease.release)
   return response
+
+
+# ===========================================================================
+# Day53 任务二：真实执行原始输出流（subprocess 输出 → SSE 推送）
+# ===========================================================================
+# 输出流的终帧类型：客户端据此收流并展示"输出已结束"。
+#
+# 为什么需要显式终帧而不是"连接断了就是结束": 浏览器对服务端主动关闭的
+# SSE 连接会**自动重连**（约 3s）。没有终帧时，一条已结束的批次会陷入
+# "连上→服务端立刻关流→浏览器重连"的热循环，日志区反复追加同一批行的
+# 提示。终帧是本接口唯一的"可以停下来"的信号。
+OUTPUT_END_EVENT_TYPE = "output_end"
+
+# 输出流帧的事件类型（原始输出行）
+OUTPUT_LINE_EVENT_TYPE = "output"
+
+
+def _parse_last_output_id_header() -> int:
+  """
+  解析 Last-Event-ID 请求头为输出流的行序号（内部方法）
+
+  输出流的 id 是**裸整数行序号**（通道内从 1 起单调递增），与
+  `/events` 的 `{namespace}:{seq}` 是两套独立编号体系，故各有各的解析：
+  混用解析器会让重连锚点被错误解释成 0 或某个命名空间序号。
+
+  参数:
+    无（从 request.headers 读取）
+
+  返回:
+    int: 断点续传锚点；请求头缺失/非法/非正整数时返回 0（=全量回放）
+
+  异常:
+    无（畸形头一律按"全量回放"处理，绝不因它拒掉重连请求）
+  """
+  raw_value = request.headers.get("Last-Event-ID")
+  if raw_value is None:
+    return 0
+  try:
+    seq = int(str(raw_value).strip())
+  except (TypeError, ValueError):
+    return 0
+  return seq if seq > 0 else 0
+
+
+def _current_executor_mode() -> str:
+  """
+  读取当前生效的执行器模式（内部方法）
+
+  取值来源: 环境变量 TM_EXECUTOR（env_manager.get 实时读 os.getenv，
+  故本进程内的切换立刻生效；.env 里的配置则在进程启动时装载）。
+  值不在合法集合内（含空串）时回落默认模式，避免把一个拼错的值
+  当成"用户显式选了某个执行器"。
+
+  参数:
+    无
+
+  返回:
+    str: simulated / pytest 之一
+
+  异常:
+    无
+  """
+  configured = str(env_manager.get(EXECUTOR_MODE_ENV_KEY, "") or "").strip()
+  return configured if configured in VALID_EXECUTORS else DEFAULT_EXECUTOR_MODE
+
+
+def _apply_executor_mode(mode: str) -> None:
+  """
+  写入执行器模式（内部方法，进程级生效）
+
+  为什么落在这一个环境变量上: 执行器工厂 `get_executor(kind=None)`
+  对"未显式指定类型"的批次就是读 `TM_EXECUTOR`，Web 触发接口在请求体
+  没带 executor 时同样把 kind 传成 None。写这里等于让**所有**后续
+  触发（含队列 worker 消费的批次）自动跟随新模式，且不必改动
+  `case_manager` 与既有触发载荷语义（那些载荷的 `executor_kind=None`
+  被既有用例逐字断言过）。
+
+  持久化口径: 进程级（服务重启后回到 .env / 启动参数配置值）。
+  这是单机自托管工具的取舍——把模式写进 .env 需要落盘与并发写保护，
+  而本平台无鉴权、单实例，模式属于"当前这一轮想怎么跑"的运行时选择。
+
+  参数:
+    mode (str): 目标模式（调用方保证已通过 VALID_EXECUTORS 校验）
+
+  返回:
+    无
+
+  异常:
+    无
+  """
+  os.environ[EXECUTOR_MODE_ENV_KEY] = mode
+  logger.info(f"执行器模式已切换 | 当前模式: {mode}")
+
+
+@executor_bp.route("/mode", methods=["GET"])
+def get_executor_mode_api() -> tuple[dict[str, Any], int]:
+  """
+  查询当前执行器模式（真实/模拟双模式切换）
+
+  参数:
+    无
+
+  返回:
+    tuple[dict, int]: (统一响应体, 200)，data 为:
+      {"mode": 当前模式, "available": [合法模式列表],
+       "default": 未配置时的默认模式}
+
+  异常:
+    无
+  """
+  return success(
+    data={
+      "mode": _current_executor_mode(),
+      "available": list(VALID_EXECUTORS),
+      "default": DEFAULT_EXECUTOR_MODE,
+    }
+  )
+
+
+@executor_bp.route("/mode", methods=["POST"])
+def set_executor_mode_api() -> tuple[dict[str, Any], int]:
+  """
+  切换执行器模式（真实/模拟双模式切换）
+
+  请求体: {"mode": "simulated" | "pytest"}
+
+  语义: 只影响**调用之后新触发**的批次；已有批次与既有执行结果
+  不受影响（模式只改变工厂创建哪个执行器，不回溯已落库数据）。
+
+  参数:
+    无（从 request.get_json 解析请求体）
+
+  返回:
+    tuple[dict, int]: (统一响应体, 200)，data 为:
+      {"mode": 切换后的模式, "available": [合法模式列表]}
+
+  异常:
+    ValidationError: 请求体非 JSON 对象 / mode 缺失 / mode 非法时抛出（400）
+  """
+  body = request.get_json(silent=True)
+  if body is None:
+    body = {}
+  if not isinstance(body, dict):
+    raise ValidationError("请求体必须为JSON对象")
+
+  # mode 的类型单独判（不复用 _parse_optional_body_str）：那个辅助函数
+  # 把"非字符串类型"也当成"未传入"，于是 `{"mode": 123}` 会得到
+  # "mode不能为空"这种与现场不符的提示，排障时看不出真正原因。
+  raw_value = body.get("mode")
+  if not isinstance(raw_value, str) or not raw_value.strip():
+    raise ValidationError(
+      f"mode不能为空，合法取值: {list(VALID_EXECUTORS)}"
+    )
+  mode = raw_value.strip()
+  if mode not in VALID_EXECUTORS:
+    raise ValidationError(
+      f"mode非法: {raw_value!r}，合法取值: {list(VALID_EXECUTORS)}"
+    )
+
+  _apply_executor_mode(mode)
+  return success(
+    data={"mode": mode, "available": list(VALID_EXECUTORS)},
+    message="执行器模式已切换",
+  )
+
+
+@executions_bp.route("/<execution_id>/output")
+def stream_execution_output(execution_id: str) -> Response:
+  """
+  批次原始输出流接口（Day53 任务二）
+
+  text/event-stream 流式响应，逐帧推送真实执行器 subprocess 的**原始
+  逐行输出**（pytest 进度行、日志、失败堆栈），供前端"原始输出"区实时
+  滚动展示；收到终帧 output_end 后关闭流。
+
+  分帧口径:
+    event: output\\nid: {行序号}\\ndata: {"seq","source","line"}\\n\\n
+    event: output_end\\ndata: {"reason","lines"}\\n\\n
+  （id 行仅在实时/回放分支输出；终帧不带 id——它不是序列中的一帧，
+   重复送达幂等，不推进客户端游标）
+
+  分支口径:
+    1. 批次不存在 → 404（统一错误格式）
+    2. 存在输出通道 → 先按 Last-Event-ID 回放历史环，再跟随实时行；
+      每 0.5s 节拍顺带查一次批次状态，批次进终态即发终帧收流
+    3. 无输出通道且批次非终态 → 现场开启捕获后按 2 处理
+      （覆盖"触发时未开启"的批次，如队列 worker 消费的批次）
+    4. 无输出通道且批次已终态 → 单帧 output_end(reason=no_capture)
+      直发收流（结果目录/通道可能已被回收，如实告知而非挂死等待）
+
+  与 /events 的关系: 两条流正交——/events 推**结构化执行事件**
+  （批次开始/单条用例完成/终态），本接口推**原始逐行输出**。
+  前端日志弹窗同时订阅两条流，任一断开不影响另一条。
+
+  SSE 资源保护与 /events 同口径: 复用同一份单 IP 并发订阅配额与
+  单流最长存活时间（无鉴权服务下的拒绝服务防线，见 KNOWN_LIMITATIONS 第 7 节）。
+
+  参数:
+    execution_id (str): 执行批次号（URL 路径参数）
+
+  返回:
+    Response: text/event-stream 流式响应
+
+  异常:
+    NotFoundError: 批次不存在时抛出（404）
+    CaseManagerError: 核心层数据库异常原样上抛（兜底500，仅发生在
+             流开始前的状态查询阶段）
+  """
+  status_data = CaseManager.get_execution_status(execution_id)
+  if status_data is None:
+    raise NotFoundError(
+      "执行批次不存在", detail={"execution_id": execution_id}
+    )
+
+  bus = get_output_bus(execution_id)
+  is_terminal = status_data["status"] in ("finished", "failed")
+  if bus is None and not is_terminal:
+    # 该批次触发时尚未接入捕获（或通道已被空闲回收）——现场补开，
+    # 让后续用例的输出能进来；已跑过的用例输出确实拿不到了，
+    # 由前端以"输出从连接时刻开始"呈现，不做虚假补偿。
+    bus = arm_output_capture(execution_id)
+
+  resume_seq = _parse_last_output_id_header()
+
+  # 并发订阅配额（与 /events 共用同一份计数与上限）
+  client_key = request.remote_addr or "unknown"
+  with _SSE_CONNECTIONS_LOCK:
+    current_count = _SSE_ACTIVE_CONNECTIONS.get(client_key, 0)
+    if current_count >= SSE_MAX_CONNECTIONS_PER_IP:
+      logger.warning(
+        f"SSE并发订阅数超限，拒绝新连接 | 客户端: {client_key} | "
+        f"当前: {current_count} | 上限: {SSE_MAX_CONNECTIONS_PER_IP}"
+      )
+      abort(
+        429,
+        description=(
+          f"并发日志订阅数已达上限（{SSE_MAX_CONNECTIONS_PER_IP}），"
+          f"请关闭已打开的日志窗口后重试"
+        ),
+      )
+    _SSE_ACTIVE_CONNECTIONS[client_key] = current_count + 1
+  lease = _SseSlotLease(client_key)
+
+  def output_generator() -> Iterator[str]:
+    """
+    原始输出流的生成器体（内部函数）
+
+    参数:
+      无（闭包捕获批次号/通道/断点）
+
+    返回:
+      Iterator[str]: SSE 帧文本序列
+
+    异常:
+      无（名额归还在 finally 中保证）
+    """
+    try:
+      yield from _dispatch_output()
+    finally:
+      lease.release()
+
+  def _dispatch_output() -> Iterator[str]:
+    """
+    原始输出流的分支派发（内部函数）
+
+    参数:
+      无
+
+    返回:
+      Iterator[str]: SSE 帧文本序列
+
+    异常:
+      无（批次状态查询异常按"状态未知"处理，继续跟流直到存活上界）
+    """
+    if bus is None:
+      # 分支 4：无通道可跟（未接入捕获 / 已回收 / 批次已终态）
+      yield _format_output_end_frame(reason="no_capture", lines=0)
+      return
+
+    stream_started = time.monotonic()
+    emitted = 0
+    for item in bus.subscribe(last_seq=resume_seq, tick=True):
+      if item is None:
+        # 心跳节拍（0.5s 一次）：顺带判批次终态与单流存活上界。
+        #
+        # 为什么把终态判定放在节拍里而不是每次收到行才判: 批次最后
+        # 一条用例跑完后不会再产生输出行，若只在"收到行"时判终态，
+        # 这条流会一直挂到存活上界（30 分钟）才收，前端"原始输出"
+        # 区永远等不到结束提示。
+        status_now = _safe_batch_status(execution_id)
+        if status_now in ("finished", "failed"):
+          yield _format_output_end_frame(
+            reason="batch_terminal", lines=emitted
+          )
+          return
+        if time.monotonic() - stream_started >= SSE_MAX_LIFETIME_SECONDS:
+          yield _format_output_end_frame(reason="lifetime_exceeded", lines=emitted)
+          logger.info(
+            f"输出流达到最长存活时间，主动收流 | 批次: {execution_id}"
+          )
+          return
+        continue
+      emitted += 1
+      yield _format_sse_frame(
+        OUTPUT_LINE_EVENT_TYPE,
+        {"seq": item.seq, "source": item.source, "line": item.line},
+        event_id=item.seq,
+      )
+      if time.monotonic() - stream_started >= SSE_MAX_LIFETIME_SECONDS:
+        yield _format_output_end_frame(reason="lifetime_exceeded", lines=emitted)
+        return
+      # 帧间让出 GIL，防开发服务器把流式响应缓冲成一次性输出
+      time.sleep(FRAME_INTERVAL_SECONDS)
+
+  response = Response(
+    stream_with_context(output_generator()), mimetype="text/event-stream"
+  )
+  if request.method == "HEAD":
+    lease.release()
+  else:
+    response.call_on_close(lease.release)
+  return response
+
+
+def _safe_batch_status(execution_id: str) -> str:
+  """
+  查询批次状态（内部方法，异常降级为"状态未知"）
+
+  为什么不能直接调 CaseManager.get_execution_status: 它会把数据库异常
+  原样上抛（路由层口径是"流开始前上抛兜 500"）。但流**已经开始**之后
+  再抛，只会把一个正常的输出流打成 500 中断——而"状态查询失败"与
+  "批次还在跑"在展示层的处置完全相同（继续跟流）。故此处吞掉异常并
+  返回空串，由调用方按"非终态"处理。
+
+  参数:
+    execution_id (str): 执行批次号
+
+  返回:
+    str: 批次状态；查询失败/批次不存在时返回空串
+
+  异常:
+    无
+  """
+  try:
+    status_data = CaseManager.get_execution_status(execution_id)
+  except Exception as exc: # noqa: BLE001 状态查询失败不得中断已开启的输出流
+    logger.warning(
+      f"输出流批次状态查询异常（按未知状态继续跟流）| "
+      f"批次: {execution_id} | {type(exc).__name__}: {exc}"
+    )
+    return ""
+  if not status_data:
+    return ""
+  return str(status_data.get("status") or "")
+
+
+def _format_output_end_frame(reason: str, lines: int) -> str:
+  """
+  构造输出流终帧（内部方法）
+
+  终帧不带 id 行: 它不对应输出序列中的任何一帧，给它 id 会把客户端
+  Last-Event-ID 游标推到一个"不存在的行号"上——重连时那段真实输出
+  会被断点过滤永久丢弃（与 /events 降级帧同口径的考虑）。
+
+  参数:
+    reason (str): 收流原因（no_capture/batch_terminal/lifetime_exceeded）
+    lines (int): 本次流已推送的输出行数（供前端提示与排障）
+
+  返回:
+    str: 终帧文本
+
+  异常:
+    无
+  """
+  return _format_sse_frame(OUTPUT_END_EVENT_TYPE, {"reason": reason, "lines": lines})
 

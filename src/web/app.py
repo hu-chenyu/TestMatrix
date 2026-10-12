@@ -44,6 +44,7 @@ from src.web.routes import (
   pages_bp,
   reports_bp,
 )
+from src.web.routes.executions import executor_bp
 from src.web.utils import sanitize_log_field
 
 logger = LogManager.get_logger()
@@ -86,6 +87,8 @@ def create_app(config_name: str | None = None) -> Flask:
   app.register_blueprint(base_bp)       # URL前缀: /
   app.register_blueprint(cases_bp)       # URL前缀: /api/cases
   app.register_blueprint(executions_bp)    # URL前缀: /api/executions
+  # Day53: 执行器双模式切换（GET/POST /api/executor/mode）
+  app.register_blueprint(executor_bp)     # URL前缀: /api/executor
   app.register_blueprint(reports_bp)      # URL前缀: /api/reports
   app.register_blueprint(notifications_bp, url_prefix="/api/notifications") # 通知历史/死信查询
   # Day35: HTML页面蓝图（无/api前缀），页面路由与JSON接口严格分离，

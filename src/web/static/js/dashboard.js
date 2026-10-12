@@ -115,6 +115,33 @@ function setStatValue(elementId, text, tone) {
 }
 
 /**
+ * 通过率的展示层上界防御（Day53：clamp 到 [0, 100]）
+ *
+ * 为什么防御必须在展示层、且**不改后端数据**：通过率在物理上不可能越界
+ * （通过数不可能大于总数、也不可能为负），但历史脏数据与异常聚合口径都
+ * 能造出越界值（实测出现过 4033% 这类点：早期批次统计口径变更后遗留的
+ * overall_pass_rate 已是倍率而非占比）。这类值一旦进入图表，Y 轴被撑到
+ * 四位数、真实趋势被压成贴地的一条线，看板从"有信息"退化成"误导"。
+ *
+ * 为什么不做数据修正：脏值仍要能被查到来源（数据库里是什么就是什么），
+ * 展示层只保证"画出来的东西是物理可能的"。修数属于数据治理，不该由
+ * 前端偷偷改——那会让脏值失去可追溯性。
+ *
+ * 非数值（null/undefined/空串/NaN/Infinity）一律归 0：`.toFixed()` 遇到
+ * NaN 会输出字面量 "NaN%"，比归零更难判断是数据缺失还是真的 0。
+ *
+ * @param {*} value 通过率百分比原始值（0~100 语义）
+ * @returns {number} 收敛到 [0, 100] 的有限数值；非数值输入返回 0
+ */
+function clampPassRatePercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  return Math.min(100, Math.max(0, numeric));
+}
+
+/**
  * 渲染四个统计卡片（跨数据源整合：summary + cases total）
  *
  * 字段口径:
@@ -138,7 +165,10 @@ function renderStatCards(summaryData, caseTotal) {
   let passRateTone = "default";
   if (summaryData.total_executed > 0) {
     // 0~1 小数乘 100 后保留 1 位，如 0.7857 -> "78.6%"
-    passRateText = (summaryData.overall_pass_rate * 100).toFixed(1) + "%";
+    // Day53: 展示层 clamp 到 [0,100]（口径见 clampPassRatePercent）
+    passRateText =
+      clampPassRatePercent(summaryData.overall_pass_rate * 100).toFixed(1) +
+      "%";
     passRateTone = "success";
   }
   setStatValue("statPassRate", passRateText, passRateTone);
@@ -362,8 +392,10 @@ async function loadTrendChart() {
     const labels = rows.map(function (row) {
       return formatBatchLabel(row.created_at);
     });
+    // Day53: 每个趋势点都过 clamp——脏数据造的 4033% 会把 Y 轴撑到
+    // 四位数，真实趋势被压成贴地直线（口径见 clampPassRatePercent）
     const rates = rows.map(function (row) {
-      return (Number(row.pass_rate) || 0) * 100;
+      return clampPassRatePercent((Number(row.pass_rate) || 0) * 100);
     });
     markChartLoadState("trendChart", false);
     chart.setOption({
@@ -373,7 +405,11 @@ async function loadTrendChart() {
         formatter: function (params) {
           const idx = params[0].dataIndex;
           const row = rows[idx];
-          const ratePct = (Number(row.pass_rate) * 100).toFixed(1);
+          // Day53: tooltip 与曲线取同一份 clamp 口径，避免
+          // "曲线被收敛、悬浮却显示 4033%"的自相矛盾
+          const ratePct = clampPassRatePercent(
+            (Number(row.pass_rate) || 0) * 100
+          ).toFixed(1);
           // 同 P0 饼图 tooltip：自定义 formatter 返回值不转义，
           // 一旦 execution_id 改为可由用户指定即为等价 XSS；
           // 时间取横轴同源标签 labels[idx]（本地 MM-DD HH:mm）
@@ -497,7 +533,10 @@ async function loadModulePieChart() {
         trigger: "item",
         formatter: function (param) {
           const row = param.data._row;
-          const ratePct = (Number(row.pass_rate) * 100).toFixed(1);
+          // Day53: 饼图 tooltip 同样过 clamp（口径单一事实来源）
+          const ratePct = clampPassRatePercent(
+            (Number(row.pass_rate) || 0) * 100
+          ).toFixed(1);
           // ECharts 5 tooltip 默认 renderMode:"html"，自定义 formatter 的
           // 返回值被当作 HTML 直接注入 tooltip DOM（ECharts 只对 {b}/{c}
           // 模板占位符做 encodeHTML，不转义自定义返回值）。module 来自

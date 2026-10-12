@@ -21,6 +21,16 @@
   - 执行完成后自动调用 report_analyzer.bridge_results_dir 解析本次独立
    目录并入库 defect_statistics
 
+功能（真实执行器Phase-1 Day53交付·全链路联调）:
+  - ExecutionOutputBus  单批次**原始输出**实时通道（有界历史环 +
+              条件变量，与 event_bus 同族但只管逐行输出）
+  - arm_output_capture  开启某批次的输出捕获（Web 触发时调用）；
+              未开启的批次仍走 communicate() 一次性读取，
+              既有行为与既有测试逐字节不变
+  - PytestRunner.run_one 在捕获开启时改为**逐行**读 stdout/stderr，
+              边读边投递到输出通道（实时 SSE 用），
+              输出本身仍按原口径汇总进 ExecutionResult
+
 设计说明:
   - 策略模式: 编排代码（CaseManager._execute_batch_async）只依赖
    BaseExecutor抽象契约，不感知具体执行器实现
@@ -35,10 +45,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections import deque
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import count
 from pathlib import Path
@@ -564,6 +576,405 @@ def resolve_bridge_execution_id(case: dict[str, object]) -> str:
   return f"pytest-{case_id}"
 
 
+# ---------------------------------------------------------------------------
+# 执行输出实时通道（Day53 任务二·SSE 真实输出流式展示）
+# ---------------------------------------------------------------------------
+# 输出来源标识（SSE 帧载荷与前端着色共用，单一事实来源）
+OUTPUT_SOURCE_STDOUT = "stdout"
+OUTPUT_SOURCE_STDERR = "stderr"
+
+# 输出历史环容量上限：单批次最多保留的近期输出行数，超容量自动淘汰最旧行。
+#
+# 为什么要有界：pytest 一条用例的原始输出可达数百行，一个几百条的批次就是
+# 十万行量级。这一层是**实时展示**的 best-effort 窗口，不承担"完整留存"职责
+#——完整输出仍按原口径截断后进 ExecutionResult.output 并落库。无界缓存的
+# 代价是常驻内存随批次无上限增长，而收益只是"极晚连接的客户端能回看到开头"。
+OUTPUT_RING_MAXLEN = 2000
+
+# 输出行写入通道时的单行截断长度：防某行超长（无换行的二进制/JSON 单行输出）
+# 把 SSE 帧与内存撑爆；截断只作用于实时展示副本，不影响落库输出。
+OUTPUT_LINE_MAX_LENGTH = 500
+
+# 输出通道空闲回收阈值（秒）：超过该时长无新输出且无订阅者的通道在下次
+# arm 时被回收（防"批次已结束但通道常驻注册表"造成的内存泄漏）
+OUTPUT_BUS_IDLE_SECONDS = 1800.0
+
+# 读线程 join 预算（秒）：进程已被杀/正常退出后读线程应在极短时间内读到 EOF，
+# 该预算只兜住"管道句柄被异常持有"这种病态场景，不做赌时序的固定等待
+OUTPUT_READER_JOIN_TIMEOUT_SECONDS = 5.0
+
+# 输出通道订阅的限时等待节拍（秒）：无新行时的 wait 超时，语义同 event_bus
+OUTPUT_SUBSCRIBE_WAIT_SECONDS = 0.5
+
+
+@dataclass
+class ExecutionOutputLine:
+  """
+  单行执行输出（实时通道的传输单元）
+
+  属性:
+    seq (int): 通道内单调递增序号（从 1 起），订阅游标的唯一依据
+    source (str): 输出来源，取值见 OUTPUT_SOURCE_* 常量
+    line (str): 单行输出文本（已去掉行尾换行，已按上限截断）
+    timestamp (float): 行产生时间戳（time.time() 秒级浮点）
+  """
+
+  seq: int
+  source: str
+  line: str
+  timestamp: float = field(default_factory=time.time)
+
+
+class ExecutionOutputBus:
+  """
+  单批次原始输出实时通道（有界历史环 + 条件变量，多订阅者广播）
+
+  与 `event_bus.EventChannel` 的分工（刻意不合并）:
+    - EventChannel 承载**结构化执行事件**（batch_start/case_finished/…），
+     受 `VALID_EVENT_TYPES` 白名单约束，被批次编排层与既有 SSE 接口、
+     既有测试广泛依赖；
+    - 本通道承载**逐行原始输出**（频率高两个数量级、无结构、可丢弃），
+     只服务于实时展示。
+    把逐行输出塞进 EventChannel 有二重代价: ①白名单要加新类型，
+    动的是既有协议面；②几百行输出会把 1000 条容量的历史环冲掉，
+    结构化事件被挤出回放窗口。故单开一条同族但更轻的通道。
+
+  线程安全: deque 本身非线程安全，append/游标推进/关闭标记三处临界区
+  统一由 threading.Condition 保护；订阅的 yield 严格在锁外执行，
+  消费方处理慢时不阻塞执行线程。
+
+  铁律: publish 绝不抛异常——输出展示是旁路能力，任何异常只记日志，
+  绝不影响真实执行主流程（与 6.1 通知旁路铁律同口径）。
+  """
+
+  def __init__(self) -> None:
+    """
+    初始化输出通道
+
+    参数:
+      无
+
+    返回:
+      无
+    """
+    # 有界历史环：只追加不消费，超容量自动淘汰最旧行
+    self._history: deque[ExecutionOutputLine] = deque(maxlen=OUTPUT_RING_MAXLEN)
+    self._condition = threading.Condition()
+    self._closed = False
+    self._close_reason = ""
+    # 行序号单调递增分配器（从 1 起，publish 在锁内自增）
+    self._next_seq = 1
+    # 最近一次活动时刻（monotonic），仅供空闲回收判定使用
+    self.last_activity = time.monotonic()
+
+  def publish(self, source: str, line: str) -> None:
+    """
+    发布一行输出（截断 + 分配序号 + 追加历史环 + 唤醒订阅者）
+
+    参数:
+      source (str): 输出来源（OUTPUT_SOURCE_* 常量之一）
+      line (str): 原始行文本（行尾换行由本方法剥离）
+
+    返回:
+      无
+
+    异常:
+      无（全部内部消化，只记日志）
+    """
+    try:
+      text = line.rstrip("\r\n")
+      if len(text) > OUTPUT_LINE_MAX_LENGTH:
+        text = text[:OUTPUT_LINE_MAX_LENGTH] + "…（本行已截断）"
+      with self._condition:
+        if self._closed:
+          return
+        # 锁内分配序号：订阅游标定位的唯一依据
+        item = ExecutionOutputLine(
+          seq=self._next_seq, source=source, line=text
+        )
+        self._next_seq += 1
+        self._history.append(item)
+        self.last_activity = time.monotonic()
+        self._condition.notify_all()
+    except Exception as exc: # noqa: BLE001 输出通道故障不得影响执行主流程
+      logger.error(
+        f"执行输出投递异常（已吞掉，不影响执行主流程）| {exc}"
+      )
+
+  def subscribe(
+    self, last_seq: int = 0, tick: bool = False
+  ) -> Iterator[ExecutionOutputLine | None]:
+    """
+    订阅输出（阻塞迭代器，多订阅者各自独立游标）
+
+    迭代语义:
+      - 进入时从历史环回放 seq > last_seq 的全部行（游标推进到最新）
+      - 游标落后时立即取出下一行并在**锁外** yield
+      - 无新行且未关闭: wait(OUTPUT_SUBSCRIBE_WAIT_SECONDS) 限时等待，
+       tick=True 时超时 yield None（交由调用方做心跳/终态判定），
+       tick=False 时静默 continue
+      - 已关闭且游标追平: 迭代正常结束（drain 语义）
+
+    参数:
+      last_seq (int): 断点回放锚点（客户端 Last-Event-ID），0 表示全量回放
+      tick (bool): 无新行超时时是否 yield None，缺省 False
+
+    返回:
+      Iterator[ExecutionOutputLine | None]: 阻塞输出迭代器；
+      tick=True 时可能 yield None，调用方必须判空
+
+    异常:
+      无
+    """
+    cursor = last_seq if last_seq > 0 else 0
+    while True:
+      item: ExecutionOutputLine | None = None
+      timed_out = False
+      with self._condition:
+        if self._history:
+          newest = self._history[-1].seq
+          if cursor < newest:
+            oldest = self._history[0].seq
+            start_index = max(0, cursor + 1 - oldest)
+            item = self._history[start_index]
+            cursor = item.seq
+        if item is None:
+          if self._closed:
+            return
+          timed_out = not self._condition.wait(
+            timeout=OUTPUT_SUBSCRIBE_WAIT_SECONDS
+          )
+      if item is not None:
+        yield item
+      elif tick and timed_out:
+        yield None
+
+  def close(self, reason: str = "") -> None:
+    """
+    关闭通道（标记 closed + 唤醒全部等待中的订阅者）
+
+    参数:
+      reason (str): 关闭原因（供诊断与测试断言）
+
+    返回:
+      无
+
+    异常:
+      无
+    """
+    try:
+      with self._condition:
+        self._closed = True
+        self._close_reason = reason
+        self._condition.notify_all()
+    except Exception as exc: # noqa: BLE001 关闭故障不得影响执行主流程
+      logger.error(f"执行输出通道关闭异常 | 原因: {reason} | {exc}")
+
+  @property
+  def is_closed(self) -> bool:
+    """
+    通道关闭标记（属性）
+
+    参数:
+      无
+
+    返回:
+      bool: 已关闭返回 True
+    """
+    return self._closed
+
+  @property
+  def close_reason(self) -> str:
+    """
+    通道关闭原因（属性）
+
+    参数:
+      无
+
+    返回:
+      str: close 时传入的 reason，未关闭时为空串
+    """
+    return self._close_reason
+
+  def snapshot(self) -> list[ExecutionOutputLine]:
+    """
+    历史环当前快照（不消费）
+
+    参数:
+      无
+
+    返回:
+      list[ExecutionOutputLine]: 当前历史环快照（浅拷贝）
+    """
+    with self._condition:
+      return list(self._history)
+
+
+# 全局输出通道注册表（模块级单例）: execution_id → ExecutionOutputBus
+_OUTPUT_BUSES: dict[str, ExecutionOutputBus] = {}
+_OUTPUT_BUSES_LOCK = threading.RLock()
+
+
+def get_output_bus(
+  execution_id: str, create: bool = False
+) -> ExecutionOutputBus | None:
+  """
+  查询（可选创建）批次输出通道
+
+  参数:
+    execution_id (str): 执行批次号（Web 触发链路即批次编排层传入的
+              真实批次号）
+    create (bool): 不存在时是否新建并注册，默认 False
+
+  返回:
+    ExecutionOutputBus | None: 对应通道；create=False 且不存在时返回 None；
+    空批次号一律返回 None（无批次归属的输出无处可归）
+
+  异常:
+    无
+  """
+  key = str(execution_id or "").strip()
+  if not key:
+    return None
+  with _OUTPUT_BUSES_LOCK:
+    bus = _OUTPUT_BUSES.get(key)
+    if bus is None and create:
+      bus = ExecutionOutputBus()
+      _OUTPUT_BUSES[key] = bus
+    return bus
+
+
+def arm_output_capture(execution_id: str) -> ExecutionOutputBus | None:
+  """
+  开启批次输出捕获（Web 触发受理后、调度执行前调用）
+
+  为什么要在**触发时**就开启而不是等客户端连上再开:
+    执行器在 run_one 开头一次性决定"逐行读还是 communicate 一次性读"。
+    若等前端 SSE 连上才开启，先启动的那几条用例的输出就无法回收——
+    恰恰是联调与排障最关心的开局现场。开启后输出进**有界环**，
+    无订阅者时也不额外开销（只占定长内存，不做任何推送）。
+
+  参数:
+    execution_id (str): 执行批次号
+
+  返回:
+    ExecutionOutputBus | None: 本批次的输出通道；批次号为空时返回 None
+
+  异常:
+    无（顺带做一次空闲通道回收，回收失败只记日志）
+  """
+  prune_idle_output_buses()
+  return get_output_bus(execution_id, create=True)
+
+
+def close_output_bus(execution_id: str, reason: str = "") -> None:
+  """
+  关闭并从注册表移除批次输出通道
+
+  先从注册表移除（此后 get_output_bus 查不到），再标记通道 closed
+  （持有旧引用的订阅者仍能读完残余行，drain 语义）。
+
+  参数:
+    execution_id (str): 执行批次号
+    reason (str): 关闭原因
+
+  返回:
+    无
+
+  异常:
+    无
+  """
+  key = str(execution_id or "").strip()
+  with _OUTPUT_BUSES_LOCK:
+    bus = _OUTPUT_BUSES.pop(key, None)
+  if bus is not None:
+    bus.close(reason)
+
+
+def prune_idle_output_buses(idle_seconds: float = OUTPUT_BUS_IDLE_SECONDS) -> list[str]:
+  """
+  回收空闲超时的输出通道（防注册表随批次数无界增长）
+
+  判定口径: 距最后一次活动（publish）超过 idle_seconds 即回收。
+  只回收注册表内的通道对象，**不删已发布内容以外的任何东西**；
+  关闭后仍持有引用的订阅者按 drain 语义读完残余行。
+
+  参数:
+    idle_seconds (float): 空闲阈值（秒）
+
+  返回:
+    list[str]: 被回收的批次号列表（供日志与测试断言）
+
+  异常:
+    无（回收是旁路能力，异常只记警告）
+  """
+  try:
+    now = time.monotonic()
+    with _OUTPUT_BUSES_LOCK:
+      stale = [
+        key
+        for key, bus in _OUTPUT_BUSES.items()
+        if now - bus.last_activity >= idle_seconds
+      ]
+      buses = [_OUTPUT_BUSES.pop(key) for key in stale]
+    for bus in buses:
+      bus.close(reason="idle_pruned")
+    if stale:
+      logger.info(f"已回收空闲执行输出通道 {len(stale)} 个 | {stale}")
+    return stale
+  except Exception as exc: # noqa: BLE001 回收失败不影响执行主流程
+    logger.warning(f"回收空闲执行输出通道失败（不影响执行结果）| {exc}")
+    return []
+
+
+def reset_output_buses() -> None:
+  """
+  清空输出通道注册表（测试 fixture teardown 专用）
+
+  关闭全部存活通道后清空注册表，防跨测试通道污染
+  （注册表是模块级单例，残留通道会串测试导致 flaky）。
+
+  参数:
+    无
+
+  返回:
+    无
+
+  异常:
+    无
+  """
+  with _OUTPUT_BUSES_LOCK:
+    buses = list(_OUTPUT_BUSES.values())
+    _OUTPUT_BUSES.clear()
+  for bus in buses:
+    bus.close(reason="reset")
+
+
+def resolve_output_key(case: dict[str, object]) -> str:
+  """
+  推导用例所属的输出通道键（批次号）
+
+  与 `resolve_bridge_execution_id` 的区别: 后者在缺失时回落
+  `pytest-{case_id}` 以保住 Allure 桥接的批次归属；而输出通道是**纯展示**
+  能力，脱离批次编排单独跑 run_one（CLI/脚本/单测）时不存在 Web 订阅者，
+  回落一个假的批次号只会凭空多出一个永不回收的通道，故此处**只在用例
+  字典真的带批次号时才返回**，否则返回空串（=不做输出捕获）。
+
+  参数:
+    case (dict): 待执行用例字典
+
+  返回:
+    str: 批次号；用例字典无 execution_id 时返回空串
+
+  异常:
+    无
+  """
+  raw = case.get("execution_id")
+  if isinstance(raw, str) and raw.strip():
+    return raw.strip()
+  return ""
+
+
 @dataclass
 class ExecutionResult:
   """
@@ -660,6 +1071,10 @@ class SimulatedExecutor(BaseExecutor):
     """
     模拟执行单条用例
 
+    Day53: 本批次已开启输出捕获时，追加一行**模拟输出**到输出通道，
+    让真实/模拟两种模式在"原始输出"区都有一致的可视反馈（模拟模式没有
+    子进程，否则该区域永远是空的）。未开启捕获时零额外开销、行为不变。
+
     参数:
       case (dict): 待执行用例字典（含case_id字段）
 
@@ -682,14 +1097,96 @@ class SimulatedExecutor(BaseExecutor):
     tail_number = int(tail_digits[-1]) if tail_digits else 0
     if tail_number % 2 == 0:
       logger.debug(f"模拟执行通过 | 用例: {case.get('case_id')}")
+      self._publish_simulated_output(case, "passed", duration)
       return ExecutionResult(result="passed", error_message=None, duration=duration)
 
     error_message = "模拟执行失败: 断言不通过"
     logger.debug(
       f"模拟执行失败 | 用例: {case.get('case_id')} | {error_message}"
     )
+    self._publish_simulated_output(case, "failed", duration)
     return ExecutionResult(
       result="failed", error_message=error_message, duration=duration
+    )
+
+  @staticmethod
+  def _publish_simulated_output(
+    case: dict[str, object], result: str, duration: float
+  ) -> None:
+    """
+    向输出通道投递一行模拟执行输出（Day53，未开启捕获时为空操作）
+
+    参数:
+      case (dict): 待执行用例字典（取批次号与用例编号）
+      result (str): 本条模拟结果（passed/failed）
+      duration (float): 本条模拟耗时（秒）
+
+    返回:
+      无
+
+    异常:
+      无（publish 自身绝不抛异常）
+    """
+    output_bus = get_output_bus(resolve_output_key(case))
+    if output_bus is None:
+      return
+    output_bus.publish(
+      OUTPUT_SOURCE_STDOUT,
+      (
+        f"[simulated] case={case.get('case_id')} "
+        f"result={result} duration={duration:.3f}s"
+      ),
+    )
+
+
+class _StreamedOutput:
+  """
+  逐行读取子进程输出的暂存区（Day53，内部使用）
+
+  为什么不用 dict: 逐行读路径要在**三个地方**读写同一份现场——读线程追加、
+  超时分支取回（保住 kill 前已捕获的输出）、正常分支拼全文。用 dict 时
+  值类型退化成 object，mypy strict 下的 `"".join(...)` 直接报错，只能靠
+  type: ignore 掩盖；用这个三字段小队形既保住类型，也让"超时清理描述"
+  与"两流文本"的归属一眼可见。
+
+  刻意不放进 ExecutionResult: 它只是**读取过程中的中间态**，
+  不是单用例执行结果的对外契约。
+  """
+
+  __slots__ = ("stdout", "stderr", "cleanup_note")
+
+  def __init__(self) -> None:
+    """
+    初始化空暂存区
+
+    参数:
+      无
+
+    返回:
+      无
+    """
+    self.stdout: list[str] = []
+    self.stderr: list[str] = []
+    self.cleanup_note: str = ""
+
+  @property
+  def text(self) -> str:
+    """
+    已捕获输出的合并文本（stdout 在前、stderr 在后，空段跳过）
+
+    参数:
+      无
+
+    返回:
+      str: 合并文本；两流均无输出时返回空串
+    """
+    return "\n".join(
+      part
+      for part in (
+        "".join(self.stdout).strip(),
+        "".join(self.stderr).strip(),
+      )
+      if part
     )
 
 
@@ -1140,6 +1637,102 @@ class PytestRunner(BaseExecutor):
       return None
     return {**os.environ, **self.env}
 
+  def _consume_stream(
+    self,
+    process: subprocess.Popen[str],
+    output_bus: ExecutionOutputBus,
+    capture: _StreamedOutput,
+  ) -> tuple[str, str]:
+    """
+    逐行读取子进程输出并实时投递到输出通道（Day53 任务二）
+
+    为什么必须用**两条读线程**而不是在主线程里串行读:
+      子进程的 stdout 与 stderr 是两个独立管道，各有一块固定大小的
+      系统缓冲区。只读 stdout 时，一旦子进程往 stderr 写满缓冲区就会
+      阻塞在写调用上，stdout 也再不会有新数据——主线程跟着永久阻塞，
+      直到超时。这不是理论风险: pytest 的进度行与失败堆栈就分属两个
+      流，批次里必然出现"某些用例往 stderr 写得多"。两流各一条读线程
+      是标准解法。
+
+    为什么要等 wait 之后再 join 读线程:
+      管道关闭（= 读线程读到 EOF）发生在子进程退出之后。先 wait 拿到
+      退出码、再 join 收尾，保证返回时"输出已全部读完"；
+      join 带预算（OUTPUT_READER_JOIN_TIMEOUT_SECONDS）只兜病态场景，
+      不做赌时序的固定等待。
+
+    参数:
+      process (subprocess.Popen[str]): 已启动的子进程句柄
+      output_bus (ExecutionOutputBus): 本批次的输出通道
+      capture (_StreamedOutput): 部分输出暂存区（超时分支要用）
+
+    返回:
+      tuple[str, str]: (stdout 全文, stderr 全文)，语义与
+               communicate() 的返回值一致
+
+    异常:
+      subprocess.TimeoutExpired: 子进程超时时向上抛由 run_one 统一收尾
+                    （抛出前已完成进程树清理与暂存区更新）
+    """
+
+    def _reader(stream: object, parts: list[str], source: str) -> None:
+      """
+      单流读线程体（内部函数）
+
+      参数:
+        stream (object): 子进程的文本流（Popen 文本模式的 stdout/stderr）
+        parts (list[str]): 本流的行累积区（按读入顺序追加）
+        source (str): 来源标识（stdout/stderr），用于通道与暂存区
+
+      返回:
+        无（线程目标函数无返回值）
+
+      异常:
+        无（读异常只记日志并结束本线程——输出展示是旁路能力，
+        读线程抛异常不该污染执行主流程）
+      """
+      try:
+        for line in iter(stream.readline, ""): # type: ignore[attr-defined]
+          parts.append(line)
+          output_bus.publish(source, line)
+      except Exception as exc: # noqa: BLE001 读线程异常不得影响执行结果
+        logger.warning(
+          f"子进程输出读取异常（该流后续输出不再展示）| "
+          f"来源: {source} | {type(exc).__name__}: {exc}"
+        )
+      finally:
+        try:
+          stream.close() # type: ignore[attr-defined]
+        except Exception: # noqa: BLE001 关流失败无需上报
+          logger.debug(f"子进程输出流关闭失败（可忽略）| 来源: {source}")
+
+    reader_threads = [
+      threading.Thread(
+        target=_reader,
+        args=(process.stdout, capture.stdout, OUTPUT_SOURCE_STDOUT),
+        name="tm-output-stdout",
+        daemon=True,
+      ),
+      threading.Thread(
+        target=_reader,
+        args=(process.stderr, capture.stderr, OUTPUT_SOURCE_STDERR),
+        name="tm-output-stderr",
+        daemon=True,
+      ),
+    ]
+    for thread in reader_threads:
+      thread.start()
+    try:
+      # 语义与 communicate(timeout) 一致：超时抛 TimeoutExpired
+      process.wait(timeout=self.timeout)
+    except subprocess.TimeoutExpired:
+      # 必须先杀进程树才能让读线程读到 EOF，否则 join 会等到预算耗尽
+      capture.cleanup_note = self.kill_process_tree(process)
+      raise
+    finally:
+      for thread in reader_threads:
+        thread.join(OUTPUT_READER_JOIN_TIMEOUT_SECONDS)
+    return "".join(capture.stdout), "".join(capture.stderr)
+
   def run_one(self, case: dict) -> ExecutionResult:
     """
     同步执行单条用例的pytest子进程（Day49：Popen + 进程树清理 + 退出码细化）
@@ -1149,7 +1742,11 @@ class PytestRunner(BaseExecutor):
         此处捕获后降级为该条用例的 error 结果）
       2. 为本次执行生成独立 Allure 结果目录并注入命令行
         （Day50 任务二，覆盖 pytest.ini addopts 的默认 alluredir）
-      3. Popen 起子进程并 communicate(timeout=self.timeout)，
+      3. Popen 起子进程读取输出：本批次**未开启输出捕获**时用
+        communicate(timeout=self.timeout) 一次性读取（Day49-52 口径，
+        逐字节不变）；已开启捕获（Web 触发链路）时改由
+        `_consume_stream` 逐行读并实时投递到输出通道（Day53），
+        两条路径的 stdout/stderr 返回语义完全一致。
         工作目录取 self.cwd（默认项目根），环境变量为 self.env
         叠加当前进程环境
       4. 超时 → 清理**整棵进程树**（Windows taskkill /T /F、
@@ -1224,6 +1821,15 @@ class PytestRunner(BaseExecutor):
     allure_dir = build_allure_results_dir(str(case.get("case_id", "")))
     command = inject_allure_options(command, allure_dir)
 
+    # Day53 任务二：本用例所属批次的输出通道。**未开启捕获时为 None**，
+    # 此时下面仍走 communicate() 一次性读取——既有测试的 Popen 替身只有
+    # communicate、stdout/stderr 是字符串而非流，逐行读会让它们集体变红，
+    # 而"未开启捕获的批次行为逐字节不变"本身也是本日的硬约束。
+    output_bus = get_output_bus(resolve_output_key(case))
+    # 部分输出暂存区：逐行读路径下超时/异常时用它保住"kill 前已捕获"
+    # 的现场（communicate 路径下由 TimeoutExpired 自带的流承接）
+    capture = _StreamedOutput()
+
     # Day49：从 subprocess.run 改为 Popen，理由见方法 docstring
     process: subprocess.Popen[str] | None = None
     try:
@@ -1246,15 +1852,24 @@ class PytestRunner(BaseExecutor):
         # unused_*，传什么都不生效，树杀改由 taskkill /T 负责。
         start_new_session=os.name == "posix",
       )
-      # timeout 归 communicate 管（不是 Popen 的参数）——Day48 的
-      # subprocess.run 也正是把 timeout 传到这里，语义一致
-      stdout, stderr = process.communicate(timeout=self.timeout)
+      if output_bus is None:
+        # timeout 归 communicate 管（不是 Popen 的参数）——Day48 的
+        # subprocess.run 也正是把 timeout 传到这里，语义一致
+        stdout, stderr = process.communicate(timeout=self.timeout)
+      else:
+        # 逐行读：边读边投递到输出通道（前端 SSE 实时展示）与
+        # 部分输出暂存区；返回值语义与 communicate 完全一致
+        stdout, stderr = self._consume_stream(
+          process, output_bus, capture
+        )
       returncode = process.returncode
     except subprocess.TimeoutExpired as exc:
       # 超时：先清整棵进程树，再组装结果
       duration = time.perf_counter() - start_time
-      cleanup_note = ""
-      if process is not None:
+      # 逐行读路径已在 _consume_stream 内杀过树（必须先杀才能让读线程
+      # 读到 EOF），此处读它留下的描述，避免重复 taskkill
+      cleanup_note = capture.cleanup_note
+      if not cleanup_note and process is not None:
         cleanup_note = self.kill_process_tree(process)
       # 超时前已捕获的部分输出必须留下（Day49 任务一.3）。
       #
@@ -1262,7 +1877,7 @@ class PytestRunner(BaseExecutor):
       # "必须复现才能定位"的故障，而复现前手里没有半行输出。
       # 注意 POSIX 下 TimeoutExpired 上的流是 **bytes**（即便传了
       # text=True），Windows 下才是 str，故统一走 decode 归一。
-      captured = "\n".join(
+      partial_output = "\n".join(
         part
         for part in (
           decode_subprocess_stream(exc.stdout).strip(),
@@ -1270,7 +1885,14 @@ class PytestRunner(BaseExecutor):
         )
         if part
       )
-      captured_tail = truncate_output_tail(captured)
+      if not partial_output:
+        # Day53：逐行读路径下超时由 process.wait(timeout) 抛出，
+        # 该异常**不带** stdout/stderr 流（只有 communicate 路径才
+        # 带），kill 前已捕获的现场全在逐行暂存区里，此处取回，
+        # 否则超时执行会退化成"什么都不留"，恰与上一段注释的
+        # 设计意图相反。
+        partial_output = capture.text
+      captured_tail = truncate_output_tail(partial_output)
       # 超时消息与日志**刻意保留完整命令行**（含 sys.executable 的
       # 解释器绝对路径），不做脱敏也不截断（Day48-fix P3-4 决策）。
       #

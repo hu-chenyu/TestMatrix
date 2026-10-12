@@ -56,6 +56,32 @@ const BATCH_STATUS = {
  */
 const MAX_LOG_LINES = 2000;
 
+/**
+ * 原始输出区最大保留行数（Day53）
+ *
+ * 真实执行器的原始输出行数**没有天然上界**（一条用例的 pytest 输出可达
+ * 数百行，几百条用例就是十万行量级），服务端输出通道本身也已截断，
+ * 但前端 DOM 仍需独立上界：一次长批次滚下来，十万个 div 会让页面卡死。
+ * 与事件日志区同一处置口径——超限从头部删最旧行并提示一次。
+ */
+const MAX_OUTPUT_LINES = 2000;
+
+/**
+ * 执行器模式的中文标签（Day53 双模式切换）
+ *
+ * 单一事实来源：下拉文案、切换成功提示、页面当前模式提示三处共用，
+ * 避免"下拉写模拟执行、提示写 simulated"这类口径漂移。
+ */
+const EXECUTOR_MODE_LABELS = {
+  simulated: "模拟执行",
+  pytest: "真实执行",
+};
+
+/**
+ * 执行器模式接口路径根（Day53）
+ */
+const EXECUTOR_MODE_API = "/executor/mode";
+
 /* ==========================================================================
   页面级状态
   ========================================================================== */
@@ -74,6 +100,12 @@ const state = {
   pendingPage: null,  // 列表在途期间被点击的目标页码，锁释放后自动补刷
   detailRequestSeq: 0, // 详情请求序号，防慢响应覆盖后发起的响应
   logRequestSeq: 0,   // 日志探活请求序号，语义同上
+  // --- Day53 原始输出流 ---
+  outputEventSource: null, // 原始输出流 EventSource（与事件流分开，职责正交）
+  outputSeq: 0,     // 已渲染的输出行数（上界裁剪与状态提示共用）
+  outputEnded: false,  // 本订阅是否已收到 output_end（防重复收流/重复提示）
+  outputCapNoticeShown: false, // 输出区是否已提示过行数裁剪（每轮订阅一次）
+  executorMode: null,  // 当前生效的执行器模式（服务端为权威，本值仅缓存展示）
 };
 
 /* ==========================================================================
@@ -120,6 +152,12 @@ const els = {
   logExecutionMeta: document.getElementById("logExecutionMeta"),
   logContainer: document.getElementById("logContainer"),
   logViewReportBtn: document.getElementById("logViewReportBtn"),
+
+  // Day53: 原始输出区 + 执行器模式切换控件
+  logOutputContainer: document.getElementById("logOutputContainer"),
+  logOutputStatus: document.getElementById("logOutputStatus"),
+  executorModeSelect: document.getElementById("executorModeSelect"),
+  executorModeHint: document.getElementById("executorModeHint"),
 };
 
 // Bootstrap Modal 单例（懒获取，弹窗复用同一实例）
@@ -1030,6 +1068,230 @@ function closeEventSource() {
     state.eventSource.close();
     state.eventSource = null;
   }
+  // 输出流与事件流同生命周期：收事件流时必须一并收输出流，
+  // 否则关掉日志弹窗后仍有一条 EventSource 在后台空转重连
+  closeOutputStream();
+}
+
+/* ==========================================================================
+  Day53: 原始输出流（真实执行器 subprocess 逐行输出）
+  ========================================================================== */
+
+/**
+ * 更新原始输出区状态提示文案
+ *
+ * @param {string} text 提示文本（如"未连接/实时接收中/输出已结束"）
+ * @param {string} [tone] 语义色调：可用 Bootstrap text-* 后缀（success/danger/…）
+ * @returns {void}
+ */
+function setOutputStatus(text, tone) {
+  if (!els.logOutputStatus) {
+    return;
+  }
+  els.logOutputStatus.className = "small " + (tone ? "text-" + tone : "text-muted");
+  els.logOutputStatus.textContent = text;
+}
+
+/**
+ * 安全关闭原始输出流并复位订阅态
+ * @returns {void}
+ */
+function closeOutputStream() {
+  if (state.outputEventSource) {
+    state.outputEventSource.close();
+    state.outputEventSource = null;
+  }
+}
+
+/**
+ * 原始输出区行数上界裁剪（口径同事件日志区 enforceLogLineCap）
+ *
+ * @returns {void}
+ */
+function enforceOutputLineCap() {
+  const container = els.logOutputContainer;
+  if (!container) {
+    return;
+  }
+  let removed = 0;
+  while (container.childElementCount > MAX_OUTPUT_LINES) {
+    container.removeChild(container.firstChild);
+    removed += 1;
+  }
+  if (removed > 0 && !state.outputCapNoticeShown) {
+    state.outputCapNoticeShown = true;
+    const notice = document.createElement("div");
+    notice.className = "text-warning fst-italic";
+    notice.textContent =
+      "（原始输出超过 " + MAX_OUTPUT_LINES +
+      " 行上限，已自动清理最早的旧输出）";
+    container.appendChild(notice);
+  }
+}
+
+/**
+ * 向原始输出区追加一行（全程 textContent，杜绝 XSS）
+ *
+ * @param {string} text 行正文
+ * @param {string} source stdout/stderr（stderr 以警示色区分）
+ * @returns {void}
+ */
+function appendOutputLine(text, source) {
+  const container = els.logOutputContainer;
+  if (!container) {
+    return;
+  }
+  const line = document.createElement("div");
+  if (source === "stderr") {
+    line.className = "text-warning";
+  }
+  line.textContent = text;
+  container.appendChild(line);
+  enforceOutputLineCap();
+  container.scrollTop = container.scrollHeight;
+}
+
+/**
+ * 渲染 output_end 终帧（收流并把状态置为已结束）
+ *
+ * @param {object} data 终帧载荷 {reason, lines}
+ * @returns {void}
+ */
+function handleOutputEnd(data) {
+  if (state.outputEnded) {
+    return;
+  }
+  state.outputEnded = true;
+  closeOutputStream();
+  const reasonText = {
+    batch_terminal: "批次已结束",
+    no_capture: "该批次无原始输出（未开启捕获或已被回收）",
+    lifetime_exceeded: "输出流达到存活上界，已收流",
+  }[data.reason] || "输出已结束";
+  appendOutputLine(
+    "——输出结束（" + reasonText + "，共 " + (data.lines || 0) + " 行）——",
+    "stdout"
+  );
+  setOutputStatus(reasonText, "success");
+}
+
+/**
+ * 打开原始输出流（与事件流并行订阅，互不影响）
+ *
+ * 为什么单独一条流而不是把输出塞进 /events：两者的频率与可靠性要求
+ * 差两个数量级（逐行输出可丢弃、结构化事件不可丢），合并后要么让事件
+ * 被输出冲掉回放窗口，要么让输出被事件的严格语义绑死。分开后各自
+ * 独立断线重连，任一条断了不影响另一条。
+ *
+ * @param {string} executionId 批次号
+ * @returns {void}
+ */
+function openOutputStream(executionId) {
+  closeOutputStream();
+  if (!els.logOutputContainer) {
+    return;
+  }
+  els.logOutputContainer.textContent = "";
+  state.outputSeq = 0;
+  state.outputEnded = false;
+  state.outputCapNoticeShown = false;
+  setOutputStatus("连接中 ...");
+
+  const es = new EventSource(
+    "/api/executions/" + encodeURIComponent(executionId) + "/output"
+  );
+  state.outputEventSource = es;
+
+  es.addEventListener("output", function (event) {
+    const data = parseSsePayload(event);
+    if (data) {
+      appendOutputLine(data.line, data.source);
+      state.outputSeq += 1;
+      setOutputStatus("实时接收中（已 " + state.outputSeq + " 行）");
+    }
+  });
+  es.addEventListener("output_end", function (event) {
+    const data = parseSsePayload(event);
+    handleOutputEnd(data || {});
+  });
+  es.onerror = function () {
+    if (state.outputEnded) {
+      return;
+    }
+    if (es.readyState === EventSource.CLOSED) {
+      closeOutputStream();
+      setOutputStatus("输出流已断开（浏览器已停止重连）", "danger");
+      return;
+    }
+    if (es.readyState === EventSource.CONNECTING) {
+      setOutputStatus("输出流中断，正在自动重连 ...", "warning");
+    }
+  };
+}
+
+/* ==========================================================================
+  Day53: 执行器双模式切换（真实/模拟）
+  ========================================================================== */
+
+/**
+ * 按服务端返回的模式刷新下拉与提示（服务端为权威值）
+ *
+ * @param {string} mode simulated / pytest
+ * @returns {void}
+ */
+function renderExecutorMode(mode) {
+  state.executorMode = mode;
+  if (els.executorModeSelect && mode) {
+    els.executorModeSelect.value = mode;
+  }
+  if (els.executorModeHint) {
+    els.executorModeHint.textContent =
+      EXECUTOR_MODE_LABELS[mode] || mode;
+  }
+}
+
+/**
+ * 读取当前执行器模式（页面初始化时调用）
+ *
+ * @returns {Promise<void>} 读取失败只提示，不阻塞页面其余初始化
+ */
+async function loadExecutorMode() {
+  try {
+    const data = await window.api.get(EXECUTOR_MODE_API);
+    renderExecutorMode(data.mode);
+  } catch (error) {
+    if (els.executorModeHint) {
+      els.executorModeHint.textContent = "模式未知";
+    }
+    window.showToast("执行器模式读取失败：" + error.message, "warning");
+  }
+}
+
+/**
+ * 切换执行器模式（下拉变更时调用）
+ *
+ * 切换只影响**之后新触发**的批次；失败时把下拉回滚到服务端仍生效的值，
+ * 避免"界面显示真实执行、服务端其实还是模拟"这种静默不一致。
+ *
+ * @param {string} mode 目标模式 simulated/pytest
+ * @returns {Promise<void>} 无返回值
+ */
+async function changeExecutorMode(mode) {
+  try {
+    const data = await window.api.post(EXECUTOR_MODE_API, { mode: mode });
+    renderExecutorMode(data.mode);
+    window.showToast(
+      "执行模式已切换为" + (EXECUTOR_MODE_LABELS[data.mode] || data.mode) +
+      "，之后触发的批次按新模式执行",
+      "success"
+    );
+  } catch (error) {
+    // 回滚到最近一次服务端确认过的模式（读取失败时为 null，此时用
+    // 服务端默认值兜底，避免留下一个"看起来切换成功"的假界面）
+    const fallback = state.executorMode || "simulated";
+    renderExecutorMode(fallback);
+    window.showToast("执行模式切换失败：" + error.message, "danger");
+  }
 }
 
 /**
@@ -1157,6 +1419,9 @@ async function openLogView(executionId) {
     }
   };
 
+  // Day53: 并行打开原始输出流（真实执行器 subprocess 的逐行输出走独立
+  // 通道 /output；模拟批次会收到一帧 output_end(no_capture) 并如实提示）
+  openOutputStream(executionId);
   getLogModal().show();
 }
 
@@ -1291,6 +1556,16 @@ function initExecutionsPage() {
   // --- 日志弹窗关闭（X/遮罩/取消）即收流，防后台空连 ---
   els.logModalEl.addEventListener("hidden.bs.modal", closeLogView);
 
+  // --- Day53: 执行器双模式切换（下拉变更即调后端，失败自动回滚） ---
+  if (els.executorModeSelect) {
+    els.executorModeSelect.addEventListener("change", function (event) {
+      changeExecutorMode(event.target.value);
+    });
+  }
+  // 服务端是模式权威值：页面加载即回读一次，避免用 HTML 里的默认
+  // option 冒充"当前模式"（服务端可能已被前一次切换改成真实执行）
+  loadExecutorMode();
+
   // --- 首次加载第 1 页已完成批次 ---
   loadExecutions();
 }
@@ -1307,6 +1582,9 @@ window.executionsPage = {
   submitTrigger: submitTrigger,
   openLogView: openLogView,
   closeLogView: closeLogView,
+  openOutputStream: openOutputStream,
+  loadExecutorMode: loadExecutorMode,
+  changeExecutorMode: changeExecutorMode,
   formatDurationMs: formatDurationMs,
   buildPageSequence: buildPageSequence,
 };
