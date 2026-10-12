@@ -69,6 +69,11 @@ POLL_INTERVAL_SECONDS = 0.3
 # 原始输出通道的批次号（真实子进程用例专用，避免与 Web 触发的批次号撞车）
 STREAM_BATCH_ID = "RUN-DAY53-OUTPUT-STREAM-0001"
 
+# 高频输出用例的耗时预算（秒，Day53-fix P2-a 回归）
+# 150 行在修复前要 150 × 0.05s = 7.5s（/events 的帧间隔被复用），修复后
+# 只受一次 0.5s 节拍支配；取 3.0s 是"离两边都远"的判据，不是经验值。
+HIGH_FREQ_TIME_BUDGET_SECONDS = 3.0
+
 
 # ===========================================================================
 # 夹具与工具
@@ -518,10 +523,16 @@ class TestOutputSseEndpoint:
         assert response.status_code == 200
         assert response.headers["Content-Type"].startswith("text/event-stream")
 
-        frames = _parse_sse_frames(response.get_data(as_text=True))
+        raw = response.get_data(as_text=True)
+        frames = _parse_sse_frames(raw)
         output_frames = [data for name, data in frames if name == "output"]
         end_frames = [data for name, data in frames if name == "output_end"]
         assert len(output_frames) == 4, output_frames
+        # 帧 id 必须是**裸整数行序号**（Day53-fix P1）：发出去什么形状，
+        # 重连时浏览器就回传什么形状，解析端只认裸整数
+        assert "id: 1\n" in raw
+        assert "id: live:" not in raw
+        assert "id: db:" not in raw
         assert all("[simulated]" in frame["line"] for frame in output_frames)
         assert output_frames[0]["seq"] >= 1
         assert end_frames and end_frames[-1]["reason"] == "batch_terminal"
@@ -705,6 +716,112 @@ class TestOutputSseEndpoint:
         assert [name for name, _ in frames] == ["output", "output_end"]
         assert frames[0][1]["line"] == "上界前的最后一行"
         assert frames[1][1]["reason"] == "lifetime_exceeded"
+
+    @allure.title("真实浏览器格式的 Last-Event-ID（live:N）同样能断点续传")
+    def test_output_stream_resumes_from_browser_style_last_event_id(
+        self, day53_client: FlaskClient
+    ) -> None:
+        """
+        P1 回归（Day53-fix）: 修复前输出帧发的是 `id: live:{seq}`——因为
+        `_format_sse_frame` 的 `namespace` 默认值就是 live，调用方没传。
+        浏览器会原样回传 `Last-Event-ID: live:2`，而解析端只做 `int()` 直转
+        → 抛错 → 返回 0 → **每次重连都全量回放（最多 2000 行）**，断点续传
+        在真实浏览器下从不生效。本用例按真实浏览器回传的形态发头（而不是
+        手工构造一个客户端永远发不出的裸整数头），断言只回放锚点之后的行。
+
+        修复前必红（返回 [1,2,3,4]），修复后必绿（返回 [3,4]）。
+        """
+        execution_id = _trigger(day53_client, {"executor": "simulated"})
+        _wait_batch_terminal(day53_client, execution_id)
+
+        response = day53_client.get(
+            f"/api/executions/{execution_id}/output",
+            headers={"Last-Event-ID": "live:2"},
+        )
+        assert response.status_code == 200
+        frames = _parse_sse_frames(response.get_data(as_text=True))
+        output_frames = [data for name, data in frames if name == "output"]
+        assert [frame["seq"] for frame in output_frames] == [3, 4]
+        # 终帧仍要送达（否则客户端永远等不到"输出结束"）
+        assert any(name == "output_end" for name, _ in frames)
+
+    @allure.title("高频输出不被帧间隔节流（150 行预算内推完）")
+    def test_output_stream_high_frequency_not_throttled(
+        self, day53_client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        P2-a 回归（Day53-fix）: 修复前逐行输出复用了 /events 的
+        `FRAME_INTERVAL_SECONDS=0.05`，等于给每条流加 **20 行/s 硬上限**——
+        回放满环 2000 行要 100s，实时高频输出时消费游标持续滞后、环静默
+        淘汰丢行。本用例推 150 行并断言端到端耗时 < 3s：修复前需要
+        150 × 0.05 = 7.5s（必红），修复后只受一次 0.5s 节拍支配（约 0.6s）。
+        """
+        line_count = 150
+        execution_id = _trigger(day53_client, {"executor": "simulated"})
+        _wait_batch_terminal(day53_client, execution_id)
+        close_output_bus(execution_id, reason="test_empty")
+        bus = arm_output_capture(execution_id)
+        assert bus is not None
+        for index in range(line_count):
+            bus.publish(OUTPUT_SOURCE_STDOUT, f"高频行-{index}")
+        monkeypatch.setattr(
+            executions_mod, "_safe_batch_status", lambda _eid: "finished"
+        )
+
+        # 计时窗口必须**包住 body 消费**：Flask 测试客户端默认 buffered=False，
+        # 流生成器是在读取 response 数据时才被迭代的；只计 client.get() 的
+        # 耗时会把整个节流过程漏在窗口外（这条断言就永远不会红）
+        started = time.monotonic()
+        response = day53_client.get(f"/api/executions/{execution_id}/output")
+        raw = response.get_data(as_text=True)
+        elapsed = time.monotonic() - started
+
+        frames = _parse_sse_frames(raw)
+        pushed = [data for name, data in frames if name == "output"]
+        assert len(pushed) == line_count, "高频输出不得丢行（环容量内）"
+        assert [frame["seq"] for frame in pushed] == list(range(1, line_count + 1))
+        assert elapsed < HIGH_FREQ_TIME_BUDGET_SECONDS, (
+            f"150 行推送耗时 {elapsed:.2f}s，超过预算 "
+            f"{HIGH_FREQ_TIME_BUDGET_SECONDS}s（疑似仍在按 0.05s 节流）"
+        )
+
+    @allure.title("空闲超心跳间隔后发 : heartbeat 注释帧（且不推进游标）")
+    def test_output_stream_emits_heartbeat_when_idle(
+        self, day53_client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        P2-b 回归（Day53-fix）: 修复前节拍分支只判终态/上界、**不产出任何
+        字节**，于是客户端断开要等存活上界（30 分钟）才发现，死连接长期钉住
+        单 IP 的 5 个名额 → 合法重连被 429；中间代理也可能掐断空闲连接。
+
+        本用例把心跳间隔压到小于两个节拍（0.6s < 2 × 0.5s），状态序列为
+        "两次运行中 → 终态"，既保证空闲窗口足够长、又保证用例在有限时间内
+        自然收流（不靠 sleep 赌时序，靠节拍次数推进）。
+        """
+        execution_id = _trigger(day53_client, {"executor": "simulated"})
+        _wait_batch_terminal(day53_client, execution_id)
+        close_output_bus(execution_id, reason="test_empty")
+        arm_output_capture(execution_id)
+        monkeypatch.setattr(executions_mod, "HEARTBEAT_INTERVAL_SECONDS", 0.6)
+
+        calls = {"count": 0}
+
+        def _status_sequence(_execution_id: str) -> str:
+            """前两次节拍报运行中（留出空闲窗口），其后转终态收流"""
+            calls["count"] += 1
+            return "running" if calls["count"] <= 2 else "finished"
+
+        monkeypatch.setattr(
+            executions_mod, "_safe_batch_status", _status_sequence
+        )
+
+        response = day53_client.get(f"/api/executions/{execution_id}/output")
+        raw = response.get_data(as_text=True)
+
+        assert ": heartbeat\n\n" in raw, raw
+        # 注释帧不得带 id 行——带了就会推进客户端的 Last-Event-ID 游标，
+        # 让下一次重连的锚点指向一条不存在的"行"
+        assert "id: " not in raw, raw
 
 
 # ===========================================================================
