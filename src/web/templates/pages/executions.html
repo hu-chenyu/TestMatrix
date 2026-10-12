@@ -24,7 +24,25 @@
     <h1 class="h3 mb-0">
         <i class="bi bi-play-circle me-2 text-primary"></i>执行记录
     </h1>
-    <div class="d-flex gap-2">
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+        <!-- Day53: 真实/模拟双模式切换控件。
+             服务端（GET /api/executor/mode）是模式权威值，本控件只做展示与
+             切换入口：页面加载后由 executions.js 回读一次并回填，避免用
+             HTML 默认 option 冒充"当前模式"。
+             切换只影响之后新触发的批次，已有批次与执行结果不受影响。 -->
+        <div class="d-flex align-items-center gap-1">
+            <label for="executorModeSelect"
+                   class="form-label mb-0 small text-muted text-nowrap">
+                执行模式
+            </label>
+            <select id="executorModeSelect"
+                    class="form-select form-select-sm w-auto"
+                    aria-label="执行器模式">
+                <option value="simulated" selected>模拟执行</option>
+                <option value="pytest">真实执行</option>
+            </select>
+            <span id="executorModeHint" class="small text-muted"></span>
+        </div>
         <button id="triggerBtn" type="button" class="btn btn-primary btn-sm">
             <i class="bi bi-lightning-charge me-1"></i>触发新执行
         </button>
@@ -293,7 +311,25 @@
                 <div id="logContainer"
                      class="bg-light border rounded p-2 mb-0 small font-monospace"
                      role="log" aria-live="polite" aria-atomic="false"
-                     style="height:46vh; overflow-y:auto; white-space:
+                     style="height:34vh; overflow-y:auto; white-space:
+                            pre-wrap; word-break:break-all;"></div>
+
+                <!-- Day53: 原始输出区（真实执行器 subprocess 的逐行输出）。
+                     与上方结构化事件区职责正交：事件区回答"哪些用例跑完了、
+                     结果如何"，本区回答"子进程到底打印了什么"（pytest 进度行、
+                     失败堆栈原文）。数据来自独立流 /executions/<id>/output，
+                     深色底 + 等宽字体贴近终端阅读习惯；固定高度 + 行数上界
+                     （MAX_OUTPUT_LINES）防单批次十万行输出拖垮页面。 -->
+                <div class="d-flex justify-content-between align-items-center
+                            mt-2 mb-1">
+                    <span class="small text-muted">原始输出（pytest 逐行）</span>
+                    <span class="small text-muted" id="logOutputStatus">未连接</span>
+                </div>
+                <div id="logOutputContainer"
+                     class="bg-dark text-light border rounded p-2 mb-0 small
+                            font-monospace"
+                     role="log" aria-live="polite" aria-atomic="false"
+                     style="height:26vh; overflow-y:auto; white-space:
                             pre-wrap; word-break:break-all;"></div>
             </div>
             <div class="modal-footer">
