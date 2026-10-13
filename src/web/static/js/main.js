@@ -416,6 +416,10 @@ window.addEventListener("unhandledrejection", function (event) {
     reportGlobalError(message);
     // 阻止浏览器把同一条未处理拒绝再打一遍控制台 error：
     // 提示已经给出，重复输出只会污染"控制台零 error"的判据
+    //
+    // 走查等效判据：preventDefault 抑制了浏览器默认的控制台 error 输出，
+    // 因此浏览器走查时必须同时观察"是否弹出全局错误 toast（reportGlobalError）"
+    // 作为控制台零 error 的等效判据——toast 弹出即等同于有未捕获错误。
     event.preventDefault();
 });
 

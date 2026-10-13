@@ -62,7 +62,15 @@ const CASE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 // 执行目标（source_ref）校验口径（与 src/common/source_ref.py 逐条对齐）：
 // 形态正则 / 长度 ≤512 / 路径段禁 ".."。前端持有一份只为"提交前拦下"，
 // 后端仍会独立校验（纵深防御；两侧规则同源，改一处必须同步另一处）。
-const SOURCE_REF_PATTERN = /^[\w./-]+\.py(::\w+)*$/;
+//
+// Day54-fix P2-④：形态正则**不能用 \w**——JS 的 \w 恒为 ASCII-only，
+// 而 Python 的 \w 在默认（re.UNICODE）下匹配 Unicode 字母与数字。后端会
+// 放行 `测试/用例.py` 这类合法 pytest 目标，前端却判"格式非法"把它拦下
+// （方向是误拦合法值、无注入风险，但"逐条对齐"的名头与实际不符）。
+// 故显式写 Unicode 属性类：\p{L} 字母、\p{N} 数字，与 Python \w 的
+// Unicode 语义等价；**u 标志必填**，否则 \p{...} 只是普通转义序列，
+// 正则会静默失配（把合法值全判成非法）。
+const SOURCE_REF_PATTERN = /^[\p{L}\p{N}_./-]+\.py(::[\p{L}\p{N}_]+)*$/u;
 const MAX_SOURCE_REF_LENGTH = 512;
 
 // 用例描述展示层长度上限（后端 schema 对 description 无长度约束，

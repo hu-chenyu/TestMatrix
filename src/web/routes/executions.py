@@ -34,6 +34,12 @@
     - 批次受理成功后落业务埋点日志（execution_id/筛选用例数/
       executor/四维筛选条件），与请求级"请求:/响应:"日志分层
 
+功能（Day54-fix 交付）:
+    - trigger接口environment长度校验（上限16字符，与库层
+      String(16)、前端 maxlength 三段同值）：修复此前"前端32字符+
+      路由零校验"导致 17-32 字符能连过两道闸、MySQL 严格模式下
+      INSERT 抛 DataError 变 500 的口径断裂
+
 数据口径:
     - 批次列表只含已完成批次（finish_execution后才有defect_statistics
       汇总记录），未finish的执行中批次不在列表范围；执行中批次的
@@ -107,6 +113,16 @@ DEFAULT_EXECUTOR_MODE = "simulated"
 # 分页参数默认值（与cases.py口径一致）
 DEFAULT_PAGE = 1
 DEFAULT_PAGE_SIZE = 20
+
+# 执行环境字段长度上限（Day54-fix P1-①）
+#
+# 与库层 environment 列声明同值（`src/db/models.py` 的 ExecutionBatch 与
+# TestExecution 两张表均为 String(16)），并与前端 maxlength 同值——三段口径
+# 必须同值。此前前端 maxlength 写 32 且路由层零校验，17-32 字符能连过两道闸：
+# MySQL 严格模式下 INSERT 抛 DataError 变成 500，而 SQLite 不实现 VARCHAR
+# 长度约束会静默落库（故障推迟到换库当天才出现，与 source_ref 的
+# String(512) 长度教训同族，见 PROJECT_CONTEXT 6.47）。
+MAX_ENVIRONMENT_LENGTH = 16
 
 # 批次终态事件类型（流式接口收到后立即关闭流的信号）
 TERMINAL_EVENT_TYPES = ("batch_finished", "batch_failed")
@@ -393,7 +409,8 @@ def trigger_execution():
 
     异常:
         ValidationError: executor非法/case_type非法/请求体非JSON
-                         对象/无符合条件的用例时抛出（400）
+                         对象/environment超长（>16字符）/无符合条件的
+                         用例时抛出（400）
         CaseManagerError: 其他核心层异常原样上抛（兜底500）
     """
     # 请求体可选: 无请求体(None)视为空对象走全量回归
@@ -430,12 +447,21 @@ def trigger_execution():
             f"case_type非法: {case_type!r}，合法取值: api/chip"
         )
 
+    # 执行环境先解析到局部变量并做长度校验（Day54-fix P1-①）:
+    # 上限与库层 String(16) 同值，越界即 400，不让"库层才炸"成为
+    # 只有 MySQL 严格模式才会触发的晚期故障（SQLite 静默放行）
+    environment = _parse_optional_body_str(body, "environment") or "dev"
+    if len(environment) > MAX_ENVIRONMENT_LENGTH:
+        raise ValidationError(
+            f"environment 长度不能超过 {MAX_ENVIRONMENT_LENGTH} 字符"
+        )
+
     # 可选筛选与环境参数透传核心层（module/priority/tags/case_type）
     try:
         result = CaseManager.start_execution(
             trigger="web",
             executor_name="web",
-            environment=_parse_optional_body_str(body, "environment") or "dev",
+            environment=environment,
             remark=_parse_optional_body_str(body, "remark"),
             module=module_filter,
             priority=priority_filter,
