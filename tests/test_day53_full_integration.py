@@ -56,8 +56,13 @@ from src.web.routes.executions import EXECUTOR_MODE_ENV_KEY
 # 项目根（本文件位于 tests/ 下，向上一级为项目根）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# 真实子进程用例的临时测试文件目录（output/ 已被 .gitignore 忽略）
-SCRATCH_DIRNAME = "day53_scratch"
+# 真实子进程用例的临时测试文件目录（output/ 已被 .gitignore 忽略）。
+# Day54：目录名改为**会话级唯一**（同 Day53 conftest 的 per-run alluredir 思路），
+# 唯一性由 <微秒时间戳> + <进程号> 双要素保证：时间戳区分同机先后启动的会话，
+# pid 区分同一微秒节拍内的两次启动（Windows 时钟粒度约 15.6ms，同节拍内微秒位
+# 可能完全相同）。修复前固定名 output/day53_scratch 会被并行会话的 teardown
+# rmtree 删掉在途探针文件，表现为随机的 1 failed。
+SCRATCH_DIRNAME = f"day53_scratch-{int(time.time() * 1e6)}-{os.getpid()}"
 
 # 看板脚本路径（clamp 防御的静态断言对象）
 DASHBOARD_JS = PROJECT_ROOT / "src" / "web" / "static" / "js" / "dashboard.js"
@@ -166,11 +171,14 @@ def scratch_dir() -> Iterator[Path]:
     （``^[\\w./-]+\\.py(::\\w+)*$``，禁盘符/反斜杠/".."），且 pytest 子进程
     的工作目录是项目根，只有项目内的相对路径才能被收集到。
 
+    teardown 只删**本次会话自己**创建的唯一目录
+    （output/day53_scratch-<时间戳>-<pid>），并行运行的另一会话不受影响。
+
     参数:
         无
 
     返回:
-        Iterator[Path]: yield 临时目录（output/day53_scratch）
+        Iterator[Path]: yield 本次会话独有的临时目录
     """
     target_dir = PROJECT_ROOT / "output" / SCRATCH_DIRNAME
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -188,7 +196,8 @@ def make_source_ref(scratch_dir: Path) -> Callable[[str, str], str]:
 
     返回:
         Callable[[str, str], str]: 入参（模块名, 文件内容），返回形如
-                                   ``output/day53_scratch/x.py`` 的相对路径
+                                   ``output/day53_scratch-<时间戳>-<pid>/x.py``
+                                   的相对路径
     """
 
     def _factory(module_name: str, body: str) -> str:
@@ -941,8 +950,8 @@ class TestFullChainRealExecution:
         """
         全链路一条龙（任务一的验收面）:
             ①通过 POST /api/executions/trigger 以真实执行器触发；
-            ②真实执行器拉起 pytest 子进程跑 output/day53_scratch 下的
-              真实用例并落明细；
+            ②真实执行器拉起 pytest 子进程跑 output/day53_scratch-<时间戳>-<pid>
+              下的真实用例并落明细；
             ③批次终态计数与明细接口一致（passed=1、error=0）；
             ④看板数据源 GET /api/reports/trend 立刻能查到该批次，
                pass_rate 为**原始比值**（展示层才做百分比与 clamp）。

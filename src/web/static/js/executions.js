@@ -82,6 +82,20 @@ const EXECUTOR_MODE_LABELS = {
  */
 const EXECUTOR_MODE_API = "/executor/mode";
 
+/**
+ * 优先级合法取值（与后端 executions.py 的 VALID_CASE_PRIORITIES 一致）
+ *
+ * 前端持有一份用于"提交前即时校验"：后端对非法取值回 400
+ * 「priority取值非法」，用户要走一次"提交→报错→改"的往返才发现
+ * 自己把 P0 写成了 P9。两侧取值域同源，改一处必须同步另一处。
+ */
+const VALID_PRIORITIES = ["P0", "P1", "P2", "P3"];
+
+/**
+ * 执行环境字段长度上限（与 executions.html 的 maxlength 同值）
+ */
+const MAX_ENVIRONMENT_LENGTH = 32;
+
 /* ==========================================================================
    页面级状态
    ========================================================================== */
@@ -114,6 +128,7 @@ const state = {
 const els = {
     listErrorAlert: document.getElementById("listErrorAlert"),
     listErrorText: document.getElementById("listErrorText"),
+    listErrorRetryBtn: document.getElementById("listErrorRetryBtn"),
     tableBody: document.getElementById("executionsTableBody"),
     totalCount: document.getElementById("totalCount"),
     pageSizeSelect: document.getElementById("pageSizeSelect"),
@@ -136,13 +151,17 @@ const els = {
     triggerForm: document.getElementById("triggerForm"),
     tModule: document.getElementById("tModule"),
     tPriority: document.getElementById("tPriority"),
+    tPriorityError: document.getElementById("tPriorityError"),
     tTags: document.getElementById("tTags"),
     tCaseType: document.getElementById("tCaseType"),
     tExecutor: document.getElementById("tExecutor"),
     tEnvironment: document.getElementById("tEnvironment"),
+    tEnvironmentError: document.getElementById("tEnvironmentError"),
     tRemark: document.getElementById("tRemark"),
     triggerSubmitBtn: document.getElementById("triggerSubmitBtn"),
     triggerSubmitSpinner: document.getElementById("triggerSubmitSpinner"),
+    triggerErrorAlert: document.getElementById("triggerErrorAlert"),
+    triggerRetryBtn: document.getElementById("triggerRetryBtn"),
     triggerResultAlert: document.getElementById("triggerResultAlert"),
     triggerResultText: document.getElementById("triggerResultText"),
     triggerViewLogBtn: document.getElementById("triggerViewLogBtn"),
@@ -347,17 +366,19 @@ async function triggerExecution(formData) {
    ========================================================================== */
 
 /**
- * 切换列表错误提示条
+ * 切换列表错误提示条显隐（含配套重试按钮）
+ *
+ * 文案与显隐统一走 main.js 的 window.showError（Day54 收敛，三页面同一实现）；
+ * 重试按钮与提示条同生命周期——只在错误态出现，避免给用户一个"点了只是
+ * 重放正常请求"的假入口。
  *
  * @param {boolean} show 是否显示
  * @param {string} [message] 错误文案
  * @returns {void}
  */
 function setListError(show, message) {
-    if (show && message) {
-        els.listErrorText.textContent = message;
-    }
-    els.listErrorAlert.classList.toggle("d-none", !show);
+    window.showError(els.listErrorAlert, show ? message : "");
+    window.showRetry(els.listErrorRetryBtn, Boolean(show));
 }
 
 /**
@@ -380,6 +401,23 @@ function renderEmptyRow() {
         '<tr><td colspan="9" class="text-center text-muted py-4">' +
         '<i class="bi bi-inbox me-1"></i>暂无执行记录，' +
         "点击右上角「触发新执行」开始</td></tr>";
+}
+
+/**
+ * 渲染列表错误态行（与空态刻意区分，Day54）
+ *
+ * 为什么必须分开：接口失败时原先渲染的是「暂无执行记录，点击右上角触发
+ * 新执行」——这会直接把用户推去做一次本不该做的触发，而真实原因是列表
+ * 请求根本没成功。错误行明确指路到提示条里的重试按钮，并用 text-danger
+ * 与空态的 text-muted 在视觉上区分。
+ *
+ * @returns {void}
+ */
+function renderErrorRow() {
+    els.tableBody.innerHTML =
+        '<tr><td colspan="9" class="text-center text-danger py-4">' +
+        '<i class="bi bi-exclamation-triangle me-1"></i>' +
+        "执行批次加载失败，请点击上方提示条中的「重试」</td></tr>";
 }
 
 /**
@@ -516,9 +554,9 @@ async function loadExecutions() {
         }
         renderPagination();
     } catch (error) {
-        // 错误态：页内提示条 + 空态占位，不白屏
-        setListError(true, "执行批次加载失败：" + error.message);
-        renderEmptyRow();
+        // 错误态：页内提示条 + 错误态行（与空态区分），不白屏
+        setListError(true, "执行批次加载失败：" + describeApiError(error));
+        renderErrorRow();
         // 错误态清零分页状态：否则“共 N 个已完成批次”仍是上一次成功的
         // 数字、分页按钮仍可点击，与空态文案自相矛盾
         state.total = 0;
@@ -678,7 +716,7 @@ function getTriggerModal() {
 }
 
 /**
- * 重置触发表单到初始态并隐藏上一次受理结果
+ * 重置触发表单到初始态并隐藏上一次受理结果 / 错误提示
  * @returns {void}
  */
 function resetTriggerForm() {
@@ -686,6 +724,68 @@ function resetTriggerForm() {
     els.tEnvironment.value = "dev"; // reset 不保证还原 value 属性，显式置默认
     els.triggerResultAlert.classList.add("d-none");
     els.triggerResultText.textContent = "";
+    // 与受理区同理：上一次的失败提示不该跟着新一次触发一起带进弹窗
+    clearTriggerFieldErrors();
+    window.showError(els.triggerErrorAlert, "");
+}
+
+/**
+ * 清空触发表单全部字段错误态
+ * @returns {void}
+ */
+function clearTriggerFieldErrors() {
+    window.setFieldError(els.tPriority, els.tPriorityError, "");
+    window.setFieldError(els.tEnvironment, els.tEnvironmentError, "");
+}
+
+/**
+ * 触发表单前端校验（Day54）
+ *
+ * 只校验"后端一定会拒"的两项，不做多余拦截：
+ *   - priority：取值必须落在 P0-P3（后端 VALID_CASE_PRIORITIES 白名单，
+ *     非法值回 400）；多值按逗号拆分后逐个校验，大小写不敏感（后端也是
+ *     upper() 后比对）；
+ *   - environment：长度上限与输入框 maxlength 同值。
+ * module/tags/remark 是无格式约束的自由文本（tags 的空段在拆分时已丢弃），
+ * 不设校验——凭空加规则会让原本合法的输入被前端拦住。
+ *
+ * @returns {{valid: boolean, errors: object}} 校验结果；errors 为
+ *          {字段名: 错误文案}，valid=false 时非空
+ */
+function validateTriggerForm() {
+    const errors = {};
+    const priorityText = els.tPriority.value.trim();
+    if (priorityText) {
+        const invalidValues = splitFilterValues(priorityText).filter(function (item) {
+            return VALID_PRIORITIES.indexOf(item.toUpperCase()) === -1;
+        });
+        if (invalidValues.length) {
+            errors.priority = "优先级取值非法：" + invalidValues.join("、") +
+                "；合法取值为 " + VALID_PRIORITIES.join("/");
+        }
+    }
+    const environment = els.tEnvironment.value.trim();
+    // 留空不算错：collectTriggerData 会回落后端默认环境 dev
+    if (environment.length > MAX_ENVIRONMENT_LENGTH) {
+        errors.environment =
+            "执行环境长度不能超过" + MAX_ENVIRONMENT_LENGTH + "个字符";
+    }
+    return { valid: Object.keys(errors).length === 0, errors: errors };
+}
+
+/**
+ * 渲染触发表单字段错误（字段名 → 控件/错误容器）
+ *
+ * @param {object} errors 形如 {priority: "..."} 的错误表
+ * @returns {void}
+ */
+function applyTriggerFieldErrors(errors) {
+    window.setFieldError(els.tPriority, els.tPriorityError, errors.priority || "");
+    window.setFieldError(
+        els.tEnvironment,
+        els.tEnvironmentError,
+        errors.environment || ""
+    );
 }
 
 /**
@@ -758,11 +858,24 @@ function setTriggerLoading(loading) {
 }
 
 /**
- * 提交触发：锁防重复，成功展示 202 受理区并绑定实时日志入口
- * @returns {Promise<void>} 失败 toast 提示并恢复按钮
+ * 提交触发：前端校验 → 锁防重复 → 202 受理区 + 实时日志入口
+ *
+ * 失败时在弹窗内展示含 HTTP 状态码的错误（不只有 5 秒即逝的 toast），
+ * 并提供就地重试按钮（Day54）——400「无符合条件的用例可执行」这类
+ * 错误用户往往想换个筛选条件再试，重试入口必须在眼前。
+ *
+ * @returns {Promise<void>} 无返回值；失败展示错误区并恢复按钮
  */
 async function submitTrigger() {
     if (state.triggerLoading) {
+        return;
+    }
+    clearTriggerFieldErrors();
+    window.showError(els.triggerErrorAlert, "");
+    const check = validateTriggerForm();
+    if (!check.valid) {
+        // 校验不过不发起请求（与用例页表单同一口径）
+        applyTriggerFieldErrors(check.errors);
         return;
     }
     setTriggerLoading(true);
@@ -778,7 +891,11 @@ async function submitTrigger() {
         els.triggerViewLogBtn.dataset.executionId = result.execution_id;
         window.showToast("执行批次已受理");
     } catch (error) {
-        // 400 无符合条件用例/枚举非法等：toast 展示后端业务文案
+        // 400 无符合条件用例/枚举非法、500 服务端异常：错误区给状态码与原因
+        window.showError(
+            els.triggerErrorAlert,
+            "触发执行失败：" + describeApiError(error)
+        );
         window.showToast("触发执行失败：" + error.message, "danger");
     } finally {
         setTriggerLoading(false);
@@ -1320,13 +1437,18 @@ async function openLogView(executionId) {
             return; // 已被更新的探活取代，丢弃过期结果
         }
         // 404 与其他失败分流文案: 只在“批次表确无该批次行”时才断言
-        // 历史批次不支持回放。api.js 抛出的 Error 不带 HTTP 状态码
-        // （该文件今日不在改动范围），故按后端 404 的完整业务文案精确
-        // 匹配——刻意不用“包含不存在”的子串判定：500 类数据库错误
-        // （如“表 test_execution_batches 不存在”）也含该子串，子串
-        // 匹配会把真实故障误报成历史批次，正是后端路由层已明确规避的
-        // 反模式（executions.py 纯类型判定，无子串兜底）。
-        if (error.message === EXECUTION_NOT_FOUND_MESSAGE) {
+        // 历史批次不支持回放。Day54 起判据以 **HTTP 状态码** 为准——
+        // api.js 已把状态码挂在 Error.status 上，404 即"批次表确无该行"，
+        // 属协议层事实，不随后端文案改版而漂移。刻意不用“包含不存在”的
+        // 子串判定：500 类数据库错误（如“表 test_execution_batches 不存在”）
+        // 也含该子串，子串匹配会把真实故障误报成历史批次，正是后端路由层
+        // 已明确规避的反模式（executions.py 纯类型判定，无子串兜底）。
+        // 文案精确匹配保留为兜底：不带状态码的异常路径（旧后端/自定义错误）
+        // 仍能正确分流。
+        const isNotFound =
+            error.status === 404 ||
+            error.message === EXECUTION_NOT_FOUND_MESSAGE;
+        if (isNotFound) {
             window.showToast(
                 "该批次为历史批次，无实时事件记录，不支持日志回放。",
                 "warning"
@@ -1450,6 +1572,31 @@ function initExecutionsPage() {
     els.triggerForm.addEventListener("submit", function (event) {
         event.preventDefault();
         submitTrigger();
+    });
+
+    // --- 输入即清除该字段错误态（Day54）：改正内容后红字必须立刻消失 ---
+    els.triggerForm.addEventListener("input", function (event) {
+        if (event.target === els.tPriority) {
+            window.setFieldError(els.tPriority, els.tPriorityError, "");
+        } else if (event.target === els.tEnvironment) {
+            window.setFieldError(els.tEnvironment, els.tEnvironmentError, "");
+        }
+    });
+
+    // --- 优先级即时校验（Day54）：失焦即校验，不必等到提交被后端拒 ---
+    els.tPriority.addEventListener("blur", function () {
+        applyTriggerFieldErrors(validateTriggerForm().errors);
+    });
+
+    // --- 触发失败后的就地重试（Day54） ---
+    // 直接重放提交：校验与锁都在 submitTrigger 内部，不需要第二套路径
+    els.triggerRetryBtn.addEventListener("click", function () {
+        submitTrigger();
+    });
+
+    // --- 列表错误态重试（Day54）：错误态不再只有"刷新整页"一条路 ---
+    els.listErrorRetryBtn.addEventListener("click", function () {
+        loadExecutions();
     });
 
     // --- 触发成功后的实时日志入口 ---

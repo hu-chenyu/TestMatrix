@@ -45,17 +45,47 @@ function setSummaryLoading(isLoading) {
 }
 
 /**
- * 切换统计区域错误态（错误提示条显隐）
+ * 切换统计区域错误态（错误提示条 + 重试按钮显隐）
+ *
+ * Day54 收敛：文案与显隐统一走 main.js 的 window.showError，重试按钮与
+ * 提示条同生命周期（只在错误态出现）。此前错误态只让用户"去右上角找刷新
+ * 按钮"，而刷新按钮在加载中是被禁用的——用户点不到就只能干等。
  *
  * @param {boolean} hasError 是否处于错误态
+ * @param {string} [message] 错误文案（含 HTTP 状态码，由调用方拼好）
  * @returns {void}
  */
-function setSummaryError(hasError) {
+function setSummaryError(hasError, message) {
     // error 态提示条：默认 d-none，失败时展示
-    const errorAlert = document.getElementById("statsErrorAlert");
-    if (errorAlert) {
-        errorAlert.classList.toggle("d-none", !hasError);
+    window.showError(
+        document.getElementById("statsErrorAlert"),
+        hasError ? message || "统计数据加载失败，请点击「重试」重新加载。" : ""
+    );
+    window.showRetry(
+        document.getElementById("statsErrorRetryBtn"),
+        Boolean(hasError)
+    );
+}
+
+/**
+ * 切换看板空态提示（库中尚无执行数据时给出下一步）
+ *
+ * 为什么需要：空库里四个统计卡片是 0/--、三个图表是空坐标轴，页面看起来
+ * "加载失败"与"确实没数据"完全一样，用户唯一的线索是自己去执行记录页试一次。
+ * 提示条把下一步写在页面上。
+ *
+ * @param {boolean} isEmpty 是否处于"无任何执行数据"状态
+ * @returns {void}
+ */
+function setDashboardEmpty(isEmpty) {
+    const hint = document.getElementById("dashboardEmptyHint");
+    if (!hint) {
+        return;
     }
+    // 这里刻意不复用 window.showError：空态不是错误态，提示文案是模板里的
+    // 静态脚本文案（不随请求变化），只需翻转可见性；走错误工具会把"空"
+    // 与"错"两种语义在代码上混成一条路径，正是本次要分开的东西。
+    hint.classList.toggle("d-none", !isEmpty);
 }
 
 /**
@@ -81,7 +111,10 @@ async function loadCaseTotal() {
         return typeof casesData.total === "number" ? casesData.total : null;
     } catch (error) {
         // 轻提示但不抛错：用例总数是独立数据源，失败不影响另外三个卡片
-        showToast("用例总数加载失败，已显示为占位：" + error.message, "danger");
+        showToast(
+            "用例总数加载失败，已显示为占位：" + describeApiError(error),
+            "danger"
+        );
         return null;
     }
 }
@@ -208,6 +241,13 @@ async function loadSummary() {
         // 双数据源汇合后统一渲染四个卡片
         renderStatCards(summary, caseTotal);
 
+        // 空态口径：批次与执行条数都为 0 才算"库里还没有可看的数据"，
+        // 只判其中一个都会把"有批次但明细为空"这类异常状态误报成空态
+        setDashboardEmpty(
+            Number(summary.total_batches || 0) === 0 &&
+                Number(summary.total_executed || 0) === 0
+        );
+
         // 填充“最后更新”为当前本地时间（formatDate 由 main.js 提供）
         const lastUpdatedEl = document.getElementById("lastUpdated");
         if (lastUpdatedEl) {
@@ -215,8 +255,11 @@ async function loadSummary() {
         }
     } catch (error) {
         // summary 主数据源失败：toast 明示原因并展示页内重试提示条，整体 error 态
-        showToast("统计数据加载失败：" + error.message, "danger");
-        setSummaryError(true);
+        showToast("统计数据加载失败：" + describeApiError(error), "danger");
+        setSummaryError(true, "统计数据加载失败：" + describeApiError(error));
+        // 失败时收起空态提示：否则"暂无数据"与"加载失败"同时挂在页面上，
+        // 用户会按空态的指引去做一次无意义的触发
+        setDashboardEmpty(false);
         // finally 会退出 loading 态，此处提前结束后续渲染
         return;
     } finally {
@@ -303,9 +346,14 @@ function initDashboardCharts() {
     // 三个容器 id 与 dashboard.html 逐一对应
     const chartIds = ["trendChart", "modulePieChart", "priorityBarChart"];
     chartIds.forEach(function (chartId) {
-        // initChart 幂等；拿到实例后立即绘制空态（Day41 数据返回后被 setOption 替换）
+        // initChart 幂等；拿到实例后先画"加载中"占位，数据返回后再由
+        // 各加载器 setOption 覆盖（空数据走 renderChartEmpty、失败走
+        // markChartLoadState + 失败文案）。
+        // Day54 修正：原先首屏直接画"暂无数据"，与"确实没有数据"完全同形——
+        // 接口还在路上时用户看到的就是"这个项目没数据"，会把正常首屏
+        // 读成空库。加载态必须有自己的中间呈现。
         const chart = window.chartHelper.initChart(chartId);
-        window.chartHelper.renderChartEmpty(chart);
+        window.chartHelper.renderChartEmpty(chart, "加载中...");
     });
 }
 
@@ -803,6 +851,22 @@ function initDashboard() {
         refreshBtn.addEventListener("click", async function () {
             await loadAllDashboardData();
             showToast("看板数据已刷新");
+        });
+    }
+
+    // 4.2 错误提示条内的就地重试（Day54）：与刷新走同一条加载路径，
+    //     不给错误态另开一条"只重试 summary"的窄路径（那会让图表停留在
+    //     失败态而错误条已消失，页面状态自相矛盾）。
+    const retryBtn = document.getElementById("statsErrorRetryBtn");
+    if (retryBtn) {
+        retryBtn.addEventListener("click", async function () {
+            window.setButtonLoading(retryBtn, true, "重试中...");
+            try {
+                await loadAllDashboardData();
+            } finally {
+                // 无论成败都还原按钮文案；成功时提示条会连同按钮一起隐藏
+                window.setButtonLoading(retryBtn, false);
+            }
         });
     }
 

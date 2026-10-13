@@ -93,11 +93,19 @@
                         class="btn btn-outline-secondary btn-sm flex-grow-1">重置</button>
             </div>
         </div>
-        <!-- 列表加载失败提示条（默认隐藏，由 cases.js 切换） -->
+        <!-- 列表加载失败提示条（默认隐藏，由 cases.js 经 window.showError 切换）。
+             文案节点带 data-role="error-text"：统一错误工具靠该标记定位，
+             不依赖具体 span 顺序。重试按钮只在错误态出现——错误态下页面上
+             唯一可做的操作此前是"刷新整个页面"，等于让用户自己找退路。
+             刻意不用 d-flex 排版：Bootstrap 的 .d-flex 生成在 .d-none 之后，
+             两类的 display 都带 !important，同元素共存会让 d-none 失效
+             （提示条常驻），故用行内元素 + ms-2 间距。 -->
         <div class="alert alert-danger d-none py-2 mt-3 mb-0" id="listErrorAlert"
              role="alert">
             <i class="bi bi-exclamation-triangle-fill me-1"></i>
-            <span id="listErrorText">用例列表加载失败，请稍后重试。</span>
+            <span id="listErrorText" data-role="error-text">用例列表加载失败，请稍后重试。</span>
+            <button type="button" class="btn btn-sm btn-outline-danger ms-2 py-0
+                    d-none" id="listErrorRetryBtn">重试</button>
         </div>
     </div>
 </div>
@@ -164,6 +172,14 @@
             <!-- 表单提交由 cases.js 拦截（preventDefault），不触发原生页面跳转 -->
             <form id="caseForm" novalidate>
                 <div class="modal-body">
+                    <!-- 表单级错误区（后端 400/409 等）：字段级提示装不下的
+                         错误（如 409 编号重复、500 服务端异常）在此展示，
+                         含 HTTP 状态码，替代此前的裸 toast。 -->
+                    <div class="alert alert-danger d-none py-2 mb-3"
+                         id="caseFormAlert" role="alert">
+                        <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                        <span id="caseFormAlertText" data-role="error-text"></span>
+                    </div>
                     <div class="row g-3">
                         <!-- case_id：编辑模式整体 disabled（PUT 接口也会忽略该字段） -->
                         <div class="col-md-6">
@@ -198,6 +214,27 @@
                                    maxlength="64" placeholder="admin">
                             <div class="invalid-feedback" id="fCreatorError"></div>
                         </div>
+                        <!-- 执行目标（source_ref）：真实执行（pytest 模式）下必填。
+                            后端 PUT/POST schema 已接受该字段，此前表单不暴露它，
+                             导致真实模式下新建的用例必然"执行目标缺失"逐条 error。
+                             校验口径与 core 层 validate_source_ref 完全一致
+                             （形态 / ≤512 / 禁 ".."），前端拦在提交之前。 -->
+                        <div class="col-12">
+                            <label for="fSourceRef" class="form-label">
+                                执行目标 source_ref
+                                <span class="badge text-bg-light border
+                                             text-secondary"
+                                      style="font-size:0.65rem; font-weight:400;"
+                                      id="fSourceRefModeHint">真实模式必填</span>
+                            </label>
+                            <input type="text" class="form-control" id="fSourceRef"
+                                   maxlength="512"
+                                   placeholder="tests/test_api_demo.py::test_login">
+                            <div class="form-text">
+                                项目内 .py 相对路径，可带 ::用例名；不支持绝对路径与 ..
+                            </div>
+                            <div class="invalid-feedback" id="fSourceRefError"></div>
+                        </div>
                         <div class="col-md-4">
                             <label for="fPriority" class="form-label">优先级</label>
                             <select id="fPriority" class="form-select">
@@ -223,8 +260,13 @@
                         </div>
                         <div class="col-12">
                             <label for="fDescription" class="form-label">用例描述</label>
+                            <!-- 描述上限 1000 字符：后端 schema 对 description
+                                 无长度约束，此处是纯展示层上限（防误贴整份
+                                 日志把卡片撑爆），校验文案与 maxlength 同值 -->
                             <textarea class="form-control" id="fDescription"
-                                      rows="3"></textarea>
+                                      rows="3" maxlength="1000"></textarea>
+                            <div class="invalid-feedback"
+                                 id="fDescriptionError"></div>
                         </div>
                     </div>
                 </div>

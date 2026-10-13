@@ -23,7 +23,9 @@ Day44 收尾批量修复的回归测试（Day1~Day44 全量审查发现的 30 �
     - 涉及线程/时序的用例走预算内轮询 + 终态断言，不用固定 time.sleep 赌时序
 """
 
+import os
 import shutil
+import time
 from pathlib import Path
 
 import allure
@@ -39,14 +41,21 @@ ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
 COMPOSE_FILE = PROJECT_ROOT / "docker" / "docker-compose.yml"
 DOCKERFILE = PROJECT_ROOT / "docker" / "Dockerfile"
 PYTEST_INI = PROJECT_ROOT / "pytest.ini"
-# Day48：真实子进程用例的临时测试文件目录（output/ 已被 .gitignore 忽略）
-SCRATCH_DIRNAME = "day44_pytest_scratch"
+# Day48：真实子进程用例的临时测试文件目录（output/ 已被 .gitignore 忽略）。
+# Day54：目录名改为**会话级唯一**（同 Day53 conftest 的 per-run alluredir 思路）。
+# 为什么不能用固定名: 并行/嵌套的 pytest 会话会在同一个 output/day44_scratch
+# 上互踩——一方 teardown 的 rmtree 会删掉另一方**在途**的探针文件，表现为
+# 随机的 1 failed（Day53-fix 复核期间实测到，不是代码缺陷，而是测试基建
+# 假设了"同一时刻只有一个会话"）。唯一性由 <微秒时间戳> + <进程号> 双要素
+# 保证：时间戳区分同机先后启动的会话，pid 区分同一微秒节拍内的两次启动
+# （Windows 时钟粒度约 15.6ms，同节拍内微秒位可能完全相同，pid 不可省）。
+SCRATCH_DIRNAME = f"day44_scratch-{int(time.time() * 1e6)}-{os.getpid()}"
 
 
 @pytest.fixture
 def scratch_dir():
     """
-    在项目根 output/ 下准备一个可写的临时目录（用例结束后清理）
+    在项目根 output/ 下准备一个可写的**唯一**临时目录（用例结束后清理）
 
     为什么不用 tmp_path: Day48 起 build_command 只读 source_ref，而
     source_ref 必须过 validate_source_ref 的形态校验
@@ -58,9 +67,11 @@ def scratch_dir():
 
     放 output/ 下而非仓库其它位置: 该目录已在 .gitignore 中，临时文件
     不会污染版本库；同时它在项目根内，能算出合法的相对 source_ref。
+
+    teardown 只删**本次会话自己**创建的那个唯一目录，不复用固定名，
+    因此并行运行的另一会话不受影响（这正是 Day54 要根除的互踩）。
     """
     target_dir = PROJECT_ROOT / "output" / SCRATCH_DIRNAME
-    shutil.rmtree(target_dir, ignore_errors=True)
     target_dir.mkdir(parents=True, exist_ok=True)
     try:
         yield target_dir
@@ -78,8 +89,8 @@ def make_source_ref(scratch_dir: Path):
 
     返回:
         Callable[[str, str], str]: 入参为（模块名, 文件内容），返回形如
-                                    ``output/day44_pytest_scratch/x.py``
-                                    的相对路径（正斜杠，跨平台一致）
+                                   ``output/day44_scratch-<时间戳>-<pid>/x.py``
+                                   的相对路径（正斜杠，跨平台一致）
     """
 
     def _factory(module_name: str, body: str) -> str:
