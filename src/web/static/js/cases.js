@@ -36,6 +36,7 @@ const state = {
              // （与 pendingRefresh 同机制，但需记住目标页）
   pendingPageSize: null,// 列表在途期间被改动的每页条数，锁释放后回第 1 页补刷
   knownModules: [],   // 历次列表累积发现的模块名（跨页填充模块下拉）
+  executorMode: null,  // 当前执行器模式（服务端为权威，仅用于表单必填口径）
 };
 
 // 编辑弹窗详情请求的在途序号（防竞态）：
@@ -51,6 +52,30 @@ let editRequestSeq = 0;
 // 保证「已选模块始终可选」优先于上界。
 const MAX_KNOWN_MODULES = 200;
 
+// 用例编号字符集（与后端 CaseCreateSchema 的 validate.Regexp 同源，
+// 也与 data_driver.CASE_ID_PATTERN 一致：首字符必须字母或数字，后续允许
+// 字母数字与 . _ -）。首字符限制不是洁癖：case_id 会被当作 pytest 的测试
+// 目标传下去，`--version` 这类以连字符开头的值能过宽松字符集却被 argparse
+// 当成选项（Day44 P2-12 / Day43 收尾 D6 的同一个洞）。
+const CASE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+// 执行目标（source_ref）校验口径（与 src/common/source_ref.py 逐条对齐）：
+// 形态正则 / 长度 ≤512 / 路径段禁 ".."。前端持有一份只为"提交前拦下"，
+// 后端仍会独立校验（纵深防御；两侧规则同源，改一处必须同步另一处）。
+const SOURCE_REF_PATTERN = /^[\w./-]+\.py(::\w+)*$/;
+const MAX_SOURCE_REF_LENGTH = 512;
+
+// 用例描述展示层长度上限（后端 schema 对 description 无长度约束，
+// 此处防误贴整份日志把卡片撑爆；见 cases.html 的字段注释）
+const MAX_DESCRIPTION_LENGTH = 1000;
+
+// 执行器模式接口（Day53 双模式切换）：真实执行（pytest）模式下，
+// 没有 source_ref 的用例会被执行器逐条降级为 error，故该模式下表单必填它。
+const EXECUTOR_MODE_API = "/executor/mode";
+
+// 执行器模式枚举（与后端 _current_executor_mode 的取值域一致）
+const EXECUTOR_MODE_PYTEST = "pytest";
+
 /* ==========================================================================
   DOM 引用集中获取（节点均为模板静态元素，脚本在 body 底部加载）
   ========================================================================== */
@@ -64,6 +89,7 @@ const els = {
   resetBtn: document.getElementById("resetBtn"),
   listErrorAlert: document.getElementById("listErrorAlert"),
   listErrorText: document.getElementById("listErrorText"),
+  listErrorRetryBtn: document.getElementById("listErrorRetryBtn"),
   tableBody: document.getElementById("casesTableBody"),
   totalCount: document.getElementById("totalCount"),
   pageSizeSelect: document.getElementById("pageSizeSelect"),
@@ -79,10 +105,13 @@ const els = {
   fName: document.getElementById("fName"),
   fModule: document.getElementById("fModule"),
   fCreator: document.getElementById("fCreator"),
+  fSourceRef: document.getElementById("fSourceRef"),
+  fSourceRefModeHint: document.getElementById("fSourceRefModeHint"),
   fPriority: document.getElementById("fPriority"),
   fCaseType: document.getElementById("fCaseType"),
   fStatus: document.getElementById("fStatus"),
   fDescription: document.getElementById("fDescription"),
+  formAlert: document.getElementById("caseFormAlert"),
   saveBtn: document.getElementById("caseSaveBtn"),
   saveSpinner: document.getElementById("caseSaveSpinner"),
   deleteModalEl: document.getElementById("deleteConfirmModal"),
@@ -188,17 +217,19 @@ function buildQueryString() {
 }
 
 /**
- * 切换列表错误提示条显隐
+ * 切换列表错误提示条显隐（含配套重试按钮）
+ *
+ * 文案与显隐统一走 main.js 的 window.showError（Day54 收敛，三页面同一实现）；
+ * 重试按钮与提示条同生命周期——只在错误态出现，无错时留在页面上会让用户
+ * 误以为"这里有个操作入口"，点下去却发现只是重放一次正常请求。
  *
  * @param {boolean} show 是否显示
  * @param {string} [message] 错误文案（show=true 时生效）
  * @returns {void}
  */
 function setListError(show, message) {
-  if (show && message) {
-    els.listErrorText.textContent = message;
-  }
-  els.listErrorAlert.classList.toggle("d-none", !show);
+  window.showError(els.listErrorAlert, show ? message : "");
+  window.showRetry(els.listErrorRetryBtn, Boolean(show));
 }
 
 /* ==========================================================================
@@ -227,6 +258,23 @@ function renderEmptyRow() {
     '<tr><td colspan="9" class="text-center text-muted py-4">' +
     '<i class="bi bi-inbox me-1"></i>暂无符合条件的用例，' +
     "试试调整筛选条件或点击新增用例</td></tr>";
+}
+
+/**
+ * 渲染表格错误态行（与空态刻意区分，Day54）
+ *
+ * 为什么必须分开：接口失败时原先渲染的是「暂无符合条件的用例，试试调整
+ * 筛选条件」——用户会去反复调筛选，而真实原因是请求根本没成功。两种状态
+ * 在表格主视觉上完全一致（都是空表），只有页头一行提示条不同。错误行的
+ * 文案直接指路到重试按钮，且走 text-danger 与空态的 text-muted 视觉可分。
+ *
+ * @returns {void}
+ */
+function renderErrorRow() {
+  els.tableBody.innerHTML =
+    '<tr><td colspan="9" class="text-center text-danger py-4">' +
+    '<i class="bi bi-exclamation-triangle me-1"></i>' +
+    "用例列表加载失败，请点击上方提示条中的「重试」</td></tr>";
 }
 
 /**
@@ -414,13 +462,13 @@ async function loadCases() {
     renderModuleOptions(items);
     renderPagination();
   } catch (error) {
-    // 错误态：页内 alert 明示原因 + 表格空态占位，不白屏（验收 4.21）
+    // 错误态：页内 alert 明示原因 + 表格错误态占位，不白屏（验收 4.21）
     // 同时重置分页计数：否则页脚仍显示上一次的"共 137 条"+ 空表格，
     // 用户看到自相矛盾的画面，易误判为数据丢失
     state.total = 0;
     state.totalPages = 0;
-    setListError(true, "用例列表加载失败：" + error.message);
-    renderEmptyRow();
+    setListError(true, "用例列表加载失败：" + describeApiError(error));
+    renderErrorRow();
     renderPagination();
   } finally {
     state.loading = false;
@@ -503,6 +551,15 @@ function getFormModal() {
 /**
  * 清空单个字段的校验错误态
  *
+ * 为什么本页**不**委托给 main.js 的同名工具（Day54 走查实测踩到）:
+ * 经典脚本里的顶层 `function setFieldError(){}` 会绑定成**全局对象**的
+ * 属性，于是在本页 `window.setFieldError` 恰好指向本函数自己——委托写法
+ * 变成自我递归，浏览器直接抛 `RangeError: Maximum call stack size
+ * exceeded`，表单校验整体失效（与 6.33/7.36 的全局同名陷阱同族，
+ * 区别只是那次炸的是 SyntaxError，这次炸的是无限递归）。
+ * 故本页保留自己的实现；跨页共用的那份只在**没有同名顶层声明**的页面
+ * （executions.js）直接调用。
+ *
  * @param {HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement} field 表单控件
  * @param {HTMLElement} errorEl 对应的 invalid-feedback 容器
  * @returns {void}
@@ -526,15 +583,101 @@ function setFieldError(field, errorEl, message) {
 }
 
 /**
+ * 校验错误与表单控件的绑定表（字段名 → 控件 + 错误容器）
+ *
+ * 表驱动而非逐字段 if：clearAllFieldErrors 与 submitForm 原先各自逐字段
+ * 写一遍，新增字段时漏改任何一处都表现为"错误静默不显示"（有 is-invalid
+ * 却没有文案，或反之）。收敛成一张表后两处自动同步。
+ */
+const FIELD_ERROR_BINDINGS = {
+  case_id: { field: els.fCaseId, errorId: "fCaseIdError" },
+  name: { field: els.fName, errorId: "fNameError" },
+  module: { field: els.fModule, errorId: "fModuleError" },
+  creator: { field: els.fCreator, errorId: "fCreatorError" },
+  source_ref: { field: els.fSourceRef, errorId: "fSourceRefError" },
+  description: { field: els.fDescription, errorId: "fDescriptionError" },
+};
+
+/**
  * 清空全部字段错误态
  *
  * @returns {void}
  */
 function clearAllFieldErrors() {
-  clearFieldError(els.fCaseId, document.getElementById("fCaseIdError"));
-  clearFieldError(els.fName, document.getElementById("fNameError"));
-  clearFieldError(els.fModule, document.getElementById("fModuleError"));
-  clearFieldError(els.fCreator, document.getElementById("fCreatorError"));
+  Object.keys(FIELD_ERROR_BINDINGS).forEach(function (key) {
+    const binding = FIELD_ERROR_BINDINGS[key];
+    clearFieldError(binding.field, document.getElementById(binding.errorId));
+  });
+}
+
+/**
+ * 把校验结果里的字段错误逐条渲染到对应控件（Day54 表驱动）
+ *
+ * @param {object} errors 形如 {字段名: 错误文案} 的错误表
+ * @returns {number} 实际渲染的字段数（便于调用方判断是否有未绑定字段）
+ */
+function applyFieldErrors(errors) {
+  let applied = 0;
+  Object.keys(errors).forEach(function (key) {
+    const binding = FIELD_ERROR_BINDINGS[key];
+    if (!binding) {
+      return; // 未在绑定表内的字段（理论上不存在）静默跳过，不抛错
+    }
+    setFieldError(
+      binding.field,
+      document.getElementById(binding.errorId),
+      errors[key]
+    );
+    applied += 1;
+  });
+  return applied;
+}
+
+/**
+ * 单字段即时校验（失焦/输入触发，Day54）
+ *
+ * 复用 validateForm 的全量判定，但只落到被触发的那一个字段：用户填到一半
+ * 时不应该看到其它空字段的红字（那会让"必填"提示在打开弹窗瞬间铺满全屏）。
+ *
+ * @param {string} key 字段名（FIELD_ERROR_BINDINGS 的键）
+ * @param {object} errors 已算好的错误表（避免每字段重复整表校验）
+ * @returns {void}
+ */
+function revalidateField(key, errors) {
+  const binding = FIELD_ERROR_BINDINGS[key];
+  if (!binding) {
+    return;
+  }
+  const errorEl = document.getElementById(binding.errorId);
+  if (errors[key]) {
+    setFieldError(binding.field, errorEl, errors[key]);
+  } else {
+    clearFieldError(binding.field, errorEl);
+  }
+}
+
+/**
+ * 按控件反查绑定表并清除它的错误态（Day54）
+ *
+ * 为什么需要：只在校验点（提交/失焦）写错误、不在输入时清错误，会出现
+ * "名称已经填好了、红字还写着'用例名称必填'"这种自相矛盾的画面——浏览器
+ * 走查截图时实测到。用户在改正内容的那一刻，这条提示就已经过期了。
+ *
+ * @param {HTMLElement} element 触发输入的控件
+ * @returns {void}
+ */
+function clearFieldErrorForElement(element) {
+  const keys = Object.keys(FIELD_ERROR_BINDINGS);
+  for (let index = 0; index < keys.length; index++) {
+    const binding = FIELD_ERROR_BINDINGS[keys[index]];
+    if (binding.field === element) {
+      clearFieldError(
+        binding.field,
+        document.getElementById(binding.errorId)
+      );
+      return;
+    }
+  }
 }
 
 /**
@@ -547,8 +690,11 @@ function resetForm() {
   // input/textarea 需显式置默认：reset 只还原 HTML value 属性
   els.fModule.value = "default";
   els.fCreator.value = "admin";
+  els.fSourceRef.value = "";
   els.fDescription.value = "";
   clearAllFieldErrors();
+  // 上一次提交失败留下的表单级错误条随之清空（否则新开弹窗就带着旧报错）
+  window.showError(els.formAlert, "");
 }
 
 /**
@@ -596,6 +742,8 @@ async function openEditModal(caseId) {
     els.fName.value = detail.name || "";
     els.fModule.value = detail.module || "";
     els.fCreator.value = detail.creator || "";
+    // source_ref 由详情接口无条件返回（Day48 起键恒存在，未配置为 null）
+    els.fSourceRef.value = detail.source_ref || "";
     els.fPriority.value = detail.priority || "P2";
     els.fCaseType.value = detail.case_type || "api";
     els.fStatus.value = detail.status || "active";
@@ -608,7 +756,42 @@ async function openEditModal(caseId) {
 }
 
 /**
+ * 校验执行目标（source_ref），与 core 层 validate_source_ref 逐条对齐
+ *
+ * 三条规则：形态（SOURCE_REF_PATTERN）/ 长度 ≤512 / 路径段禁 ".."；
+ * 真实执行（pytest）模式下额外要求非空——该模式下没有执行目标的用例会被
+ * 执行器逐条降级成 error，等批次跑完再回看"为什么全是异常"成本高得多。
+ *
+ * @param {string} rawValue 输入框原始值
+ * @param {string|null} mode 当前执行器模式（simulated/pytest/null 未知）
+ * @returns {string} 错误文案；合法时返回空串
+ */
+function validateSourceRefValue(rawValue, mode) {
+  const value = String(rawValue || "").trim();
+  const required = mode === EXECUTOR_MODE_PYTEST;
+  if (!value) {
+    return required ? "真实执行模式下执行目标必填" : "";
+  }
+  if (value.length > MAX_SOURCE_REF_LENGTH) {
+    return "执行目标长度不能超过" + MAX_SOURCE_REF_LENGTH + "个字符";
+  }
+  if (!SOURCE_REF_PATTERN.test(value)) {
+    return "执行目标格式非法：要求形如 tests/x.py 或 " +
+      "tests/x.py::TestC::test_y（.py 结尾，不含空格）";
+  }
+  // 与 core 层一致：只看 :: 之前的路径段，禁上级目录
+  const pathPart = value.split("::")[0];
+  if (pathPart.split("/").indexOf("..") >= 0) {
+    return "执行目标路径不得含上级目录 ..";
+  }
+  return "";
+}
+
+/**
  * 前端表单校验
+ *
+ * 覆盖：编号必填/长度、名称必填/长度、模块与创建人长度、描述长度上限、
+ * 执行目标（格式 + 真实模式必填）。校验不过时不发起任何请求。
  *
  * @returns {{valid: boolean, errors: object}} 校验结果；errors 为
  *     {字段名: 错误文案}，valid=false 时非空
@@ -622,6 +805,11 @@ function validateForm() {
       errors.case_id = "用例编号必填";
     } else if (caseId.length > 64) {
       errors.case_id = "用例编号长度不能超过64个字符";
+    } else if (!CASE_ID_PATTERN.test(caseId)) {
+      // 与后端 schema 同一字符集口径：首字符须为字母或数字，
+      // 后续允许字母数字与 ._-
+      errors.case_id = "用例编号只能包含字母、数字、点、下划线与连字符，" +
+        "且首字符必须为字母或数字";
     }
   }
   const name = els.fName.value.trim();
@@ -636,11 +824,25 @@ function validateForm() {
   if (els.fCreator.value.trim().length > 64) {
     errors.creator = "创建人长度不能超过64个字符";
   }
+  if (els.fDescription.value.length > MAX_DESCRIPTION_LENGTH) {
+    errors.description =
+      "用例描述长度不能超过" + MAX_DESCRIPTION_LENGTH + "个字符";
+  }
+  const sourceRefError = validateSourceRefValue(
+    els.fSourceRef.value,
+    state.executorMode
+  );
+  if (sourceRefError) {
+    errors.source_ref = sourceRefError;
+  }
   return { valid: Object.keys(errors).length === 0, errors: errors };
 }
 
 /**
  * 收集表单为请求体（枚举值与文本 trim 后提交）
+ *
+ * source_ref 为空串时如实下发空串（后端归一为 None＝"未配置执行目标"），
+ * 这样编辑时把执行目标清空能真的清掉，而不是"看起来清空了、库里还在"。
  *
  * @returns {object} 可直接 JSON 序列化的用例字段对象
  */
@@ -653,6 +855,7 @@ function collectFormData() {
     status: els.fStatus.value,
     description: els.fDescription.value,
     creator: els.fCreator.value.trim() || "admin",
+    source_ref: els.fSourceRef.value.trim(),
   };
 }
 
@@ -674,36 +877,17 @@ function setSaveLoading(loading) {
  */
 async function submitForm() {
   clearAllFieldErrors();
+  window.showError(els.formAlert, ""); // 清掉上一次提交失败留下的错误条
   const result = validateForm();
   if (!result.valid) {
-    // 校验不过：字段级红框 + 文案，不发起任何请求（验收 4.12）
-    if (result.errors.case_id) {
-      setFieldError(
-        els.fCaseId,
-        document.getElementById("fCaseIdError"),
-        result.errors.case_id
-      );
-    }
-    if (result.errors.name) {
-      setFieldError(
-        els.fName,
-        document.getElementById("fNameError"),
-        result.errors.name
-      );
-    }
-    if (result.errors.module) {
-      setFieldError(
-        els.fModule,
-        document.getElementById("fModuleError"),
-        result.errors.module
-      );
-    }
-    if (result.errors.creator) {
-      setFieldError(
-        els.fCreator,
-        document.getElementById("fCreatorError"),
-        result.errors.creator
-      );
+    // 校验不过：字段级红框 + 文案，不发起任何请求（验收 4.12）。
+    // 表驱动渲染（applyFieldErrors），新增字段无需再改这里。
+    applyFieldErrors(result.errors);
+    // 焦点移到第一个出错的字段：字段多时用户不必自己找哪一行红了
+    const firstKey = Object.keys(result.errors)[0];
+    const binding = FIELD_ERROR_BINDINGS[firstKey];
+    if (binding && binding.field && binding.field.focus) {
+      binding.field.focus();
     }
     return;
   }
@@ -730,7 +914,10 @@ async function submitForm() {
     await loadCases(); // 刷新当前页看到新增/更新结果
   } catch (error) {
     // 409 重复编号 / 400 校验失败 / 404 不存在：message 已由 api.js 解包，
-    // 弹窗保留（不 hide）让用户可改正后重提，按钮在 finally 中恢复
+    // 弹窗保留（不 hide）让用户可改正后重提，按钮在 finally 中恢复。
+    // Day54：表单内显式错误区（含 HTTP 状态码）替代"只弹 5 秒 toast"——
+    // toast 消失后用户看不到失败原因，只能重试碰运气。
+    window.showError(els.formAlert, "保存失败：" + describeApiError(error));
     window.showToast(error.message, "danger");
   } finally {
     setSaveLoading(false);
@@ -973,6 +1160,26 @@ function initCasesPage() {
     submitForm();
   });
 
+  // --- 输入即清除该字段错误态（Day54）：改正内容后红字必须立刻消失 ---
+  els.caseForm.addEventListener("input", function (event) {
+    clearFieldErrorForElement(event.target);
+  });
+
+  // --- 字段即时校验（Day54）：失焦即校验单一字段 ---
+  // 只回填被触发字段的错误，避免用户刚开始填就看到其余空字段铺满红字
+  els.fCaseId.addEventListener("blur", function () {
+    revalidateField("case_id", validateForm().errors);
+  });
+  els.fSourceRef.addEventListener("blur", function () {
+    revalidateField("source_ref", validateForm().errors);
+  });
+
+  // --- 列表错误态重试（Day54）：错误态不再只有"刷新整页"一条路 ---
+  // loadCases 内部自带加载态、错误态与互斥锁，直接复用即可
+  els.listErrorRetryBtn.addEventListener("click", function () {
+    loadCases();
+  });
+
   // --- 删除确认 ---
   els.confirmDeleteBtn.addEventListener("click", confirmDelete);
 
@@ -1007,8 +1214,52 @@ function initCasesPage() {
     }
   });
 
+  // --- 执行器模式回读：决定"执行目标"是否必填（Day54） ---
+  // 不 await：模式读取失败只影响必填口径，不该拖慢首屏列表
+  loadExecutorModeForForm();
+
   // --- 首次加载（state 默认 status=active、page=1、pageSize=20） ---
   loadCases();
+}
+
+/* ==========================================================================
+  2.9 执行器模式回读（Day54）
+  ========================================================================== */
+
+/**
+ * 读取当前执行器模式，用于刷新表单必填口径
+ *
+ * 为什么必须回读而不能本地推断：模式是进程级运行时选择（Day53 落在
+ * TM_EXECUTOR 环境变量上），页面脚本没有别的途径知道"现在是不是真实
+ * 执行"。读失败时按"未知"处理——**不施加必填约束**：宁可少一次前端
+ * 拦截，也不能因为读不到模式就把一条合法用例卡死在提交前（后端仍有
+ * 独立校验，真实模式缺执行目标最终会由执行器如实报 error）。
+ *
+ * @returns {Promise<void>} 无返回值（失败不抛出，只退化必填口径）
+ */
+async function loadExecutorModeForForm() {
+  try {
+    const data = await window.api.get(EXECUTOR_MODE_API);
+    state.executorMode = data && data.mode ? data.mode : null;
+  } catch (error) {
+    state.executorMode = null;
+  }
+  renderSourceRefModeHint();
+}
+
+/**
+ * 刷新"执行目标"字段的模式提示徽章文案
+ *
+ * @returns {void}
+ */
+function renderSourceRefModeHint() {
+  if (!els.fSourceRefModeHint) {
+    return;
+  }
+  els.fSourceRefModeHint.textContent =
+    state.executorMode === EXECUTOR_MODE_PYTEST
+      ? "当前真实模式：必填"
+      : "真实模式下必填";
 }
 
 // DOM 就绪后初始化（脚本位于 body 底部 extra_js，双保险无时序问题）
@@ -1022,6 +1273,8 @@ window.casesPage = {
   openEditModal: openEditModal,
   confirmDelete: confirmDelete,
   importCases: importCases,
+  validateForm: validateForm,
+  loadExecutorModeForForm: loadExecutorModeForForm,
   // 保留导出以不改变本模块的公开面：本地名改为 escHtml 后，导出键
   // 仍是 escapeHtml（6.33 决策——收敛的是实现唯一性，不是模块 API 面），
   // 其值指向 window.escapeHtml，该赋值是幂等的

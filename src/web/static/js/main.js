@@ -237,6 +237,189 @@ window.statusBadge = function (status) {
 const PAGE_SEQUENCE_FULL_THRESHOLD = 7;
 
 /**
+ * 页面内错误提示条的统一显隐入口（Day54）
+ *
+ * 为什么要有它：三个页面此前各写一套「classList.toggle('d-none') +
+ * 手工定位文案节点」，同一语义三份实现（与 6.37 前端共享工具下沉同源：
+ * 只改一处即产生分叉）。提示条内的文案节点约定用
+ * `data-role="error-text"` 标记，本函数按标记定位；找不到标记时退回
+ * 容器内第一个 <span>，保证既有结构不改也能用。
+ *
+ * @param {string|HTMLElement} target 提示条容器（元素对象或其 id）
+ * @param {string} [message] 错误文案；空串/null/undefined 表示隐藏提示条
+ * @returns {boolean} 是否作用到容器（容器不存在返回 false）
+ */
+window.showError = function (target, message) {
+  const container =
+    typeof target === "string" ? document.getElementById(target) : target;
+  if (!container) {
+    return false;
+  }
+  const textEl =
+    container.querySelector('[data-role="error-text"]') ||
+    container.querySelector("span");
+  // 只在展示时改写文案：隐藏路径不覆盖上一次内容，便于排查时回看
+  if (textEl && message) {
+    textEl.textContent = message;
+  }
+  container.classList.toggle("d-none", !message);
+  return true;
+};
+
+/**
+ * 错误提示条配套「重试」按钮的统一显隐（Day54）
+ *
+ * 重试按钮只在错误态出现：无错时留在页面上会让用户误以为"这里有操作
+ * 入口"，点了却只是重放一次正常请求。与 showError 同时调用即可。
+ *
+ * @param {string|HTMLElement} button 重试按钮（元素对象或其 id）
+ * @param {boolean} visible 是否可见
+ * @returns {boolean} 是否作用到按钮（按钮不存在返回 false）
+ */
+window.showRetry = function (button, visible) {
+  const btn = typeof button === "string" ? document.getElementById(button) : button;
+  if (!btn) {
+    return false;
+  }
+  btn.classList.toggle("d-none", !visible);
+  btn.disabled = false; // 每次显隐都复位禁用态，防上一轮 loading 残留
+  return true;
+};
+
+/**
+ * 按钮 loading 态统一开关（Day54）
+ *
+ * 语义固定为「禁用 + 换文案」，用于重试/刷新这类会重复发起请求的按钮：
+ * 只置 disabled 而不换文案时，用户看到的是一个毫无反馈的灰按钮。
+ * 原文案在首次进入 loading 时存进 dataset，退出时还原。
+ *
+ * @param {string|HTMLElement} button 目标按钮（元素对象或其 id）
+ * @param {boolean} isLoading 是否处于加载中
+ * @param {string} [loadingText] 加载中文案，缺省「处理中...」
+ * @returns {boolean} 是否作用到按钮（按钮不存在返回 false）
+ */
+window.setButtonLoading = function (button, isLoading, loadingText) {
+  const btn = typeof button === "string" ? document.getElementById(button) : button;
+  if (!btn) {
+    return false;
+  }
+  if (isLoading) {
+    // 只在进入 loading 时记录原文案，避免被"处理中..."反复覆盖
+    if (btn.dataset.tmOriginalText === undefined) {
+      btn.dataset.tmOriginalText = btn.textContent;
+    }
+    btn.textContent = loadingText || "处理中...";
+    btn.disabled = true;
+  } else {
+    if (btn.dataset.tmOriginalText !== undefined) {
+      btn.textContent = btn.dataset.tmOriginalText;
+      delete btn.dataset.tmOriginalText;
+    }
+    btn.disabled = false;
+  }
+  return true;
+};
+
+/**
+ * 表单字段错误态的统一开关（Day54）
+ *
+ * 用例页与执行记录页的表单校验共用同一动作：控件加 .is-invalid（Bootstrap
+ * 靠它显示同级的 .invalid-feedback）+ 错误容器写入文案。两页各写一套时
+ * 极易只改一处，出现"红框有、文案没"或反之的半截状态。
+ *
+ * @param {string|HTMLElement} field 表单控件（元素对象或其 id）
+ * @param {string|HTMLElement} errorTarget 错误容器（元素对象或其 id）
+ * @param {string} [message] 错误文案；空值表示清除该字段的错误态
+ * @returns {boolean} 是否作用到控件（控件或容器缺失返回 false）
+ */
+window.setFieldError = function (field, errorTarget, message) {
+  const control =
+    typeof field === "string" ? document.getElementById(field) : field;
+  const box =
+    typeof errorTarget === "string"
+      ? document.getElementById(errorTarget)
+      : errorTarget;
+  if (!control || !box) {
+    return false;
+  }
+  if (message) {
+    control.classList.add("is-invalid");
+    box.textContent = message;
+  } else {
+    control.classList.remove("is-invalid");
+    box.textContent = "";
+  }
+  return true;
+};
+
+/**
+ * 把 api.js 抛出的错误对象转成含 HTTP 状态码的可读文案（Day54）
+ *
+ * 为什么带上状态码：后端业务 message 有时很笼统（"参数校验失败"），
+ * 而 400 / 404 / 409 / 500 的处置方式完全不同（改输入 / 换目标 /
+ * 换编号 / 等重试）。状态码是 api.js 挂在 Error 上的协议层事实，
+ * 不依赖后端文案措辞，也不会被文案改版打偏。
+ *
+ * @param {*} error 捕获到的错误（可能是 Error，也可能是被抛出的任意值）
+ * @returns {string} 形如 "HTTP 409 · 用例编号已存在"；无状态码时为纯 message
+ */
+window.describeApiError = function (error) {
+  const message =
+    error && error.message ? String(error.message) : "未知错误";
+  const status = error && error.status ? String(error.status) : "";
+  return status ? "HTTP " + status + " · " + message : message;
+};
+
+// ===========================================================================
+// 全局错误兜底（Day54）
+// ===========================================================================
+// 为什么需要：页面脚本里任何一处漏掉的 await / 未捕获异常，浏览器只在
+// 控制台留一行红字，用户看到的是"点了没反应"。这里把两类全局错误转成
+// 一次可见提示，让"静默失败"在 UI 上也有落点。
+// 去重上界：同一消息只提示一次且总量封顶，防止循环报错把页面刷成 toast 墙。
+
+// 已提示过的全局错误文案（去重，上界 20 条）
+const TM_GLOBAL_ERROR_SEEN = [];
+const TM_GLOBAL_ERROR_MAX = 20;
+
+/**
+ * 全局错误去重并提示（内部方法）
+ *
+ * @param {string} message 错误文案
+ * @returns {void}
+ */
+function reportGlobalError(message) {
+  const text = message || "页面发生未知错误";
+  if (TM_GLOBAL_ERROR_SEEN.indexOf(text) >= 0) {
+    return;
+  }
+  if (TM_GLOBAL_ERROR_SEEN.length >= TM_GLOBAL_ERROR_MAX) {
+    return;
+  }
+  TM_GLOBAL_ERROR_SEEN.push(text);
+  showToast("页面发生未预期的错误：" + text, "danger");
+}
+
+// 资源加载/脚本执行期异常（含语法错误的运行时表现）
+window.addEventListener("error", function (event) {
+  // 只处理脚本/运行时错误；资源加载失败（img/script 的 target 无 message）
+  // 交给浏览器控制台与 Log 通道，避免把外部库加载噪声变成用户提示
+  if (event && event.message) {
+    reportGlobalError(event.message);
+  }
+});
+
+// 未被 catch 的 Promise 拒绝（async 函数漏 await 时的典型表现）
+window.addEventListener("unhandledrejection", function (event) {
+  const reason = event && event.reason;
+  const message = reason && reason.message ? reason.message : String(reason);
+  reportGlobalError(message);
+  // 阻止浏览器把同一条未处理拒绝再打一遍控制台 error：
+  // 提示已经给出，重复输出只会污染"控制台零 error"的判据
+  event.preventDefault();
+});
+
+/**
  * 计算分页页码序列（cases.js / executions.js 共用同一实现）
  *
  * 规则（验收 1.4）：总页数 ≤7 全部显示；>7 时显示首页、末页、

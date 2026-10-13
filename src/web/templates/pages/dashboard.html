@@ -34,10 +34,23 @@
   </div>
 </div>
 
-<!-- summary 加载失败提示条（error 态，默认隐藏，由 dashboard.js 切换） -->
+<!-- summary 加载失败提示条（error 态，默认隐藏，由 dashboard.js 经 window.showError 切换）。
+   data-role="error-text" 供统一错误工具定位文案；重试按钮与提示条同生命周期，
+   就地重试比让用户自己去右上角找刷新按钮更直接（Day54）。
+   刻意不混用 d-flex：Bootstrap 的 .d-flex 生成在 .d-none 之后且同为
+   !important，同元素共存会让 d-none 失效（提示条常驻）。 -->
 <div class="alert alert-danger d-none py-2 mb-3" id="statsErrorAlert" role="alert">
   <i class="bi bi-exclamation-triangle-fill me-1"></i>
-  统计数据加载失败，请点击右上角“刷新”重试。
+  <span id="statsErrorText" data-role="error-text">统计数据加载失败，请点击「重试」重新加载。</span>
+  <button type="button" class="btn btn-sm btn-outline-danger ms-2 py-0"
+      id="statsErrorRetryBtn">重试</button>
+</div>
+
+<!-- 空态提示条（empty 态，默认隐藏）：库中尚无任何执行记录时给出下一步，
+   替代"四个卡片全是 0/--、图表全是空坐标轴"这种无信息量的首屏 -->
+<div class="alert alert-secondary d-none py-2 mb-3" id="dashboardEmptyHint" role="status">
+  <i class="bi bi-info-circle me-1"></i>
+  <span id="dashboardEmptyHintText">暂无执行数据：先到「执行记录」页触发一次执行，看板即会展示统计与趋势。</span>
 </div>
 
 <!-- ========== 2. 统计卡片区：4 个等宽卡片，Day37 由 dashboard.js 渲染真实数值 ========== -->
