@@ -11,19 +11,22 @@ TestMatrix Day24: 用例执行触发API测试
     3. test_trigger_no_cases     无匹配用例: 400 +
       message含"无符合条件的用例"
     4. test_trigger_invalid_executor executor非法值: 400
-    5. test_status_not_found     状态查询不存在批次: 404
-  异步链路:
-    6. test_async_runs_to_finish   trigger立即202返回，轮询批次
+    5. test_trigger_environment_length_boundary
+      environment长度边界（Day54-fix P1-①）: 17字符400、
+      边界值16字符202（上限与库层String(16)同值）
+    6. test_status_not_found     状态查询不存在批次: 404
+    异步链路:
+    7. test_async_runs_to_finish   trigger立即202返回，轮询批次
       至finished，通过/失败计数与种子奇偶规则手算一致，
       defect_statistics有该批次记录
-    7. test_execute_batch_sync    同步直调_execute_batch_async:
+    8. test_execute_batch_sync    同步直调_execute_batch_async:
       批次pending→running→finished状态转换正确，
       明细表行数=用例数
-    8. test_batch_failed_status   注入必抛异常的假执行器: 批次
+    9. test_batch_failed_status   注入必抛异常的假执行器: 批次
       落failed且error_message非空，不崩进程
-    9. test_executor_factory     工厂返回正确类型 +
+    10. test_executor_factory    工厂返回正确类型 +
       非法值ValueError + TM_EXECUTOR环境变量默认链
-    10. test_pytest_runner_exit_code mock子进程退出码:
+    11. test_pytest_runner_exit_code mock子进程退出码:
       0→passed / 1→failed / 2→error且error_message非空
 
 异步测试原则（防flaky）:
@@ -63,6 +66,7 @@ from src.core.executors import (
 from src.db import models
 from src.db.db_session import DatabaseSession
 from src.web import create_app
+from src.web.routes.executions import MAX_ENVIRONMENT_LENGTH
 
 # 轮询参数: 批次模拟执行约0.01s/条，预算远超实际耗时防flaky
 POLL_MAX_ATTEMPTS = 20
@@ -266,6 +270,41 @@ class TestExecutionsTriggerApi:
 
     assert response.status_code == 400, "非法执行器应返回400"
     assert "executor" in data["message"]
+
+  def test_trigger_environment_length_boundary(
+    self, trigger_client: FlaskClient
+  ) -> None:
+    """
+    环境名长度边界（Day54-fix P1-①）: 库层 environment 列为
+    String(16)，路由层按同一上限拦——17字符返回400，边界值
+    16字符正常受理202。
+
+    为什么必须在这里拦: 前端 maxlength 曾是32、路由层此前零校验，
+    17-32字符能连过两道闸。MySQL 严格模式下 INSERT 抛 DataError
+    变成500（SQLite 不实现 VARCHAR 长度约束则静默落库）——
+    与 source_ref String(512) 的长度口径断裂同族。
+
+    断言两个方向: 超长必拒（拦得住）+ 边界必收（不过度拦截），
+    只测前者无法发现"上限被写成 15"这类反向错误。
+    """
+    too_long = "e" * (MAX_ENVIRONMENT_LENGTH + 1)
+    response = trigger_client.post(
+      "/api/executions/trigger", json={"environment": too_long}
+    )
+    data = response.get_json()
+
+    assert response.status_code == 400, "17字符环境名应返回400"
+    assert "environment" in data["message"]
+
+    # 边界值必须放行，且批次能正常跑完（防teardown竞态）
+    boundary_response = trigger_client.post(
+      "/api/executions/trigger",
+      json={"environment": "e" * MAX_ENVIRONMENT_LENGTH},
+    )
+    assert boundary_response.status_code == 202, "16字符为合法边界值"
+    _wait_batch_terminal(
+      boundary_response.get_json()["data"]["execution_id"]
+    )
 
   def test_status_not_found(self, trigger_client: FlaskClient) -> None:
     """

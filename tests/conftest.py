@@ -18,6 +18,17 @@ pytest全局配置模块（tests/conftest.py）
   Demo用例默认打向conftest内置的本地Flask模拟服务（模拟典型业务后端:
   登录认证/用户查询/健康检查三类接口），保证pytest开箱即跑、可离线重复执行;
   真实被测服务通过.env的TM_BASE_URL配置，由后续阶段用例按需接入。
+
+已知限制（测试基建，Day54-fix P3-⑧ 登记）:
+  scratch目录（真实子进程用例的探针文件落点，见
+  tests/test_day44_bugfix_demo.py 与 tests/test_day53_full_integration.py
+  内的 scratch_dir fixture）自 Day54 起改用会话级唯一后缀
+  output/day*_scratch-<微秒时间戳>-<pid>/，消除了并行 pytest 会话互踩
+  固定目录导致的随机失败；代价是**失去了固定名时代"下次启动自清"的兜底**：
+  teardown 失败或进程被强杀时，残留目录会逐次累积（正常路径清理可靠，
+  实测三连跑 + 并行 + 变异注入后零残留）。异常残留目录可安全手动删除：
+    Remove-Item -Recurse -Force output/day*_scratch-*
+  这些目录在 .gitignore 覆盖范围内，不会进入版本库，也不影响任何用例断言。
 """
 
 import os

@@ -92,9 +92,14 @@ const EXECUTOR_MODE_API = "/executor/mode";
 const VALID_PRIORITIES = ["P0", "P1", "P2", "P3"];
 
 /**
- * 执行环境字段长度上限（与 executions.html 的 maxlength 同值）
+ * 执行环境字段长度上限（与库层 environment 列 String(16)、
+ * executions.html 的 maxlength 同值）
+ *
+ * Day54-fix P1-①: 此前这里写 32 而库层只有 String(16)，17-32 字符
+ * 能连过前端与路由两道闸——MySQL 严格模式下 INSERT 抛 DataError 变成
+ * 500，SQLite 不实现 VARCHAR 长度约束则静默放行。**三层口径必须同值**。
  */
-const MAX_ENVIRONMENT_LENGTH = 32;
+const MAX_ENVIRONMENT_LENGTH = 16;
 
 /* ==========================================================================
   页面级状态
@@ -745,7 +750,8 @@ function clearTriggerFieldErrors() {
  *  - priority：取值必须落在 P0-P3（后端 VALID_CASE_PRIORITIES 白名单，
  *   非法值回 400）；多值按逗号拆分后逐个校验，大小写不敏感（后端也是
  *   upper() 后比对）；
- *  - environment：长度上限与输入框 maxlength 同值。
+ *  - environment：长度上限与输入框 maxlength、库层 String(16)、
+*   路由层长度校验 同值（Day54-fix P1-① 三段口径对齐）。
  * module/tags/remark 是无格式约束的自由文本（tags 的空段在拆分时已丢弃），
  * 不设校验——凭空加规则会让原本合法的输入被前端拦住。
  *
@@ -1585,6 +1591,14 @@ function initExecutionsPage() {
 
   // --- 优先级即时校验（Day54）：失焦即校验，不必等到提交被后端拒 ---
   els.tPriority.addEventListener("blur", function () {
+    applyTriggerFieldErrors(validateTriggerForm().errors);
+  });
+
+  // --- 环境名即时校验（Day54-fix P3-⑥）：与 tPriority 同口径 ---
+  // 此前只有 tPriority 挂了 blur，tEnvironment 自身没有——用户填完超长
+  // 环境名要等到提交才被后端 400 拒（本页其余字段都是失焦即校验，口径不一）。
+  // 字段数少，失焦时直接跑全表校验即可，不必再造一套单字段 revalidate。
+  els.tEnvironment.addEventListener("blur", function () {
     applyTriggerFieldErrors(validateTriggerForm().errors);
   });
 
