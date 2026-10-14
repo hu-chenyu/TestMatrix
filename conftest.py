@@ -490,8 +490,10 @@ def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:
         ①**稳定排序**: 按 (模块名, 类名, 用例名) 三级字典序对 items **就地**
           排序，消除文件系统遍历顺序差异带来的执行顺序漂移，为 Day58
           xdist 并发的结果归位与 Day56 插件的结果上报提供确定性基线。
-          `list.sort` 是稳定排序: 三级键完全相同的用例保持收集时的相对顺序
-          （同一用例的多组参数因此仍按定义顺序执行）。
+          `list.sort` 的稳定性只对**三级键完全相同**的用例保序，不覆盖参数组:
+          参数化用例的 `item.name` 带 `[参数id]` 后缀，三级键两两不同，故参数组
+          按**参数 id 的字典序**排列而非定义序。本项目数据驱动用例的 id 多为递增
+          编号（TM-API-0001→0004），字典序恰等于定义序故无感知；id 非递增时会被重排（Day55-fix 修正）。
         ②**收集统计**: 统计 marker 分布 / 模块分布 / 总数，写入 `config.stash`
           （键为 COLLECTION_STATS_STASH_KEY），由 `pytest_sessionfinish` 读取输出。
         ③**标记完整性检查**: 登记已注册标记的使用情况与未注册标记（见
