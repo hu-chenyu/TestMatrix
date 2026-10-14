@@ -1,5 +1,25 @@
 """
-项目根 pytest 配置（Day53 新增）：per-run 唯一 Allure 结果目录
+项目根 pytest 配置：收集期钩子（Day55）+ per-run 唯一 Allure 结果目录（Day53）
+
+一、本模块的钩子（按执行时机排序；三条之间只有"统计写入 → 摘要读取"一条依赖）:
+
+  1. `pytest_configure`（配置阶段，最早）
+    职责: 应用 per-run 唯一 Allure 结果目录（见下方"Day53 修复说明"）。
+  2. `pytest_collection_modifyitems`（收集阶段：收集完成、任何用例执行之前）
+    职责: ①三级字典序稳定排序 ②收集统计写入 `config.stash`
+       ③标记完整性检查（已注册标记使用情况 + 未注册标记登记）。
+    为什么落在项目根: 排序与统计的口径必须对整个会话唯一，而项目根
+    conftest 是外层会话与嵌套运行**都会加载**的那一份（理由同 Day53）。
+  3. `pytest_sessionfinish`（会话阶段，收尾）
+    职责: 从 `config.stash` 取第 2 步的统计，向终端输出一行收集摘要。
+
+  与 tests/conftest.py 的关系: 后者另有 pytest_configure（Loguru 配置）/
+  pytest_sessionstart（Allure 环境信息）/ pytest_runtest_makereport（失败采集）/
+  pytest_sessionfinish（会话统计日志）。pytest 允许多个 conftest 各自持有同名
+  钩子，按插件注册顺序逐个执行、互不覆盖；本模块三个钩子与它们零职责重叠，
+  也不存在重复注册（Day55 已审查确认）。
+
+二、Day53 修复说明（per-run 唯一 Allure 结果目录）
 
 为什么这个修复必须落在**项目根**的 conftest.py（而不是 tests/conftest.py）:
   conftest 的加载范围是"被收集路径的全部祖先目录"。本项目的真实子进程
@@ -51,8 +71,12 @@
 import os
 import shutil
 import time
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 # per-run 目录名前缀（本机制产物的唯一识别依据，清理时靠它区分"自己人"）
 PER_RUN_ALLURE_DIR_PREFIX = "run-"
@@ -216,7 +240,7 @@ def apply_per_run_allure_dir(config: Any) -> str:
 
 def pytest_configure(config: Any) -> None:
   """
-  pytest 会话配置钩子：应用 per-run 唯一 Allure 结果目录
+  配置阶段钩子（最早）：应用 per-run 唯一 Allure 结果目录
 
   conftest 的钩子先于插件（allure-pytest）的 pytest_configure 执行，
   故此处改写后的值会被 `AllureFileLogger` 直接读到——这是本修复能生效的
@@ -229,3 +253,302 @@ def pytest_configure(config: Any) -> None:
     无
   """
   apply_per_run_allure_dir(config)
+
+
+# ===========================================================================
+# 收集期钩子（Day55）：稳定排序 + 收集统计 + 标记完整性检查
+#
+# 三个常量的取值口径:
+#  - COLLECTION_STATS_STASH_KEY 用 StashKey 而非普通属性名: StashKey 以
+#   **对象身份**为键，避免与插件/其他 conftest 的同名属性相撞。
+#  - TRACKED_MARKERS 是 pytest.ini markers 段注册的四个业务标记，摘要行按
+#   这个顺序固定输出（未命中的也输出 0，便于横向对比）。
+#  - BUILTIN_MARKERS 是 pytest 内建标记: 它们由框架/内建插件注入，不算
+#   "未注册的自定义标记"，故在完整性检查里显式豁免。
+# ===========================================================================
+
+# 收集统计在 config.stash 中的键（跨钩子传递的唯一通道）
+COLLECTION_STATS_STASH_KEY: pytest.StashKey["CollectionStats"] = pytest.StashKey()
+
+# 摘要行前缀（终端里定位本平台输出的锚点）
+COLLECTION_SUMMARY_PREFIX = "[TestMatrix]"
+
+# 业务标记（pytest.ini markers 段注册的四个）
+TRACKED_MARKERS: tuple[str, ...] = ("smoke", "regression", "api", "slow")
+
+# pytest 内建标记（不做"未注册"判定）
+BUILTIN_MARKERS: frozenset[str] = frozenset({
+  "parametrize",
+  "skip",
+  "skipif",
+  "xfail",
+  "usefixtures",
+  "filterwarnings",
+})
+
+
+@dataclass(frozen=True)
+class CollectionStats:
+  """
+  一次收集的统计快照（不可变，跨钩子只读传递）
+
+  属性:
+    total (int): 本次收集的用例总数
+    marker_counts (dict[str, int]): 已注册标记名 -> 命中用例数；同一用例
+      带同名标记多次时按标记出现次数计；未出现在任何用例上的标记
+      不会进字典（摘要行按 TRACKED_MARKERS 取值，缺省显示 0）
+    module_counts (dict[str, int]): 测试模块 __name__ -> 该模块用例数
+    unregistered_marker_counts (dict[str, int]): 未注册标记名 -> 命中用例数
+      （正常情况下恒为空: `--strict-markers` 会在收集期直接报错）
+  """
+
+  total: int
+  marker_counts: dict[str, int]
+  module_counts: dict[str, int]
+  unregistered_marker_counts: dict[str, int]
+
+
+def registered_marker_names(config: Any) -> frozenset[str]:
+  """
+  取本次会话已注册的标记名集合（pytest.ini 的 markers 段 + pytest 内建标记）
+
+  参数:
+    config (Any): pytest 的 Config 对象。与 apply_per_run_allure_dir 同款
+           口径: 本模块被每一个 pytest 进程导入（含嵌套运行），
+           取用面只有 getini 一个鸭子类型方法。
+
+  返回:
+    frozenset[str]: 已注册标记名；ini 读取失败时只返回内建标记集合
+            （完整性检查是排查辅助，绝不因此阻断会话）
+
+  异常:
+    无
+  """
+  names = set(BUILTIN_MARKERS)
+  try:
+    for entry in config.getini("markers"):
+      # ini 条目形如 "smoke: 冒烟测试用例"，标记名是冒号前的那一段
+      name = str(entry).split(":", 1)[0].strip()
+      if name:
+        names.add(name)
+  except Exception: # noqa: BLE001 读不到 markers 配置就不做完整性检查
+    pass
+  return frozenset(names)
+
+
+def module_name_of(item: Any) -> str:
+  """
+  取用例所属测试模块名（排序一级键、模块分组键）
+
+  非 Python 节点（如 doctest 类 Item）的 `item.module` 可能不存在，
+  故一律用"取不到就是空串"的口径——排序只求确定性，不追求覆盖面。
+
+  参数:
+    item (Any): pytest 的 Item（或测试用的鸭子类型替身）
+
+  返回:
+    str: 模块的 __name__；取不到时返回空串
+
+  异常:
+    无
+  """
+  return str(getattr(getattr(item, "module", None), "__name__", ""))
+
+
+def class_name_of(item: Any) -> str:
+  """
+  取用例所属测试类名（排序二级键）
+
+  参数:
+    item (Any): pytest 的 Item（或测试用的鸭子类型替身）
+
+  返回:
+    str: 类名；模块级用例（item.cls 为 None）返回空串（空串最小，
+       故同一模块内模块级用例永远排在类的成员之前）
+
+  异常:
+    无
+  """
+  return str(getattr(getattr(item, "cls", None), "__name__", ""))
+
+
+def collection_sort_key(item: Any) -> tuple[str, str, str]:
+  """
+  收集排序键: (模块名, 类名, 用例名) 三级字典序
+
+  参数:
+    item (Any): pytest 的 Item（或测试用的鸭子类型替身）
+
+  返回:
+    tuple[str, str, str]: 三级排序键
+
+  异常:
+    无
+  """
+  return (
+    module_name_of(item),
+    class_name_of(item),
+    str(getattr(item, "name", "")),
+  )
+
+
+def build_collection_stats(
+  items: Iterable[Any], registered: frozenset[str]
+) -> CollectionStats:
+  """
+  统计本次收集的用例分布（纯函数，不触碰任何全局状态）
+
+  统计口径:
+    - marker: 按 `item.iter_markers()` 逐个计数（同一用例带多个标记则各计一次）
+    - 模块: 按 module_name_of(item)（即模块 __name__）分组计数
+    - 未注册标记: 命中 registered 之外的标记名时登记（正常恒为空）
+
+  刻意不用 `item.keywords` 判定标记: keywords 里混着节点名（模块名/类名/
+  函数名）与 pytestmark 这类元键，直接当标记用会把这些名字误判成
+  "未注册标记"；`iter_markers()` 才只给真实标记。未注册标记本就由
+  `--strict-markers` 在收集期拦截，本函数只做**存在性登记**，
+  既不重复报错，也不做"标记了 slow 是否真的耗时较长"的耗时判定（本次范围外）。
+
+  参数:
+    items (Iterable[Any]): 用例序列
+    registered (frozenset[str]): 已注册标记名集合
+
+  返回:
+    CollectionStats: 不可变统计快照
+
+  异常:
+    无
+  """
+  marker_counts: dict[str, int] = {}
+  module_counts: dict[str, int] = {}
+  unregistered_marker_counts: dict[str, int] = {}
+  total = 0
+  for item in items:
+    total += 1
+    module_name = module_name_of(item)
+    module_counts[module_name] = module_counts.get(module_name, 0) + 1
+    for mark in item.iter_markers():
+      name = str(getattr(mark, "name", ""))
+      if not name:
+        continue
+      if name in registered:
+        marker_counts[name] = marker_counts.get(name, 0) + 1
+      else:
+        unregistered_marker_counts[name] = (
+          unregistered_marker_counts.get(name, 0) + 1
+        )
+  return CollectionStats(
+    total=total,
+    marker_counts=marker_counts,
+    module_counts=module_counts,
+    unregistered_marker_counts=unregistered_marker_counts,
+  )
+
+
+def format_collection_summary(stats: CollectionStats) -> str:
+  """
+  生成一行收集摘要（终端输出用）
+
+  格式: [TestMatrix] 收集 N 用例：smoke=a / regression=b / api=c / slow=d，模块=M
+  仅当出现未注册标记时追加"，未注册标记=名称×次数、…"——正常情况不出现，
+  一旦出现即说明完整性检查真的抓到了 `--strict-markers` 之外的东西。
+
+  参数:
+    stats (CollectionStats): 收集统计快照
+
+  返回:
+    str: 单行摘要（不含换行符）
+
+  异常:
+    无
+  """
+  tracked = " / ".join(
+    f"{name}={stats.marker_counts.get(name, 0)}" for name in TRACKED_MARKERS
+  )
+  line = (
+    f"{COLLECTION_SUMMARY_PREFIX} 收集 {stats.total} 用例：{tracked}，"
+    f"模块={len(stats.module_counts)}"
+  )
+  if stats.unregistered_marker_counts:
+    detail = "、".join(
+      f"{name}×{count}"
+      for name, count in sorted(stats.unregistered_marker_counts.items())
+    )
+    line = f"{line}，未注册标记={detail}"
+  return line
+
+
+def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:
+  """
+  收集阶段钩子：三级字典序稳定排序 + 收集统计 + 标记完整性检查
+
+  执行时机: 收集阶段，全部用例收集完成之后、任何用例执行之前。
+    排在 `pytest_configure`（配置阶段）之后、`pytest_sessionfinish`
+    （会话收尾）之前；tests/conftest.py 没有本钩子，不存在同名竞争。
+
+  职责:
+    ①**稳定排序**: 按 (模块名, 类名, 用例名) 三级字典序对 items **就地**
+     排序，消除文件系统遍历顺序差异带来的执行顺序漂移，为 Day58
+     xdist 并发的结果归位与 Day56 插件的结果上报提供确定性基线。
+     `list.sort` 是稳定排序: 三级键完全相同的用例保持收集时的相对顺序
+     （同一用例的多组参数因此仍按定义顺序执行）。
+    ②**收集统计**: 统计 marker 分布 / 模块分布 / 总数，写入 `config.stash`
+     （键为 COLLECTION_STATS_STASH_KEY），由 `pytest_sessionfinish` 读取输出。
+    ③**标记完整性检查**: 登记已注册标记的使用情况与未注册标记（见
+     `build_collection_stats` 的口径说明）。
+
+  刻意不抛异常: 排序与统计都是旁路能力，任何一步意外都不该把整轮收集搞挂
+  （与 Day53 的 Allure 目录修复同一口径）。
+
+  参数:
+    config (Any): pytest 的 Config 对象（框架传入）
+    items (list[Any]): 本次收集到的用例列表；pytest 传入的就是会话持有的
+             同一个 list，就地排序即对后续执行生效
+
+  返回:
+    无
+  """
+  try:
+    registered = registered_marker_names(config)
+    items.sort(key=collection_sort_key)
+    config.stash[COLLECTION_STATS_STASH_KEY] = build_collection_stats(
+      items, registered
+    )
+  except Exception: # noqa: BLE001 排序/统计失败不得阻断整轮收集
+    return
+
+
+def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
+  """
+  会话收尾钩子：输出一行收集摘要（读 pytest_collection_modifyitems 的统计）
+
+  执行时机: 会话阶段收尾，且在 pytest 自身的终端汇总之前（conftest 的钩子
+    实现后注册先执行）。与 tests/conftest.py 的同名钩子各自执行、互不覆盖:
+    本钩子只读 `config.stash` 里的收集统计、不碰会话结果与退出码。
+  `--collect-only` 同样会走到本钩子（统计在收集期已写好），故"只看收集"
+  的场景也能看到摘要（Day55 验收第 4 条据此）。
+
+  参数:
+    session (Any): pytest 的 Session 对象（框架传入）
+    exitstatus (int): pytest 退出码；本钩子只输出摘要，绝不影响它
+
+  返回:
+    无
+
+  异常:
+    无（无统计或终端插件缺失时静默跳过）
+  """
+  config = getattr(session, "config", None)
+  stash = getattr(config, "stash", None)
+  if stash is None:
+    return
+  stats = stash.get(COLLECTION_STATS_STASH_KEY, None)
+  if stats is None:
+    return
+  terminal = config.pluginmanager.get_plugin("terminalreporter")
+  if terminal is None:
+    # `-p no:terminal` 等场景: 本就没有终端可写，静默跳过。
+    # 刻意不用 print（项目铁律: 日志走 loguru，不散落 print）
+    return
+  # 走终端写入器而非 print，保证在 pytest 的输出捕获机制下依然可见
+  terminal.write_line(format_collection_summary(stats))
