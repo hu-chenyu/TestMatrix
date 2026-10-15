@@ -106,20 +106,28 @@ class SessionExecutionStats:
   """
   会话级执行统计（可变容器，被 `pytest_runtest_logreport` 逐条累加）
 
-  计数口径（与 pytest 自身的终端汇总对齐）:
+  计数口径（与 pytest 自身的终端汇总对齐，**按阶段报告条数**累加，不按用例去重）:
     - call 阶段 passed / failed / skipped 直接计入对应计数
-    - setup / teardown 阶段 failed 计入 `errors`（用例没能正常跑完）
+    - setup / teardown 阶段 failed 计入 `errors`: 每收到一条失败的阶段报告计 1 条
     - setup 阶段 skipped 计入 `skipped`（fixture 级跳过不会进 call 阶段）
+
+  因此各计数之间并非严格互斥、`total` 也可能**大于实际收集用例数**:
+    - 同一用例 setup 与 teardown 都失败时 `errors` 为 2（阶段报告两条）；
+    - 用例 call 阶段通过、teardown 阶段失败时，`passed` 与 `errors` 各计 1。
+  这是 pytest 自身口径（它的终端汇总同样把 setup/teardown 的 error 与用例
+  结果分列），报告侧对齐它是为了"报告数字可与 pytest 输出逐项对账"。
 
   属性:
     started_monotonic (float): 会话开始的单调时钟读数（time.perf_counter）
     report_count (int): 收到的阶段报告总条数（含 setup / call / teardown）
-    passed (int): 通过的用例数
+    passed (int): call 阶段通过的用例数
     failed (int): call 阶段失败的用例数
-    skipped (int): 被跳过的用例数
-    errors (int): setup / teardown 阶段失败（含 fixture 报错）的用例数
+    skipped (int): 被跳过的用例数（call 阶段跳过 + fixture 级 setup 跳过）
+    errors (int): setup / teardown 阶段失败的**阶段失败条数**（含 fixture 报错；
+      同一用例两个阶段都失败时计 2 条，故不等于"失败的用例数"）
     phase_counts (dict[str, dict[str, int]]): 阶段 -> outcome -> 条数
-    failed_cases (list[dict[str, Any]]): 失败/错误用例明细（nodeid + 阶段 + 耗时）
+    failed_cases (list[dict[str, Any]]): 失败/错误明细（nodeid + 阶段 + 耗时；
+      同一用例多个阶段失败会出现多条，与 `errors` 口径一致）
   """
 
   started_monotonic: float = 0.0
@@ -134,7 +142,11 @@ class SessionExecutionStats:
   @property
   def total(self) -> int:
     """
-    用例总数（四类计数之和，不含阶段报告条数）
+    四类计数之和（passed + failed + errors + skipped）
+
+    注意这是**结果条数**口径而非"用例数"口径: `errors` 按阶段失败条数计
+    （见类 docstring），且各类之间不保证互斥（用例 call 通过 + teardown
+    失败会同时计入 `passed` 与 `errors`），故本值可能大于实际收集用例数。
 
     参数:
       无
