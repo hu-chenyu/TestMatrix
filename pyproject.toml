@@ -9,11 +9,28 @@
 # 本文件不声明运行期依赖：依赖以 requirements.txt 为唯一事实来源，零新增外部包
 # ==============================================================================
 
+# ------------------------------ 构建后端（Day56 新增） ------------------------------
+# 为什么必须显式声明: pytest11 entry point 只有**安装后**才能被 pytest 发现，
+# 而本仓没有 setup.py / setup.cfg，缺 [build-system] 时 pip 会走 legacy 路径
+# 并报错（无法确定构建后端）。requires 只声明 setuptools，不额外引入其它
+# 构建期依赖；editable 构建本身还需要 wheel（由 setuptools 的构建后端声明
+# 并在构建隔离环境里自动准备），故安装命令走默认构建隔离即可。
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "TestMatrix"
 version = "0.1.0"
 description = "测试可信度治理平台"
 requires-python = ">=3.11"
+
+# ------------------------------ pytest 插件注册（Day56 新增） ------------------------------
+# 插件模块: src/testmatrix_plugin/__init__.py（src 布局，包发现见文件末尾的
+# [tool.setuptools] 段）。安装后由 pytest 自动加载（无需任何 conftest import）；
+# `-p no:testmatrix` 可显式禁用。entry point 名即 pytest 侧看到的插件名。
+[project.entry-points."pytest11"]
+testmatrix = "testmatrix_plugin"
 
 # ------------------------------ pytest 配置（与 pytest.ini 同口径备份） ------------------------------
 [tool.pytest.ini_options]
@@ -89,3 +106,14 @@ module = [
   "fakeredis.*",
 ]
 ignore_missing_imports = true
+
+# ------------------------------ setuptools 包发现（Day56 新增） ------------------------------
+# src 布局 + 白名单式发现: 只把本插件包纳入分发。common/core/db/web/scripts
+# 保持"由项目根 sys.path 以 src.xxx 形式导入"的既有形态——若把它们一并安装，
+# 会在 site-packages 里暴露 web/core/db 这类极易与外部库相撞的顶层名。
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["testmatrix_plugin*"]
