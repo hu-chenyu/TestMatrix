@@ -21,8 +21,16 @@ TestMatrix 平台专用 pytest 插件的验收测试（Day56 任务二）
 都有真实的非零观测值；探针文件写在 `output/` 下（已被 .gitignore 覆盖），
 因为只有那里才处在项目根 conftest 的祖先链上——收集统计的对接链路正是靠
 那一份 conftest 写入的 stash 数据验证的。
+
+Day57 追加 4 条（打包验证日）:
+  1. **打包契约**: 构建后端声明、白名单包发现对 src/ 下真实目录的筛选语义、
+    三处版本号同口径（pyproject / 插件常量 / 报告）。
+  2. **报告 schema**: 字段集、类型与"无收集统计时给 null"的空值语义。
+  3. **写入失败第二成因**: 父路径被同名文件占用（与既有"目标路径被目录占用"互补）。
+  4. **终端降级**: writer 存在却抛错时的旁路铁律边界（修复前会把异常抛出收尾钩子）。
 """
 
+import fnmatch
 import importlib
 import importlib.metadata
 import json
@@ -87,6 +95,44 @@ def test_probe_skip():
 
 # 收集统计替身的总数（与项目根 conftest 的 CollectionStats 同结构，插件按结构化子类型读）
 FAKE_COLLECTION_TOTAL = 7
+
+# 插件包目录名（`[tool.setuptools.packages.find]` 的 include 必须只命中它）
+PLUGIN_PACKAGE_DIR = "testmatrix_plugin"
+
+# src/ 下的业务子包（必须被白名单挡在分发包之外；前置守卫与断言共用同一份清单）
+BUSINESS_PACKAGE_DIRS: frozenset[str] = frozenset(
+  {"common", "core", "db", "web", "scripts"}
+)
+
+# 报告 JSON 的字段集契约（下游按键取值，缺键会静默取到 None 而不是报错）
+REPORT_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
+  {
+    "schema_version",
+    "plugin",
+    "timestamp",
+    "exit_status",
+    "collection_stats",
+    "execution_stats",
+  }
+)
+REPORT_PLUGIN_KEYS: frozenset[str] = frozenset({"name", "version"})
+REPORT_COLLECTION_KEYS: frozenset[str] = frozenset(
+  {"total", "marker_counts", "module_counts", "unregistered_marker_counts"}
+)
+REPORT_EXECUTION_KEYS: frozenset[str] = frozenset(
+  {
+    "total",
+    "passed",
+    "failed",
+    "errors",
+    "skipped",
+    "duration",
+    "report_count",
+    "failed_cases",
+    "phase_counts",
+  }
+)
+REPORT_FAILED_CASE_KEYS: frozenset[str] = frozenset({"nodeid", "phase", "duration"})
 
 
 @dataclass(frozen=True)
@@ -207,6 +253,28 @@ class _RecordingParser:
       无
     """
     self.registered.append((name, type, default))
+
+
+class _ExplodingTerminal:
+  """
+  写一行即抛错的 terminalreporter 替身
+
+  模拟"writer 存在但已不可写"（终端关闭 / 输出管道断开）——它与
+  "没有 writer"（`-p no:terminal`）是两种不同成因，前者此前未被覆盖。
+  """
+
+  def write_line(self, message: str) -> None:
+    """
+    参数:
+      message (str): 待输出文本（替身直接抛错）
+
+    返回:
+      无（必然抛错）
+
+    异常:
+      ValueError: 恒抛出，驱动插件收尾钩子的降级分支
+    """
+    raise ValueError(f"终端不可写: {len(message)} 字符")
 
 
 def _report_stub(
@@ -951,3 +1019,193 @@ def test_plugin_does_not_disturb_test_results(
   assert "耗时 0.00s" in plugin.format_plugin_summary(
     {"execution_stats": {"total": 1, "duration": "非数字"}}
   )
+
+
+@allure.feature("Day57 插件打包验证")
+@allure.story("打包契约")
+@allure.title("打包元数据把业务子包挡在分发之外，且三处版本号同口径")
+def test_packaging_metadata_whitelists_only_plugin_package(
+  plugin: ModuleType, probe_run: ProbeRun
+) -> None:
+  """
+  静态声明（无条件执行，CI 未安装本项目时同样生效）:
+    1. `[build-system]` 必须声明 setuptools 构建后端——本仓没有 setup.py /
+      setup.cfg，缺这一段时 pip 会走 legacy 路径直接报"无法确定构建后端"。
+    2. `[project]` 的版本必须与插件常量、以及真实报告里的 `plugin.version`
+      三处同口径——"装的 0.1.0 但报告写 0.2.0"这类漂移只能靠断言发现。
+    3. 白名单包发现的**语义**要拿 `src/` 下的真实目录逐一匹配验证: include
+      规则命中的目录集合必须恰好是插件包。只断言配置文本等于某字面量的话，
+      "配置没动但 src 下新增了一个业务包"这种情况会被整个漏掉。
+
+  补充证据（仅本项目已安装时）: `importlib.metadata` 记录的发行文件里不得出现
+  业务子包路径——这是"装出来的东西真的只含插件"的产物级证据；
+  CI 不安装本项目，该条件分支不触发，而上面的静态断言已覆盖注册契约。
+  """
+  pyproject = tomllib.loads(
+    (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+  )
+  build_system = pyproject["build-system"]
+  assert build_system["build-backend"] == "setuptools.build_meta"
+  assert any(
+    requirement.startswith("setuptools") for requirement in build_system["requires"]
+  ), build_system["requires"]
+
+  project = pyproject["project"]
+  assert project["name"] == "TestMatrix"
+  assert project["version"] == plugin.PLUGIN_VERSION
+  assert probe_run.report()["plugin"]["version"] == plugin.PLUGIN_VERSION
+
+  setuptools_config = pyproject["tool"]["setuptools"]
+  assert setuptools_config["package-dir"] == {"": "src"}
+  find_config = setuptools_config["packages"]["find"]
+  assert find_config["where"] == ["src"]
+  patterns = find_config["include"]
+
+  src_dirs = {
+    path.name
+    for path in (PROJECT_ROOT / "src").iterdir()
+    if path.is_dir() and path.name != "__pycache__"
+  }
+  # 前置守卫: 业务子包与插件包都必须真实存在，否则下面的"都不命中"会退化成永真
+  assert BUSINESS_PACKAGE_DIRS <= src_dirs, sorted(src_dirs)
+  assert PLUGIN_PACKAGE_DIR in src_dirs, sorted(src_dirs)
+
+  matched = {
+    name
+    for name in src_dirs
+    if any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+  }
+  assert matched == {PLUGIN_PACKAGE_DIR}, sorted(matched)
+
+  try:
+    distribution = importlib.metadata.distribution("TestMatrix")
+  except importlib.metadata.PackageNotFoundError:
+    distribution = None
+  if distribution is not None:
+    recorded = distribution.files or []
+    top_levels = {path.parts[0] for path in recorded if path.parts}
+    assert not (top_levels & BUSINESS_PACKAGE_DIRS), sorted(top_levels)
+
+
+@allure.feature("Day57 插件打包验证")
+@allure.story("结果上报")
+@allure.title("报告 JSON 的字段集、类型与空值语义稳定")
+def test_report_payload_schema_is_complete_and_stable(
+  plugin: ModuleType, probe_run: ProbeRun
+) -> None:
+  """
+  端到端: 真实会话报告逐层核对字段集与类型，`phase_counts` 固定输出
+  setup / call / teardown 三键（下游按键取值不必先判存在性）。
+
+  直接驱动: 没有收集统计（项目根 conftest 未加载）时 `collection_stats`
+  必须是 **null 而不是缺键**——缺键与"读不到统计"在消费侧不可区分，
+  而这两件事的处置完全不同；空会话的计数为 0、耗时为 0.0，整份 payload
+  可直接 json.dumps（报告的下游形态就是磁盘上的 JSON）。
+  """
+  report = probe_run.report()
+  assert set(report) == REPORT_TOP_LEVEL_KEYS
+  assert set(report["plugin"]) == REPORT_PLUGIN_KEYS
+  assert set(report["collection_stats"]) == REPORT_COLLECTION_KEYS
+
+  execution = report["execution_stats"]
+  assert set(execution) == REPORT_EXECUTION_KEYS
+  assert set(execution["phase_counts"]) == set(plugin.EXECUTION_PHASES)
+
+  assert isinstance(report["schema_version"], int)
+  assert report["schema_version"] == plugin.REPORT_SCHEMA_VERSION
+  assert isinstance(report["exit_status"], int)
+  assert isinstance(report["timestamp"], str)
+  for counter in ("total", "passed", "failed", "errors", "skipped", "report_count"):
+    assert isinstance(execution[counter], int), counter
+  assert isinstance(execution["duration"], float)
+  assert isinstance(execution["failed_cases"], list)
+  for failed_case in execution["failed_cases"]:
+    assert set(failed_case) == REPORT_FAILED_CASE_KEYS, failed_case
+    assert isinstance(failed_case["duration"], float)
+  for phase_counts in execution["phase_counts"].values():
+    assert all(isinstance(count, int) for count in phase_counts.values())
+
+  empty = plugin.build_report_payload(plugin.SessionExecutionStats(), None, 0, 0.0)
+  assert empty["collection_stats"] is None
+  assert empty["execution_stats"] == {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "duration": 0.0,
+    "report_count": 0,
+    "failed_cases": [],
+    "phase_counts": {phase: {} for phase in plugin.EXECUTION_PHASES},
+  }
+  assert json.dumps(empty, ensure_ascii=False)
+
+
+@allure.feature("Day57 插件打包验证")
+@allure.story("结果上报")
+@allure.title("报告写入失败的第二成因（父路径被同名文件占用）同样只降级不抛错")
+def test_write_report_file_degrades_when_parent_is_not_directory(
+  plugin: ModuleType, tmp_path: Path
+) -> None:
+  """
+  契约是"失败只回传错误描述、绝不抛异常"，两个成因必须都验: "目标路径已被
+  同名目录占用"（既有断言）与**父路径被同名文件占用**（`mkdir` 在真正写文件
+  之前就抛 `OSError`，Windows 实测为 FileExistsError）。只测前者会让
+  `mkdir` 这一步的异常处理失去牙齿。
+
+  同时断言那个占位文件**未被改写**：降级路径不得顺手删掉或覆盖别人的文件，
+  否则"报告写不出去"会升级成"写坏了一个无关文件"。
+  """
+  occupied = tmp_path / "plain.txt"
+  original = "占位文件，不是目录"
+  occupied.write_text(original, encoding="utf-8")
+  target = occupied / "nested" / "report.json"
+
+  write_error = plugin.write_report_file(target, {"ok": False})
+
+  assert write_error is not None
+  # 契约格式为 `<异常类型>: <消息>`，异常类型名以 Error 结尾（跨平台同为 OSError 子类）
+  assert write_error.split(":")[0].endswith("Error"), write_error
+  assert not target.exists()
+  assert occupied.is_file()
+  assert occupied.read_text(encoding="utf-8") == original
+
+
+@allure.feature("Day57 插件打包验证")
+@allure.story("旁路铁律边界")
+@allure.title("终端 writer 抛错时会话收尾仍安全返回且报告照常落盘")
+def test_emit_message_survives_terminal_writer_failure(
+  plugin: ModuleType, tmp_path: Path
+) -> None:
+  """
+  旁路铁律的边界: "终端**没有** writer"已有降级（`-p no:terminal` 时静默跳过），
+  但"writer 存在却写失败"（终端已关闭 / 输出管道断开）此前会把异常抛出收尾钩子
+ ——那等于让展示层故障升级成会话故障（pytest 会记成 INTERNALERROR），
+  与"任何一步意外都只降级为一条提示、绝不改变退出码与用例结果"的承诺相反。
+
+  本用例驱动修复后的行为: 摘要丢弃、报告仍落盘、会话状态仍被清空
+  （清空在钩子末尾，异常一旦穿透就等于状态残留给下一次同进程会话）。
+  """
+  report_path = tmp_path / "broken_terminal_report.json"
+  values = {
+    plugin.INI_REPORT_PATH: str(report_path),
+    plugin.INI_REPORT_ENABLED: True,
+    plugin.INI_SUMMARY_ENABLED: True,
+  }
+  broken_config = SimpleNamespace(
+    rootpath=tmp_path,
+    getini=lambda name: values[name],
+    pluginmanager=SimpleNamespace(
+      get_plugins=lambda: set(),
+      get_plugin=lambda name: _ExplodingTerminal(),
+    ),
+    stash=pytest.Stash(),
+  )
+
+  plugin._STATE.start_session(broken_config)
+  plugin.pytest_sessionfinish(SimpleNamespace(config=broken_config), 0)
+
+  assert report_path.is_file()
+  assert json.loads(report_path.read_text(encoding="utf-8"))["exit_status"] == 0
+  assert plugin._STATE.stats is None
+  assert plugin._STATE.config is None
