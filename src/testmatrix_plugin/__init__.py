@@ -31,9 +31,11 @@ TestMatrix 平台专用 pytest 插件（Day56）
 
 四、旁路铁律:
 
-    报告写不出、收集统计读不到、终端没有 writer——任何一步意外都只降级为
-    一条终端提示，**绝不改变 pytest 的退出码与任何用例结果**（与通知旁路、
-    Allure 目录修复同一口径）。
+    报告写不出、收集统计读不到、终端不可用（没有 writer，或 writer 写失败）
+    ——任何一步意外都只降级为一条终端提示或静默跳过，**绝不改变 pytest 的
+    退出码与任何用例结果**（与通知旁路、Allure 目录修复同一口径）。
+    "writer 写失败"这一条是 Day57 打包验证时由补测实测补上的：原文只写了
+    "没有 writer"，而终端关闭/管道断开时 writer 是存在却会抛错的。
 
 五、终端摘要行的格式约束:
 
@@ -515,11 +517,19 @@ def write_report_file(path: Path, payload: dict[str, Any]) -> str | None:
 
 def emit_message(config: pytest.Config, message: str) -> None:
     """
-    向终端写一行（terminalreporter 缺失时静默跳过）
+    向终端写一行（terminalreporter 缺失或写失败时静默跳过）
 
     走 terminal writer 而不是 print: print 归 pytest 的输出捕获机制管，
     是否出现在终端取决于捕获层级；terminal writer 与 pytest 自身汇总同通道
     （与项目根 conftest 的收集摘要同一口径，项目铁律: 不用 print）。
+
+    两种失败成因都必须吞掉（旁路铁律的完整表述是"终端不可用时不出声、也不出错"）:
+        - **没有 writer**: `-p no:terminal` 时 `get_plugin` 返回 None；
+        - **writer 存在但写失败**: 终端已关闭 / 输出管道断开（真实执行器把子进程
+          stdout 接到管道上，读端先退出即属此例）。该异常若不吞，会从
+          `pytest_sessionfinish` 穿透出去，把"展示层故障"升级成"会话故障"
+          （pytest 记 INTERNALERROR，退出码被改写），与"绝不改变退出码与
+          任何用例结果"的承诺相反——Day57 打包验证时由补测实测逮到并修复。
 
     参数:
         config (pytest.Config): 当前会话配置
@@ -534,7 +544,10 @@ def emit_message(config: pytest.Config, message: str) -> None:
     terminal = config.pluginmanager.get_plugin("terminalreporter")
     if terminal is None:
         return
-    terminal.write_line(message)
+    try:
+        terminal.write_line(message)
+    except Exception:  # noqa: BLE001 终端输出是旁路能力，写不出去不得影响会话收尾
+        return
 
 
 # ===========================================================================
