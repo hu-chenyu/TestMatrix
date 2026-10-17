@@ -175,8 +175,8 @@ jobs:
         id: pytest-run
         # 覆盖率不足/测试失败退出码 1 判红；退出码 5（无测试被收集）同样判红——
         # testpaths 固定为 tests/，0 收集只可能是配置/路径损坏，不设容忍以防静默通过。
-        # -n 2（Day58）：GitHub runner 2 核，2 是安全上限；刻意不用 -n auto——探测位
-        # 3.12 runner 核数不确定，auto 会让并发度随机器漂移（行为与耗时不可复现）。
+        # -n 2（Day58）：固定并发度，保证 CI 耗时可复现；刻意不用 -n auto——runner 核数
+        # 不确定（公开/私有仓库规格不同，探测位亦然），auto 会让并发度随机器漂移。
         # pytest-cov 原生支持 xdist（worker 各自采集、master 合并），allure-pytest 的
         # --alluredir 由根 conftest 改写成 per-run 目录、各进程互不冲突，均无需额外参数。
         run: |

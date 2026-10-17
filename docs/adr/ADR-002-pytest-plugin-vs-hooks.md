@@ -2,6 +2,7 @@
 
 - 状态：已接受
 - 日期：2026-10-17（Day57，打包验证日即时写）
+- 更新：2026-10-18（Day58 落地 xdist 兼容，决策 7 由"边界声明"改为"已支持"；Day58-fix 补记已知限制）
 - 相关实现：`src/testmatrix_plugin/__init__.py`、`pyproject.toml`（build-system + entry point + 包发现）
 - 相关前置：`docs/adr/ADR-001-real-executor-integration.md`（真实执行器选型）、项目根 `conftest.py`（Day55 收集期钩子）
 - 命名说明：本文件按当日任务指定的 `ADR-002-*.md` 落地。与 ADR-001 同源，`docs/adr/` 既有的四位小写编号体系（`0001-` / `0002-`）待 D59 复盘统一处置，本日不改名、不动索引文件。
@@ -82,7 +83,7 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
 | 4 | 可复用性 | **与业务代码物理隔离**（独立 src 包 + 白名单式包发现） | 插件放进 `src/common` 或 `src/core` 一起分发 |
 | 5 | 测试隔离 | **双路径验证**：纯函数直接驱动 + 嵌套 pytest 真跑子进程 | 只做嵌套端到端；只做单元驱动 |
 | 6 | 打包验证 | **标准 `build` + 干净 venv 安装 + `twine check`** | 只验证 `pip install -e .` 可用 |
-| 7 | xdist 兼容性 | **显式声明"当前不支持"，Day58 评估改造** | 现在就预埋多进程支持 |
+| 7 | xdist 兼容性 | **Day58 已支持**：worker 零副作用 + master 唯一落盘/摘要 + 收集统计由 worker 上报合并（Day57 曾把"不支持"作为边界） | 继续声明不支持；Day57 时的"现在就预埋多进程支持" |
 
 ---
 
@@ -181,20 +182,42 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
 | 用 `--config-settings editable_mode=strict` 收紧 | setuptools 65 的 strict 模式把包复制到 `build/` 下，模块从副本加载（改源码不生效、必须重装），属"为干净引入更难维护的形态" |
 | 标准构建 + 干净环境安装（选定） | 唯一能同时验证"产物内容"与"装完能用"的路径；代价是每次多一个 venv 与约 15 秒构建时间 |
 
-### 决策 7：xdist 兼容性——当前不支持，显式声明为边界
+### 决策 7：xdist 兼容性——Day58 已支持（原为边界声明）
 
-- **选择**：Day57 明确声明当前插件**不支持** xdist 多进程并发；Day58 接入 xdist 时评估改造。
-- **已知冲突机制（两条，均与设计假设直接相关）**：
+- **状态**：Day57 声明"当前不支持"作为边界；**Day58 已完成改造，插件支持 xdist 多进程并发
+  （`-n`），串行（不传 `-n`）行为与 Day57 完全一致**。
+- **Day57 的边界声明与两条冲突机制（存档）**：
   1. **模块级 `_STATE` 单例是"单进程单会话"假设**：每个 worker 是独立进程，各自持一份
      `_STATE`，因此各进程的统计只覆盖自己执行的用例；
   2. **报告路径固定**（默认 `output/testmatrix_report.json`）：多进程写同一个文件，
      最终内容取决于写盘先后。
-- **实测（`-n 2` 跑 4 条用例，本机 pytest-xdist 3.5.0）**：stdout 只出现 1 行会话摘要，
-  数值为主进程的汇总口径（4 用例）；最终报告 `collection_stats` 为 `null`，
-  `execution_stats` 为完整汇总——即"最终留下的是哪个进程的那一份"是时序产物而非设计保证。
-  收集侧统计在 xdist 主进程不可得的**精确机制**（收集期钩子在主进程与工作进程的分布）留待 Day58 实测确认。
-- **为什么不在今天预埋**：多进程下的正确形态（汇总归口、每进程独立报告、worker 维度标识）
-  依赖 Day58 的 xdist 接入方案，提前设计等于为不确定需求付代价；先声明边界、再按实际接入改造。
+  当时的实测（`-n 2` 跑 4 条用例，pytest-xdist 3.5.0）：stdout 只出现 1 行会话摘要、
+  数值为主进程汇总口径，最终报告 `collection_stats` 为 `null`、`execution_stats` 为完整汇总
+  ——"最终留下的是哪个进程的那一份"是时序产物而非设计保证。
+- **Day58 的实现要点**：
+  1. **worker 零副作用**：worker 的 `pytest_sessionfinish` 直接返回（不写报告、不输出摘要、
+     不清状态）。进程角色判定用 `workerinput` / `workeroutput` 两个 xdist 只注入给 worker 的
+     通道属性，`PYTEST_XDIST_WORKER` 环境变量仅作替身配置兜底——该变量会被子进程继承，
+     单凭它判定会把嵌套 pytest / 执行器子进程误判成 worker（报告静默不落盘）。
+  2. **master 唯一写报告 + 唯一输出摘要**：报告仍是单一固定路径，多进程共写冲突在结构上消除；
+     执行侧统计天然是全量口径（worker 把每条阶段报告回传 master，master 的
+     `pytest_runtest_logreport` 累加到的就是整场会话）。
+  3. **worker → master 的收集统计上报通道**：xdist 的 master **不做收集**（`DSession.pytest_collection`
+     直接 `return True`），故 master 不会执行根 conftest 的 `pytest_collection_modifyitems`、
+     stash 里也没有统计；真正持有完整统计的是 worker。worker 在 `pytest_collection_finish`
+     把统计写进 `config.workeroutput`，master 在 `pytest_testnodedown`
+     （`@pytest.hookimpl(optionalhook=True)`，未装 xdist 时不报"未知钩子"）收下并合并。
+  4. **合并口径是"取 total 更大的一份"而非相加**：各 worker 收集的是整场会话的完整用例集
+     （只执行其中一部分），N 份同口径统计相加会把总数放大 N 倍；total 更大者优先还能在
+     "某 worker 收集不完整"时取到最接近完整会话的那一份，且结果确定。
+- **已知限制（Day58-fix 记录）**：`-n` 模式下**项目根 conftest 的收集摘要行不输出**——
+  master 没有 stash 统计（`stats is None` 即返回），worker 虽有统计但其 `write_line`
+  不会被转发到 master 终端。Day58-fix 因此在 conftest 的 `pytest_sessionfinish` 入口显式加
+  worker 守卫（早退），把这个事实写成代码而不是留给"恰好读不到"；`-n` 模式的会话级信息由
+  插件"会话完成"摘要承担。若要恢复该摘要，需要 conftest 侧也接一条 worker→master 上报
+  （不在当前范围）。
+- **为什么 Day57 不预埋**（存档）：多进程下的正确形态依赖实际的 xdist 接入方案，
+  提前设计等于为不确定需求付代价；先声明边界、再按实际接入改造。
 
 ---
 
@@ -227,7 +250,8 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
   标记完整性检查、收集摘要输出。插件只**消费**这些统计，不重算、不替代。
 - 插件不参与任何判定：报告写不出、统计读不到、终端不可用时一律只降级，
   **绝不改变 pytest 退出码与任何用例结果**。
-- **xdist 多进程并发不在当前支持范围内**（见决策 7 的两条冲突机制与实测记录）。
+- **xdist 多进程并发已在 Day58 支持**（worker 零副作用 + master 唯一落盘/摘要 + 收集统计由
+  worker 上报合并；已知限制见决策 7：`-n` 下根 conftest 的收集摘要不输出）。
 
 ### 实测证据清单（可复现）
 

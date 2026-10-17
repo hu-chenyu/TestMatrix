@@ -530,6 +530,16 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     `--collect-only` 同样会走到本钩子（统计在收集期已写好），故"只看收集"
     的场景也能看到摘要（Day55 验收第 4 条据此）。
 
+    xdist 下本摘要**不输出**（Day58-fix，实测口径）: ①xdist 的 master 不做收集
+    （其在 `pytest_collection` 里直接 return True），master 的 stash 里没有统计，
+    走到下面 `stats is None` 就会返回；②worker 虽然有统计，但它的终端写入不会被
+    转发到 master 终端。故 `-n` 模式下会话级信息由插件（`testmatrix_plugin`）的
+    "会话完成"摘要承担。这里在入口显式加 worker 守卫，是把这个事实写成代码而不是
+    留给"恰好读不到"，顺带省掉 worker 侧一次无意义的终端写。
+    判定就地写 `hasattr(config, "workerinput")`，刻意不 import 插件的同名工具
+    函数——conftest 被每一个 pytest 进程加载，反向依赖插件会把"插件没装/装错版本"
+    变成"整轮收集起不来"。
+
     参数:
         session (Any): pytest 的 Session 对象（框架传入）
         exitstatus (int): pytest 退出码；本钩子只输出摘要，绝不影响它
@@ -541,6 +551,9 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
         无（无统计或终端插件缺失时静默跳过）
     """
     config = getattr(session, "config", None)
+    if config is not None and hasattr(config, "workerinput"):
+        # xdist worker: 摘要写了也到不了 master 终端，直接跳过
+        return
     stash = getattr(config, "stash", None)
     if stash is None:
         return
