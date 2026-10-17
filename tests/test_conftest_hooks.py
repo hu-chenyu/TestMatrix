@@ -15,6 +15,8 @@
     真的写进了当前会话的 stash
   5. 端到端: 真起一个嵌套 pytest，断言 `--collect-only` 的输出顺序已是
     排好序的，且收集摘要行出现在终端输出里
+  6. xdist 守卫（Day58-fix）: worker 进程（config 带 `workerinput`）不输出
+    收集摘要，master/串行仍照常输出（阳性对照），且都不抛异常
 
 为什么用鸭子类型替身而不是构造真实 _pytest Item: 真实 Item 的构造需要会话、
 路径与节点树三者齐备，而本钩子只用 item 的四个属性面（module / cls / name /
@@ -30,6 +32,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import allure
 import pytest
@@ -582,3 +585,49 @@ class TestNestedCollectionEndToEnd:
       ), stdout
     finally:
       shutil.rmtree(probe_dir, ignore_errors=True)
+
+
+@allure.feature("Day58-fix 收集摘要xdist守卫")
+@allure.story("收集摘要输出")
+@allure.title("worker 进程不输出收集摘要，master/串行仍照常输出（阳性对照）")
+def test_sessionfinish_skips_collection_summary_in_xdist_worker(
+  root_conftest: ModuleType, fake_config: _FakeConfig, unsorted_items: list[_FakeItem]
+) -> None:
+  """
+  为什么需要这条守卫（Day58 实测口径）: `-n` 模式下 xdist 的 master 不做收集
+  （其在 `pytest_collection` 里直接 return True），master 的 stash 里没有统计、
+  走到 `stats is None` 就返回；worker 虽有统计，但它的 `write_line` 不会被转发到
+  master 终端。两种情况的结果都是摘要消失，但成因不同——本用例把"worker 侧"
+  这一半用**显式守卫**钉死，避免日后有人误以为它是"恰好读不到"而把统计补回去。
+
+  阳性对照不可省: 同一份 stash、同一个 session 替身，只把 `workerinput` 拿掉，
+  摘要就必须照常输出——否则"没输出"完全可能只是因为终端替身接错了，断言会退化成永真。
+  """
+  root_conftest.pytest_collection_modifyitems(fake_config, unsorted_items)
+  stats = fake_config.stash[root_conftest.COLLECTION_STATS_STASH_KEY]
+  expected_line = root_conftest.format_collection_summary(stats)
+
+  def _session_with(**extra: Any) -> tuple[Any, list[str]]:
+    """构造 session 替身（config 只带 stash 与 terminalreporter 两个取用面）"""
+    emitted: list[str] = []
+    config = SimpleNamespace(
+      stash=fake_config.stash,
+      pluginmanager=SimpleNamespace(
+        get_plugin=lambda name: SimpleNamespace(write_line=emitted.append)
+      ),
+      **extra,
+    )
+    return SimpleNamespace(config=config), emitted
+
+  # 阳性对照: 串行/master 形态（无 workerinput）必须照常输出一行摘要
+  serial_session, serial_lines = _session_with()
+  root_conftest.pytest_sessionfinish(serial_session, 0)
+  assert serial_lines == [expected_line]
+
+  # worker 形态（xdist 只给 worker 注入 workerinput）: 一行都不许写
+  worker_session, worker_lines = _session_with(workerinput={"workerid": "gw0"})
+  root_conftest.pytest_sessionfinish(worker_session, 0)
+  assert worker_lines == []
+
+  # 兜底: config 缺失时同样安全返回（不抛异常、不写终端）
+  root_conftest.pytest_sessionfinish(SimpleNamespace(), 0)
