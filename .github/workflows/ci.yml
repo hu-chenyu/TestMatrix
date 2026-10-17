@@ -29,7 +29,7 @@ on:
 # 测试数下限基线（Day44 P2-15）：只增不减，用于阻断"删测试换绿"。
 # 新增测试后把该值调大到新的收集数；调小需在 PR 中说明等价覆盖理由。
 env:
- TEST_COUNT_BASELINE: "1542"
+ TEST_COUNT_BASELINE: "1573"
 
 jobs:
  test:
@@ -171,12 +171,16 @@ jobs:
      echo "::warning::TestMatrix mypy 全量存量错误 ${baseline_count} 个（趋势基线，只减不增；增量步骤已硬阻断变更文件自身新增错误）"
      echo "全量基线错误数=${baseline_count}（豁免不阻断），mypy 退出码=${baseline_code}"
 
-   - name: pytest 全量回归 + 覆盖率门禁（--cov-fail-under=85，测试数下限断言）
+   - name: pytest 全量回归 + 覆盖率门禁（-n 2 并发，--cov-fail-under=85，测试数下限断言）
     id: pytest-run
     # 覆盖率不足/测试失败退出码 1 判红；退出码 5（无测试被收集）同样判红——
-    # testpaths 固定为 tests/，0 收集只可能是配置/路径损坏，不设容忍以防静默通过
+    # testpaths 固定为 tests/，0 收集只可能是配置/路径损坏，不设容忍以防静默通过。
+    # -n 2（Day58）：GitHub runner 2 核，2 是安全上限；刻意不用 -n auto——探测位
+    # 3.12 runner 核数不确定，auto 会让并发度随机器漂移（行为与耗时不可复现）。
+    # pytest-cov 原生支持 xdist（worker 各自采集、master 合并），allure-pytest 的
+    # --alluredir 由根 conftest 改写成 per-run 目录、各进程互不冲突，均无需额外参数。
     run: |
-     python -m pytest -q --cov=src --cov-report=term-missing --cov-fail-under=85
+     python -m pytest -q -n 2 --cov=src --cov-report=term-missing --cov-fail-under=85
 
    - name: 测试总数下限断言（防止"删测试换绿"）
     # Day44 P2-15。此前 CI 对"测试数以实际运行为准"、不做任何下限校验，

@@ -1,4 +1,4 @@
-"""
+r"""
 TestMatrix 平台专用 pytest 插件（Day56）
 
 一、插件两条能力（与项目根 `conftest.py` 零职责重叠）:
@@ -42,9 +42,29 @@ TestMatrix 平台专用 pytest 插件（Day56）
   摘要刻意不含 nodeid（不含 `::`），否则会被"按 `::` 过滤 nodeid"的收集
   输出解析误当成用例行；耗时写成 `X.XXs` 而不写 `in X.XXs`，避免与
   `src/core/output_parser.py` 的耗时正则（`\bin\s+...`）撞车。
+
+六、xdist 多进程并发（Day58）:
+
+  xdist 下 master 与每个 worker 都会走同一套钩子，但**落盘与终端输出权只归
+  master**: worker 的 `pytest_sessionfinish` 一律直接返回（不写报告、不出摘要、
+  不清状态），故报告仍是单一固定路径、由 master 唯一写入，多进程共写冲突在
+  结构上不存在。进程角色判定见 `_is_xdist_worker`。
+
+  执行侧统计天然是全量口径: worker 把每条阶段报告回传 master，master 的
+  `pytest_runtest_logreport` 累加到的就是整场会话的结果。
+
+  收集侧统计的来路要单独说明（实测结论）: xdist 的 master **不做收集**
+  （其 `pytest_collection` 直接 return True，禁止控制进程收集用例），所以
+  master 既不会执行项目根 conftest 的 `pytest_collection_modifyitems`，
+  stash 里也就没有收集统计——报告里该字段会是 null。真正持有完整统计的是
+  worker（它们各自收集整场会话的全部用例、只执行其中一部分），故由 worker
+  在收集结束时把统计写进 xdist 的 `config.workeroutput` 通道，master 在
+  `pytest_testnodedown` 收下并按"total 更大者优先"合并（各 worker 口径相同，
+  相加会把总数放大 N 倍）。
 """
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -79,6 +99,10 @@ INI_SUMMARY_ENABLED = "testmatrix_summary_enabled"
 
 # 用例执行的三个阶段（pytest 报告里 report.when 的取值域）
 EXECUTION_PHASES: tuple[str, ...] = ("setup", "call", "teardown")
+
+# worker 向 master 上报收集统计时使用的键（走 xdist 的 config.workeroutput 通道）；
+# 前缀带插件名，避免与其它使用 workeroutput 的插件撞键
+WORKER_COLLECTION_STATS_KEY = "testmatrix_collection_stats"
 
 # 结果上报的两类终态: call 阶段失败是 failed，setup/teardown 阶段失败是 error
 FAILURE_OUTCOMES: frozenset[str] = frozenset({"failed"})
@@ -185,10 +209,13 @@ class PluginState:
     config (pytest.Config | None): 当前会话配置（`pytest_runtest_logreport`
       只拿到 report 没有 config，故在配置阶段记下引用）
     stats (SessionExecutionStats | None): 当前会话的执行统计容器
+    worker_collection_stats (dict[str, Any] | None): 仅在 master 进程使用——
+      xdist worker 上报来的收集统计（master 自身不做收集，故没有别的来源）
   """
 
   config: pytest.Config | None = None
   stats: SessionExecutionStats | None = None
+  worker_collection_stats: dict[str, Any] | None = None
 
   def start_session(self, config: pytest.Config) -> None:
     """
@@ -205,6 +232,7 @@ class PluginState:
     """
     self.config = config
     self.stats = SessionExecutionStats()
+    self.worker_collection_stats = None
 
   def clear(self) -> None:
     """
@@ -221,10 +249,58 @@ class PluginState:
     """
     self.config = None
     self.stats = None
+    self.worker_collection_stats = None
 
 
 # 模块级单例（pytest 每个进程只加载一份插件，模块级不可变单例与此语义一致）
 _STATE = PluginState()
+
+
+# ===========================================================================
+# xdist 进程角色判定（Day58）
+# ===========================================================================
+def _is_xdist_worker(config: pytest.Config) -> bool:
+  """
+  判定当前进程是否为 xdist 的 worker 进程（非 master）
+
+  判据（按可靠性排序）:
+    1. `config` 上有 **worker 专有通道属性**——`workerinput`（xdist 官方
+      推荐判据）或 `workeroutput`（worker 结束回传结果用的字典）。这两个
+      属性只由 xdist 的 worker 端在 `remote_initconfig` 里注入，controller
+      与普通串行会话都没有；
+    2. 拿不到 pluginmanager 的替身配置（测试用 `SimpleNamespace` 等）:
+      退回 `PYTEST_XDIST_WORKER` 环境变量；
+    3. 其余情况（有 pluginmanager、但上面两个属性都没有）一律判为 master。
+
+  第 3 条为什么要**盖过**环境变量（实测踩到的坑）: `PYTEST_XDIST_WORKER` 是
+  进程环境变量，会被子进程继承。真实执行器拉起的 pytest 子进程、本文件测试里
+  的嵌套 pytest，只要父进程是 xdist worker 就天然带着这个变量——单凭它判定会
+  把"普通 pytest 进程"误判成 worker，结果是**报告静默不落盘、摘要不输出**。
+  而真正的 worker 必然带第 1 条的通道属性，所以环境变量只作为替身配置下的
+  兜底，绝不在有完整 config 时单独使用。
+
+  为什么必须要这条判定: 插件的报告路径是**固定单一路径**，worker 若照常落盘
+  就是多进程共写同一个文件（最终内容取决于写盘先后）；终端摘要也会被每个
+  进程各打一行。落盘与输出权只归 master，"谁是 master"必须先判得出来。
+
+  参数:
+    config (pytest.Config): 当前会话配置
+
+  返回:
+    bool: worker 进程返回 True；master 或普通串行会话返回 False
+
+  异常:
+    无（判定失败一律按 master 处理，串行行为不受影响）
+  """
+  try:
+    if hasattr(config, "workerinput") or hasattr(config, "workeroutput"):
+      return True
+    if getattr(config, "pluginmanager", None) is None:
+      # 替身/极端场景: 没有任何可自证的通道，只能看环境变量
+      return bool(os.environ.get("PYTEST_XDIST_WORKER", ""))
+  except Exception: # noqa: BLE001 替身对象上取属性抛错时按 master 处理
+    return False
+  return False
 
 
 # ===========================================================================
@@ -321,6 +397,41 @@ def collect_collection_stats(config: pytest.Config) -> dict[str, Any] | None:
   except Exception: # noqa: BLE001 同上
     return None
   return None
+
+
+def merge_worker_collection_stats(
+  current: dict[str, Any] | None, incoming: dict[str, Any] | None
+) -> dict[str, Any] | None:
+  """
+  合并 master 侧已收到的收集统计与某个 worker 新上报的那一份（纯函数）
+
+  合并口径: 取 `total` 更大的一份，相等时保留先到的那一份。
+    为什么不是把各 worker 的统计相加: xdist 的 worker 在收集阶段收集的是
+    **整场会话的完整用例集**（各自收到全部 nodeid、只执行其中一部分），
+    把 N 份同口径统计相加会把总数放大 N 倍。而 `total` 更大者优先，是为了
+    在"某 worker 收集不完整"（配置差异、部分 worker 提前退出）时仍取到
+    最接近完整会话的那一份，同时保持结果确定。
+
+  参数:
+    current (dict[str, Any] | None): master 已记录的统计（可能为空）
+    incoming (dict[str, Any] | None): 本次新上报的统计（可能为空）
+
+  返回:
+    dict[str, Any] | None: 合并结果；两者皆空时返回 None
+
+  异常:
+    无（total 字段缺失或类型异常时按 0 比较，绝不抛错）
+  """
+  if incoming is None:
+    return current
+  if current is None:
+    return incoming
+  try:
+    current_total = int(current.get("total", 0))
+    incoming_total = int(incoming.get("total", 0))
+  except (TypeError, ValueError):
+    return current
+  return incoming if incoming_total > current_total else current
 
 
 # ===========================================================================
@@ -494,6 +605,15 @@ def write_report_file(path: Path, payload: dict[str, Any]) -> str | None:
   """
   把报告写入磁盘（失败只回传错误描述，绝不抛异常）
 
+  捕获的异常类型不是只有 `OSError`（Day58 P4-2）:
+    - `OSError`: 目录建不出来 / 文件写不进去（目标被目录占用、父路径被
+     同名文件占用、磁盘写失败）；
+    - `TypeError`: `json.dumps` 遇到不可序列化对象（payload 里混进了自定义
+     对象或函数时抛）；
+    - `ValueError`: `json.dumps` 的数值越界 / 循环引用等序列化失败。
+  只捕 `OSError` 的话，后两类会穿透 `pytest_sessionfinish`，把"报告写不出"
+  升级成"会话故障"（退出码被改写），与旁路铁律相反。
+
   参数:
     path (Path): 报告文件目标路径（父目录不存在时自动创建）
     payload (dict[str, Any]): 报告字典
@@ -510,7 +630,7 @@ def write_report_file(path: Path, payload: dict[str, Any]) -> str | None:
       json.dumps(payload, ensure_ascii=False, indent=2),
       encoding="utf-8",
     )
-  except OSError as exc:
+  except (OSError, TypeError, ValueError) as exc:
     return f"{type(exc).__name__}: {exc}"
   return None
 
@@ -523,8 +643,11 @@ def emit_message(config: pytest.Config, message: str) -> None:
   是否出现在终端取决于捕获层级；terminal writer 与 pytest 自身汇总同通道
   （与项目根 conftest 的收集摘要同一口径，项目铁律: 不用 print）。
 
-  两种失败成因都必须吞掉（旁路铁律的完整表述是"终端不可用时不出声、也不出错"）:
+  三种失败成因都必须吞掉（旁路铁律的完整表述是"终端不可用时不出声、也不出错"）:
     - **没有 writer**: `-p no:terminal` 时 `get_plugin` 返回 None；
+    - **取 writer 时本身抛错**: 插件管理器状态异常（插件卸载顺序问题等）会让
+     `get_plugin` 直接抛异常。此前这一步裸奔在 try 之外，同样会把展示层
+     故障升级为会话故障（Day58 P4-1）；
     - **writer 存在但写失败**: 终端已关闭 / 输出管道断开（真实执行器把子进程
      stdout 接到管道上，读端先退出即属此例）。该异常若不吞，会从
      `pytest_sessionfinish` 穿透出去，把"展示层故障"升级成"会话故障"
@@ -541,7 +664,10 @@ def emit_message(config: pytest.Config, message: str) -> None:
   异常:
     无
   """
-  terminal = config.pluginmanager.get_plugin("terminalreporter")
+  try:
+    terminal = config.pluginmanager.get_plugin("terminalreporter")
+  except Exception: # noqa: BLE001 取 writer 失败同样只降级（P4-1）
+    return
   if terminal is None:
     return
   try:
@@ -593,6 +719,12 @@ def pytest_configure(config: pytest.Config) -> None:
   """
   配置阶段: 建立本次会话的统计容器与配置引用
 
+  xdist 下 worker 也会走到这里（每个 worker 是独立进程、独立模块对象、
+  独立 `_STATE`），这一步**刻意不加 worker 分支**: 建状态只是内存里的对象
+  初始化，不产生任何跨进程可见的副作用；worker 的统计虽然是"以自己执行的
+  用例为范围"，但它根本不会被落盘（sessionfinish 在 worker 直接返回），
+  因此没有"部分口径被写进报告"的风险，保持单一代码路径更容易维护。
+
   参数:
     config (pytest.Config): 当前会话配置
 
@@ -624,6 +756,77 @@ def pytest_sessionstart(session: pytest.Session) -> None:
   stats.started_monotonic = time.perf_counter()
 
 
+def pytest_collection_finish(session: pytest.Session) -> None:
+  """
+  收集完成: **worker 侧**把本进程读到的收集统计上报给 master
+
+  为什么必须由 worker 上报（Day58 实测结论，与最初的猜测相反）:
+    xdist 的 master **不做收集**——它在自己的 `pytest_collection` 里直接
+    return True（"prohibit collection of test items in controller process"），
+    所以 master 既不会跑项目根 conftest 的 `pytest_collection_modifyitems`，
+    也不会写它的 stash，报告里 `collection_stats` 只能是 null。而 worker 收集
+    的是**整场会话的完整用例集**（只执行其中一部分），其 stash 里的统计才是
+    完整口径。故这里把 worker 的统计塞进 xdist 的 `config.workeroutput`
+    通道，由 master 在 `pytest_testnodedown` 收下来。
+
+  与"worker 零副作用"的关系: 落盘 / 终端输出 / 状态清理仍然全部跳过；这里
+  只是**通信**——写一个纯字典给 master，不碰磁盘、不碰终端、不改本进程状态。
+
+  参数:
+    session (pytest.Session): 测试会话对象
+
+  返回:
+    无
+
+  异常:
+    无（配置缺 workeroutput、statistics 读不到、写入失败一律静默跳过）
+  """
+  config = session.config
+  if not _is_xdist_worker(config):
+    # 串行会话由 master 自己的 stash 直接供给，无需上报
+    return
+  workeroutput = getattr(config, "workeroutput", None)
+  if not isinstance(workeroutput, dict):
+    # 非 xdist 的 worker 通道（理论上不会出现），静默跳过
+    return
+  stats = collect_collection_stats(config)
+  if stats is None:
+    return
+  workeroutput[WORKER_COLLECTION_STATS_KEY] = stats
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: Any, error: Any) -> None:
+  """
+  xdist master 侧: 收下某个 worker 上报的收集统计
+
+  `optionalhook=True` 是必须的: 本钩子由 xdist 注册的 hookspec 定义，未安装
+  xdist 时 pluggy 会把"未知钩子实现"当成插件校验错误，直接让插件加载失败。
+
+  只在 master 收到 worker 的 `workerfinished` 事件时触发（早于 master 的
+  `pytest_sessionfinish`），故 sessionfinish 里读到的已是最新合并结果。
+
+  参数:
+    node (Any): xdist 的 WorkerController（带 `workeroutput` 属性）
+    error (Any): worker 异常退出的错误对象；正常退出为 None（不参与判定）
+
+  返回:
+    无
+
+  异常:
+    无（数据结构不符预期一律忽略，收集统计是旁路能力）
+  """
+  output = getattr(node, "workeroutput", None)
+  if not isinstance(output, dict):
+    return
+  incoming = output.get(WORKER_COLLECTION_STATS_KEY)
+  if not isinstance(incoming, dict):
+    return
+  _STATE.worker_collection_stats = merge_worker_collection_stats(
+    _STATE.worker_collection_stats, cast(dict[str, Any], incoming)
+  )
+
+
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
   """
   日志钩子: 逐个用例阶段（setup / call / teardown）记录结果与耗时
@@ -651,11 +854,28 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
   """
-  会话收尾: 组装并落盘 JSON 报告 + 输出一行终端摘要
+  会话收尾: 组装并落盘 JSON 报告 + 输出一行终端摘要（仅 master 进程执行）
+
+  xdist 分工（Day58）: worker 进程在这里**直接返回、零副作用**——不写报告、
+  不输出摘要、不清状态。理由有两条: ①报告是固定单一路径，worker 也落盘就是
+  多进程共写同一个文件，最终内容取决于写盘先后；②摘要会按进程数重复输出，
+  终端上分不清哪一行是整场会话的口径。master 侧的执行统计天然是全量口径:
+  worker 把每条阶段报告回传 master，master 的 `pytest_runtest_logreport`
+  累加到的就是整场会话的结果。
 
   顺序刻意固定为"先落盘、后摘要": 摘要里回显的是同一份 payload，
   落盘失败也只多一条提示行，绝不改变 exitstatus（与 conftest 的收集摘要
-  同一口径）。收尾后清空会话状态，防进程内第二次会话（如 pytester）读到旧值。
+  同一口径）。
+
+  收集统计的来源分两种（Day58）: 串行会话读本进程 stash 即可；xdist 下 master
+  **不做收集**（stash 里没有统计），故回落使用 worker 上报上来的那一份
+  （见 `pytest_collection_finish` 与 `pytest_testnodedown`）。两者都没有时
+  仍按原口径输出 `null`，绝不为此抛错。
+
+  `_STATE.clear()` 放在 finally（Day58 P4-3）: 报告写入与摘要输出虽然都自带
+  降级，但降级覆盖不到的路径上仍可能抛错，而模块级单例会被**同一进程**的
+  后续会话复用（pytester、真实执行器复用常驻进程），残留状态会让下一场会话
+  读到上一场的旧统计。finally 保证"无论收尾是否顺利，状态必被清空"。
 
   参数:
     session (pytest.Session): 测试会话对象
@@ -665,33 +885,52 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     无
 
   异常:
-    无
+    无（常规失败路径均已内部降级；降级覆盖不到的意外异常会继续上抛，
+      但会话状态仍由 finally 清空）
   """
+  config = session.config
+  if _is_xdist_worker(config):
+    # worker 侧零副作用: 报告与摘要的唯一生产者是 master
+    return
   stats = _STATE.stats
   if stats is None:
     return
-  config = session.config
-  plugin_config = read_plugin_config(config)
-  payload = build_report_payload(
-    stats,
-    collect_collection_stats(config),
-    exitstatus,
-    elapsed_seconds(stats),
-  )
-  if plugin_config.report_enabled:
-    write_error = write_report_file(
-      resolve_report_path(config, plugin_config), payload
+  try:
+    plugin_config = read_plugin_config(config)
+    collection_stats = collect_collection_stats(config)
+    if collection_stats is None:
+      # xdist 场景: master 不做收集，靠 worker 上报的那一份兜底
+      collection_stats = _STATE.worker_collection_stats
+    payload = build_report_payload(
+      stats,
+      collection_stats,
+      exitstatus,
+      elapsed_seconds(stats),
     )
-    if write_error is not None:
-      emit_message(config, f"{SUMMARY_PREFIX} 报告写入失败：{write_error}")
-  if plugin_config.summary_enabled:
-    emit_message(config, format_plugin_summary(payload))
-  _STATE.clear()
+    if plugin_config.report_enabled:
+      write_error = write_report_file(
+        resolve_report_path(config, plugin_config), payload
+      )
+      # 写入失败不短路摘要: 摘要末尾仍是"降级提示 + 汇总行"两行，
+      # 调用方据此判断"报告没落盘"而不是"插件没工作"
+      if write_error is not None:
+        emit_message(config, f"{SUMMARY_PREFIX} 报告写入失败：{write_error}")
+    if plugin_config.summary_enabled:
+      emit_message(config, format_plugin_summary(payload))
+  finally:
+    _STATE.clear()
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
   """
   退出阶段: 清空会话状态（进程内多次会话之间不残留任何统计）
+
+  两处刻意保持原样（Day58 结论，与 P4-3 同一轮复查）:
+    1. **不加 worker 分支**: worker 的 `_STATE.clear()` 语义上是空转，但独立
+      进程退出后状态本就自然消亡，加分支只是给"每个进程都要维护两套路径"
+      增加维护面，没有实际收益；
+    2. **不加 try/finally**: `PluginState.clear()` 只是两个属性赋 None，没有
+      任何可能抛错的调用，再包一层属于形式主义的防御。
 
   参数:
     config (pytest.Config): 当前会话配置

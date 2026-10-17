@@ -28,6 +28,15 @@ Day57 追加 4 条（打包验证日）:
   2. **报告 schema**: 字段集、类型与"无收集统计时给 null"的空值语义。
   3. **写入失败第二成因**: 父路径被同名文件占用（与既有"目标路径被目录占用"互补）。
   4. **终端降级**: writer 存在却抛错时的旁路铁律边界（修复前会把异常抛出收尾钩子）。
+
+Day58 追加 8 条（xdist 并发接入日）:
+  1. **进程角色判定**: worker 专有通道属性为主、环境变量只作替身兜底
+    （子进程会继承 `PYTEST_XDIST_WORKER`，单凭它判定会把普通 pytest 进程误判成 worker）。
+  2. **worker 零副作用**: 会话收尾不写报告、不出摘要、不清状态。
+  3. **master 唯一落盘**: `-n 2` 真跑一次，报告一份、摘要一条、口径是整场会话。
+  4. **收集统计上报通道**: worker 经 `config.workeroutput` 上报、master 合并。
+  5-8. **四条 P4 降级**: `get_plugin` 抛错 / payload 不可序列化 / 收尾抛错仍清状态 /
+    源码无非法转义告警。
 """
 
 import fnmatch
@@ -35,11 +44,13 @@ import importlib
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 import tomllib
+import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -133,6 +144,10 @@ REPORT_EXECUTION_KEYS: frozenset[str] = frozenset(
   }
 )
 REPORT_FAILED_CASE_KEYS: frozenset[str] = frozenset({"nodeid", "phase", "duration"})
+
+# xdist 并发探针的 worker 数（与 ci.yml 的 -n 参数同口径；固定值不用 auto——
+# auto 会按核数探测，行为与耗时不可预期，也无法断言"确实起了 N 个 worker"）
+XDIST_WORKER_COUNT = 2
 
 
 @dataclass(frozen=True)
@@ -262,6 +277,42 @@ class _ExplodingTerminal:
   模拟"writer 存在但已不可写"（终端关闭 / 输出管道断开）——它与
   "没有 writer"（`-p no:terminal`）是两种不同成因，前者此前未被覆盖。
   """
+
+
+class _ExplodingPluginManager:
+  """
+  取插件即抛错的 pluginmanager 替身（Day58 P4-1）
+
+  模拟"插件管理器本身状态异常"（插件卸载顺序问题、管理器未就绪等）: 此时
+  `get_plugin("terminalreporter")` 会直接抛错，而"没有 writer"是返回 None。
+  两者都必须只降级、不得把展示层故障升级成会话故障。
+  """
+
+  def get_plugin(self, name: str) -> Any:
+    """
+    参数:
+      name (str): 插件名（替身直接抛错）
+
+    返回:
+      无（必然抛错）
+
+    异常:
+      RuntimeError: 恒抛出，驱动 `emit_message` 的降级分支
+    """
+    raise RuntimeError(f"插件管理器不可用: {name}")
+
+  def get_plugins(self) -> set[Any]:
+    """
+    参数:
+      无
+
+    返回:
+      无（必然抛错）
+
+    异常:
+      RuntimeError: 恒抛出，驱动收集统计读取的降级分支
+    """
+    raise RuntimeError("插件枚举不可用")
 
   def write_line(self, message: str) -> None:
     """
@@ -1209,3 +1260,414 @@ def test_emit_message_survives_terminal_writer_failure(
   assert json.loads(report_path.read_text(encoding="utf-8"))["exit_status"] == 0
   assert plugin._STATE.stats is None
   assert plugin._STATE.config is None
+
+
+@allure.feature("Day58 xdist 并发接入")
+@allure.story("进程角色判定")
+@allure.title("worker 判定以 worker 专有通道属性为准，继承来的环境变量不得单独生效")
+def test_is_xdist_worker_prefers_worker_channels_over_inherited_env(
+  plugin: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  """
+  判定口径分三层:
+    1. `workerinput` / `workeroutput` 任一存在 → worker（xdist 只给 worker 注入）；
+    2. 拿不到 pluginmanager 的替身配置 → 退回 `PYTEST_XDIST_WORKER` 环境变量；
+    3. 有 pluginmanager 但两个通道属性都没有 → master（串行会话同样落在这里）。
+
+  第 3 条是**实测踩到的回归点**: `PYTEST_XDIST_WORKER` 是进程环境变量，会被
+  子进程继承。真实执行器拉起的 pytest 子进程、本文件的嵌套 pytest，只要父进程
+  是 xdist worker 就天然带着它；若单凭环境变量判定，这些"普通 pytest 进程"会
+  被误判成 worker，表现为报告静默不落盘、摘要不输出（CI 一旦启用 `-n 2`，
+  所有嵌套 pytest 用例都会撞上）。
+  """
+  monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
+
+  # 串行会话: 有 pluginmanager、无通道属性
+  assert (
+    plugin._is_xdist_worker(SimpleNamespace(pluginmanager=SimpleNamespace()))
+    is False
+  )
+  # 两个 worker 专有通道各自成立
+  assert plugin._is_xdist_worker(SimpleNamespace(workerinput={"workerid": "gw0"})) is True
+  assert plugin._is_xdist_worker(SimpleNamespace(workeroutput={})) is True
+
+  # 环境变量被子进程继承: 有 pluginmanager 时不得据此判成 worker
+  monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
+  assert (
+    plugin._is_xdist_worker(SimpleNamespace(pluginmanager=SimpleNamespace()))
+    is False
+  )
+  # 只有拿不到 pluginmanager 的替身配置才回落到环境变量
+  assert plugin._is_xdist_worker(SimpleNamespace()) is True
+
+  class _ExplodingChannels:
+    """通道属性访问即抛错的配置替身（判定失败必须按 master 处理）"""
+
+    @property
+    def workerinput(self) -> Any:
+      """
+      参数:
+        无
+
+      返回:
+        无（必然抛错）
+
+      异常:
+        RuntimeError: 恒抛出，驱动判定函数的兜底分支
+      """
+      raise RuntimeError("通道属性不可用")
+
+  assert plugin._is_xdist_worker(_ExplodingChannels()) is False
+
+
+@allure.feature("Day58 xdist 并发接入")
+@allure.story("worker 零副作用")
+@allure.title("worker 进程的会话收尾不写报告、不输出摘要、不清状态")
+def test_sessionfinish_in_worker_has_no_plugin_side_effects(
+  plugin: ModuleType, tmp_path: Path
+) -> None:
+  """
+  worker 侧"零副作用"逐项取证: 报告文件不存在、终端一行未写、`_STATE` 未被
+  清空（worker 的清理统一交给 `pytest_unconfigure`，进程随会话结束退出）。
+
+  为什么 worker 不能落盘也不能出摘要: 报告是固定单一路径，多进程写同一个文件
+  等于"最后落盘者胜"；摘要按进程数重复输出后，终端上分不清哪一行才是整场会话
+  的口径。落盘与输出权只归 master，是本日改造的核心约束。
+  """
+  report_path = tmp_path / "worker_report.json"
+  emitted: list[str] = []
+  values = {
+    plugin.INI_REPORT_PATH: str(report_path),
+    plugin.INI_REPORT_ENABLED: True,
+    plugin.INI_SUMMARY_ENABLED: True,
+  }
+  worker_config = SimpleNamespace(
+    rootpath=tmp_path,
+    getini=lambda name: values[name],
+    pluginmanager=SimpleNamespace(
+      get_plugins=lambda: set(),
+      get_plugin=lambda name: SimpleNamespace(write_line=emitted.append),
+    ),
+    stash=pytest.Stash(),
+    # 两个 worker 通道属性都按 xdist 真实注入形态给出
+    workerinput={"workerid": "gw0"},
+    workeroutput={},
+  )
+
+  plugin._STATE.start_session(worker_config)
+  plugin.pytest_sessionfinish(SimpleNamespace(config=worker_config), 1)
+
+  assert not report_path.exists()
+  assert emitted == []
+  # 状态**刻意不清**: worker 退出即消亡，清理职责在 unconfigure
+  assert plugin._STATE.stats is not None
+
+  plugin.pytest_unconfigure(worker_config)
+  assert plugin._STATE.stats is None
+  assert plugin._STATE.config is None
+  assert plugin._STATE.worker_collection_stats is None
+
+
+@allure.feature("Day58 xdist 并发接入")
+@allure.story("master 唯一落盘")
+@allure.title("-n 2 真跑: 报告只落一份、摘要只出一条、口径是整场会话")
+def test_xdist_run_keeps_single_report_and_single_summary(
+  plugin: ModuleType, probe_run: ProbeRun
+) -> None:
+  """
+  端到端验收（真起 xdist，非替身驱动）:
+    1. **阳性对照**: 输出里必须出现 `created: 2/2 workers`，否则本条会退化成
+      "串行也能过"（`-n` 被忽略时不会报错，断言会失去意义）；
+    2. **摘要唯一**: `[TestMatrix] 会话完成` 只出现 1 次——每个 worker 各打一行
+      是本日要消灭的形态；
+    3. **口径完整**: 报告的执行侧计数是 3 条用例的全量结果（探针 1 通过 +
+      1 失败 + 1 跳过）与 8 条阶段报告，而不是某个 worker 分到的那一部分；
+    4. **收集统计不再为 null**: master 自身不做收集，靠 worker 上报补齐，
+      故 `collection_stats.total` 必须是完整的 3；
+    5. 失败明细只有 1 条——两份报告叠加/重复合并会让它变成 2 条。
+  """
+  report_path = probe_run.report_path.parent / "xdist_report.json"
+  completed = _run_nested_pytest(
+    [
+      "-q",
+      "-n",
+      str(XDIST_WORKER_COUNT),
+      "-o",
+      f"testmatrix_report_path={report_path}",
+    ],
+    [probe_run.target],
+    probe_run.basetemp,
+  )
+  stdout = _decode(completed.stdout)
+  stderr = _decode(completed.stderr)
+
+  created = re.search(r"created: (\d+)/\d+ workers", stdout)
+  assert created is not None, stdout
+  assert int(created.group(1)) == XDIST_WORKER_COUNT, stdout
+  assert completed.returncode == 1, stderr
+  assert "INTERNALERROR" not in stderr, stderr
+
+  assert stdout.count(f"{plugin.SUMMARY_PREFIX} 会话完成") == 1, stdout
+
+  report = json.loads(report_path.read_text(encoding="utf-8"))
+  execution = report["execution_stats"]
+  assert execution["total"] == 3
+  assert (execution["passed"], execution["failed"], execution["skipped"]) == (1, 1, 1)
+  assert execution["report_count"] == 8
+  assert len(execution["failed_cases"]) == 1
+  assert report["exit_status"] == 1
+
+  collection = report["collection_stats"]
+  assert collection is not None
+  assert collection["total"] == 3
+  assert collection["marker_counts"]["smoke"] == 1
+  assert sum(collection["module_counts"].values()) == 3
+
+
+@allure.feature("Day58 xdist 并发接入")
+@allure.story("收集统计上报通道")
+@allure.title("worker 上报收集统计、master 收下并按完整口径合并")
+def test_worker_collection_stats_are_reported_and_merged(
+  plugin: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  """
+  为什么需要这条通道（当日实测结论）: xdist 的 master **不做收集**——它的
+  `pytest_collection` 直接 return True（禁止控制进程收集用例），因此项目根
+  conftest 的 `pytest_collection_modifyitems` 不会在 master 执行，master 的
+  stash 里也就没有收集统计，报告该字段只能是 null。真正持有完整统计的是
+  worker（它们收集整场会话的全部用例、只执行其中一部分）。
+
+  覆盖点:
+    1. 合并口径是"取 total 更大的一份"而不是相加——各 worker 收集的是同一批
+      用例，相加会把总数放大 N 倍；
+    2. worker 侧只负责写 `config.workeroutput`（纯字典，不碰磁盘/终端/状态）；
+    3. master 侧只认插件自己的键，坏数据（非字典、缺键、无该属性）一律忽略；
+    4. master 进程自己不上报（它的统计来源是本进程 stash）。
+  """
+  stats_small = {
+    "total": 2,
+    "marker_counts": {"smoke": 1},
+    "module_counts": {"m": 2},
+    "unregistered_marker_counts": {},
+  }
+  stats_full = {
+    "total": 5,
+    "marker_counts": {"smoke": 1, "regression": 4},
+    "module_counts": {"m": 5},
+    "unregistered_marker_counts": {},
+  }
+
+  assert plugin.merge_worker_collection_stats(None, None) is None
+  assert plugin.merge_worker_collection_stats(None, stats_small) is stats_small
+  assert plugin.merge_worker_collection_stats(stats_full, None) is stats_full
+  assert plugin.merge_worker_collection_stats(stats_small, stats_full) is stats_full
+  assert plugin.merge_worker_collection_stats(stats_full, stats_small) is stats_full
+  # total 非法时保留已有值，绝不因为一份坏统计丢掉全部
+  assert plugin.merge_worker_collection_stats({"total": "非数字"}, stats_full) == {
+    "total": "非数字"
+  }
+
+  stash_key = pytest.StashKey()
+  stash = pytest.Stash()
+  stash[stash_key] = SimpleNamespace(
+    total=FAKE_COLLECTION_TOTAL,
+    marker_counts={"smoke": 2},
+    module_counts={"tests.test_fake": FAKE_COLLECTION_TOTAL},
+    unregistered_marker_counts={"e2e": 1},
+  )
+  worker_output: dict[str, Any] = {}
+  worker_config = SimpleNamespace(
+    pluginmanager=SimpleNamespace(get_plugins=lambda: {_PluginWithStatsKey(stash_key)}),
+    stash=stash,
+    workerinput={"workerid": "gw0"},
+    workeroutput=worker_output,
+  )
+  plugin.pytest_collection_finish(SimpleNamespace(config=worker_config))
+  reported = worker_output[plugin.WORKER_COLLECTION_STATS_KEY]
+  assert reported["total"] == FAKE_COLLECTION_TOTAL
+  assert reported["unregistered_marker_counts"] == {"e2e": 1}
+
+  # master 进程（无 worker 通道属性）不写任何上报
+  master_output: dict[str, Any] = {}
+  plugin.pytest_collection_finish(
+    SimpleNamespace(
+      config=SimpleNamespace(
+        pluginmanager=SimpleNamespace(get_plugins=lambda: set()),
+        stash=pytest.Stash(),
+      )
+    )
+  )
+  assert master_output == {}
+
+  # worker 通道缺失（属性不是字典）与"stash 里没有统计"两条降级路径
+  plugin.pytest_collection_finish(
+    SimpleNamespace(config=SimpleNamespace(workerinput={}, workeroutput=None))
+  )
+  empty_output: dict[str, Any] = {}
+  plugin.pytest_collection_finish(
+    SimpleNamespace(
+      config=SimpleNamespace(
+        workerinput={"workerid": "gw9"},
+        workeroutput=empty_output,
+        pluginmanager=SimpleNamespace(get_plugins=lambda: set()),
+        stash=pytest.Stash(),
+      )
+    )
+  )
+  assert empty_output == {}
+
+  monkeypatch.setattr(plugin._STATE, "worker_collection_stats", None)
+  plugin.pytest_testnodedown(
+    SimpleNamespace(workeroutput={plugin.WORKER_COLLECTION_STATS_KEY: stats_small}), None
+  )
+  assert plugin._STATE.worker_collection_stats == stats_small
+  plugin.pytest_testnodedown(
+    SimpleNamespace(workeroutput={plugin.WORKER_COLLECTION_STATS_KEY: stats_full}), None
+  )
+  assert plugin._STATE.worker_collection_stats == stats_full
+
+  for alien in (
+    SimpleNamespace(workeroutput={"other_plugin": stats_small}),
+    SimpleNamespace(workeroutput=[stats_small]),
+    SimpleNamespace(),
+  ):
+    plugin.pytest_testnodedown(alien, None)
+  assert plugin._STATE.worker_collection_stats == stats_full
+  monkeypatch.setattr(plugin._STATE, "worker_collection_stats", None)
+
+
+@allure.feature("Day58 xdist 并发接入")
+@allure.story("P4-1 终端降级")
+@allure.title("取 terminalreporter 本身抛错时静默降级，会话收尾与落盘不受影响")
+def test_emit_message_survives_plugin_manager_failure(
+  plugin: ModuleType, tmp_path: Path
+) -> None:
+  """
+  P4-1 的靶子: `emit_message` 里 `get_plugin("terminalreporter")` 原先是裸调用。
+  "没有 writer"（返回 None）已有降级，但**取 writer 这一步本身抛错**（插件管理器
+  状态异常）会把展示层故障升级成会话故障。
+
+  验两层: 单次调用安静返回；整条收尾流程仍照常落盘并清空状态。
+  """
+  plugin.emit_message(SimpleNamespace(pluginmanager=_ExplodingPluginManager()), "丢弃")
+
+  report_path = tmp_path / "pm_failure_report.json"
+  values = {
+    plugin.INI_REPORT_PATH: str(report_path),
+    plugin.INI_REPORT_ENABLED: True,
+    plugin.INI_SUMMARY_ENABLED: True,
+  }
+  broken_config = SimpleNamespace(
+    rootpath=tmp_path,
+    getini=lambda name: values[name],
+    pluginmanager=_ExplodingPluginManager(),
+    stash=pytest.Stash(),
+  )
+
+  plugin._STATE.start_session(broken_config)
+  plugin.pytest_sessionfinish(SimpleNamespace(config=broken_config), 0)
+
+  assert report_path.is_file()
+  assert json.loads(report_path.read_text(encoding="utf-8"))["collection_stats"] is None
+  assert plugin._STATE.stats is None
+  assert plugin._STATE.config is None
+
+
+@allure.feature("Day58 xdist 并发接入")
+@allure.story("P4-2 报告写入降级")
+@allure.title("payload 不可序列化时只回传错误描述，不抛 TypeError/ValueError")
+def test_write_report_file_degrades_on_unserializable_payload(
+  plugin: ModuleType, tmp_path: Path
+) -> None:
+  """
+  P4-2 的靶子: 捕获范围原先是 `OSError`，而 `json.dumps` 自己的失败既不是文件
+  系统问题也不是 OSError——不可序列化对象抛 `TypeError`、循环引用抛
+  `ValueError`，两者都会穿透 `pytest_sessionfinish`。
+
+  契约仍是"失败只回传 `<异常类型>: <消息>`"，且**不得留下半份文件**。
+  """
+  target = tmp_path / "unserializable.json"
+
+  type_error = plugin.write_report_file(target, {"bad": object()})
+  assert type_error is not None and type_error.startswith("TypeError:"), type_error
+
+  circular: dict[str, Any] = {}
+  circular["self"] = circular
+  value_error = plugin.write_report_file(target, circular)
+  assert value_error is not None and value_error.startswith("ValueError:"), value_error
+
+  assert not target.exists()
+
+
+@allure.feature("Day58 xdist 并发接入")
+@allure.story("P4-3 状态必被清空")
+@allure.title("收尾环节抛异常时，finally 仍会清空会话状态")
+def test_sessionfinish_clears_state_even_when_report_write_raises(
+  plugin: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  """
+  P4-3 的靶子: `_STATE.clear()` 原先是收尾流程的最后一条裸语句，任何未覆盖的
+  异常都会让它跳过——模块级单例被同一进程的后续会话复用（pytester、真实执行器
+  复用常驻进程），残留状态会让下一场会话读到上一场的旧统计。
+
+  这里用"报告写入抛错"构造未覆盖路径: 异常如实上抛（展示层故障不掩盖），但
+  状态必须已被 finally 清空。
+  """
+  report_path = tmp_path / "exploding_report.json"
+  values = {
+    plugin.INI_REPORT_PATH: str(report_path),
+    plugin.INI_REPORT_ENABLED: True,
+    plugin.INI_SUMMARY_ENABLED: False,
+  }
+  config = SimpleNamespace(
+    rootpath=tmp_path,
+    getini=lambda name: values[name],
+    pluginmanager=SimpleNamespace(
+      get_plugins=lambda: set(),
+      get_plugin=lambda name: None,
+    ),
+    stash=pytest.Stash(),
+  )
+  plugin._STATE.start_session(config)
+
+  def _explode_writer(path: Path, payload: dict[str, Any]) -> str | None:
+    """替身写入器: 直接抛错，模拟降级分支覆盖不到的意外路径"""
+    raise RuntimeError(f"报告写入未预期失败: {path} / {len(payload)} 字段")
+
+  monkeypatch.setattr(plugin, "write_report_file", _explode_writer)
+
+  with pytest.raises(RuntimeError):
+    plugin.pytest_sessionfinish(SimpleNamespace(config=config), 0)
+
+  assert plugin._STATE.stats is None
+  assert plugin._STATE.config is None
+  assert not report_path.exists()
+
+
+@allure.feature("Day58 xdist 并发接入")
+@allure.story("P4-6 源码转义")
+@allure.title("插件源码编译无非法转义告警，docstring 里的正则文本原样保留")
+def test_source_compiles_without_invalid_escape_warnings(plugin: ModuleType) -> None:
+  """
+  P4-6 的靶子: 模块 docstring 里的 `\\bin\\s+` 在非 raw 字符串中属于无效转义，
+  Python 3.11 起首编译给 DeprecationWarning（3.12+ 升级为 SyntaxWarning），
+  干净环境里会直接出现在输出上、污染"0 warning"门禁。
+
+  验两层: ①整份源码重新编译不产生这两类告警；②文档里的正则文本仍然是原样
+  （改成 raw string 是为了让转义合法，不是把这段说明删掉）。
+  """
+  source_path = Path(cast(str, plugin.__file__))
+  source = source_path.read_text(encoding="utf-8")
+
+  with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    compile(source, str(source_path), "exec")
+
+  escape_warnings = [
+    str(item.message)
+    for item in caught
+    if issubclass(item.category, (DeprecationWarning, SyntaxWarning))
+  ]
+  assert escape_warnings == [], escape_warnings
+  assert r"\bin\s+" in (plugin.__doc__ or "")
+
