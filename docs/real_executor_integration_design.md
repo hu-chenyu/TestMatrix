@@ -2,7 +2,7 @@
 
 > **文件性质**：设计文档（设计日产出，Day45 不含任何 `src/` 实现代码）
 > **适用范围**：真实执行器 Phase-1（Day46-54），为后续 9 天的实现提供唯一设计依据
-> **关联 ADR**：`docs/adr/ADR-001-real-executor-integration.md`（关键决策点与备选方案）
+> **关联 ADR**：`docs/adr/0003-real-executor-integration.md`（关键决策点与备选方案）
 > **关联实验**：`scripts/ast_regression_poc.py` + `tests/test_ast_regression_poc.py`（AST 精准回归 POC 实验代码）
 
 ---
@@ -197,7 +197,7 @@ flowchart TD
 
 ## 3. subprocess 封装方案
 
-### 3.1 进程模型：批次级单进程（决策点，见 ADR-001）
+### 3.1 进程模型：批次级单进程（决策点，见 ADR-0003）
 
 **决策**：一个批次 = 一个 pytest 子进程。
 
@@ -341,7 +341,7 @@ pytest 退出码契约与平台结果的映射（替换 `executors.py:272-302` �
 
 ## 4. 结果桥接方案
 
-### 4.1 三种解析策略对比（决策点，见 ADR-001）
+### 4.1 三种解析策略对比（决策点，见 ADR-0003）
 
 | 维度 | 行级解析终端输出 | JUnit XML（`--junitxml`） | Allure 结果目录（`--alluredir`） |
 | --- | --- | --- | --- |
@@ -489,7 +489,7 @@ CaseResult(
 
 ## 5. `source_ref` 数据模型设计
 
-### 5.1 字段定义与存储粒度（决策点，见 ADR-001）
+### 5.1 字段定义与存储粒度（决策点，见 ADR-0003）
 
 **决策**：`test_cases` 新增一列 `source_ref`，存储**仓库相对路径 + 可选测试函数名**
 的点分形式：

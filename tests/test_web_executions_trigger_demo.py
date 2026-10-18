@@ -506,7 +506,7 @@ class TestExecutionsTriggerApi:
     功能性不可用。正确顺序是所有选项在前、"--" 紧邻 path 之前。
 
     第三次修正（Day47）: 执行目标字段由 case_id 改为 source_ref。
-    build_command **不再回落 case_id**（ADR-001 决策③：空值语义是
+    build_command **不再回落 case_id**（ADR-0003 决策③：空值语义是
     "该用例不可被 pytest 执行"，回落会让每条用例以退出码 4 落 error，
     排障时看到的是"路径错了"而非"这条用例本就不该走 pytest"）。
     故此处用例补 source_ref，命令尾部断言同步改为该路径。

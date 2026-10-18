@@ -2,7 +2,7 @@
 
 > 内部复盘文档，记录真实执行器第一阶段的**为什么这么选**与**踩过的坑**。
 > 面向后续接手执行器代码的人：读完本文再看 `src/core/executors.py`。
-> 配套材料：`docs/adr/ADR-001-real-executor-integration.md`（选型决策）、
+> 配套材料：`docs/adr/0003-real-executor-integration.md`（选型决策）、
 > `docs/real_executor_integration_design.md`（设计细节）、
 > `PROJECT_CONTEXT.md` 第 6.45-6.60（设计决策）与第 7.42-7.74（跨天踩坑）。
 

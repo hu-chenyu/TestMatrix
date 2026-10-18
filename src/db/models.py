@@ -50,7 +50,7 @@ class TestCase(Base):
     created_at 创建时间（数据库时间自动填充）
     updated_at 更新时间（行更新时自动刷新）
 
-  source_ref 空值语义（Day46，与 ADR-001 决策③一致）:
+  source_ref 空值语义（Day46，与 ADR-0003 决策③一致）:
     该列存"仓库相对路径[::测试函数名]"形态的可执行目标，是
     PytestRunner.build_command 取执行目标的**唯一**合法来源。
     为 None 或空串一律表示"该用例不可被 pytest 执行"，

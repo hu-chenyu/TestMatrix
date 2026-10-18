@@ -1197,7 +1197,7 @@ class PytestRunner(BaseExecutor):
   以子进程方式真实拉起 pytest 执行 source_ref 指向的测试文件，
   并按退出码把结果映射为 passed/failed/error。
 
-  执行目标来源（Day47 建立、Day48 收口，与 ADR-001 决策③一致）:
+  执行目标来源（Day47 建立、Day48 收口，与 ADR-0003 决策③一致）:
     source_ref 是**唯一**合法的 pytest 执行目标，为空即语义为
     "该用例不可被 pytest 执行"。**绝不回落到 case_id，也不再回落到
     script_path**——业务编号不是文件路径，回落后每条用例都以
