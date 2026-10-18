@@ -1,11 +1,12 @@
-# ADR-002: pytest 插件（pytest11 entry point）vs conftest 钩子的选型取舍
+# ADR-0004: pytest 插件（pytest11 entry point）vs conftest 钩子的选型取舍
 
 - 状态：已接受
 - 日期：2026-10-17（Day57，打包验证日即时写）
+- 重编号：原编号 ADR-002，2026-10-19（Day59）重编号为 0004，与 `0001` / `0002` / `0003` 的四位小写编号体系对齐
 - 更新：2026-10-18（Day58 落地 xdist 兼容，决策 7 由"边界声明"改为"已支持"；Day58-fix 补记已知限制）
 - 相关实现：`src/testmatrix_plugin/__init__.py`、`pyproject.toml`（build-system + entry point + 包发现）
-- 相关前置：`docs/adr/ADR-001-real-executor-integration.md`（真实执行器选型）、项目根 `conftest.py`（Day55 收集期钩子）
-- 命名说明：本文件按当日任务指定的 `ADR-002-*.md` 落地。与 ADR-001 同源，`docs/adr/` 既有的四位小写编号体系（`0001-` / `0002-`）待 D59 复盘统一处置，本日不改名、不动索引文件。
+- 相关前置：`docs/adr/0003-real-executor-integration.md`（真实执行器选型）、项目根 `conftest.py`（Day55 收集期钩子）
+- 命名说明：本文件在 Day57 按当日任务指定的 `ADR-002-*.md` 落地；Day59 复盘按原定计划统一为 `0004-pytest-plugin-vs-hooks.md`，旧路径已删除（git 记为重命名），旧编号仅在本行留痕。
 
 ---
 
@@ -283,5 +284,5 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
 - `tests/test_pytest_plugin.py`——双路径验收测试（Day56 八条 + Day57 追加四条）
 - pytest 官方文档《Writing plugins》与 `pytest11` entry point 约定
 - PEP 625（发行包文件名归一化）与 setuptools 关于 sdist 默认文件集的说明
-- `docs/adr/ADR-001-real-executor-integration.md`——真实执行器接入选型（本决策的上下文）
+- `docs/adr/0003-real-executor-integration.md`——真实执行器接入选型（本决策的上下文）
 - `PROJECT_CONTEXT.md` 6.63（Day56 插件与 conftest 分工）、7.79（entry point 安装与嵌套 pytest 五处坑）

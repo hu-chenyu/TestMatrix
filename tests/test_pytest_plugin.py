@@ -37,6 +37,13 @@ Day58 追加 8 条（xdist 并发接入日）:
   4. **收集统计上报通道**: worker 经 `config.workeroutput` 上报、master 合并。
   5-8. **四条 P4 降级**: `get_plugin` 抛错 / payload 不可序列化 / 收尾抛错仍清状态 /
     源码无非法转义告警。
+
+Day59 追加 2 条（Day58 复核归位）:
+  1. **崩溃 worker 的 error 路径**: `pytest_testnodedown` 的 `error` 非 None 且
+    `workeroutput` 缺失/为 None 时，合并逻辑不抛错、保留先到 worker 的统计。
+  2. **嵌套 pytest 的 env 注入**: `_run_nested_pytest` 的可选 `env` 参数按"叠加"
+    语义生效（同名覆盖、基础 `PYTHONPATH` 不丢），供需要显式注入
+    `PYTEST_XDIST_WORKER` 等变量的场景解耦使用。
 """
 
 import fnmatch
@@ -415,7 +422,10 @@ def _decode(raw: bytes) -> str:
 
 
 def _run_nested_pytest(
-  extra_args: list[str], targets: list[str], basetemp: Path
+  extra_args: list[str],
+  targets: list[str],
+  basetemp: Path,
+  env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
   """
   跑一次嵌套 pytest（显式加载被测插件、禁用 entry point 那一份）
@@ -426,10 +436,16 @@ def _run_nested_pytest(
   会污染"0 warning"门禁）。把它钉在探针目录下（已被 .gitignore 覆盖，
   且随 fixture 一并清理）即从结构上消除这类争用。
 
+  `env` 参数刻意做成"叠加"而不是"替换"（Day59 P3-④）: 调用方往往只想
+  补一个变量（例如显式注入 `PYTEST_XDIST_WORKER` 复现 worker 身份），
+  替换整份环境会丢掉 `PYTHONPATH` 与编码设置，让子进程加载不到插件。
+
   参数:
     extra_args (list[str]): 追加在固定参数之后、目标之前的参数
     targets (list[str]): 传给 pytest 的目标路径
     basetemp (Path): 子进程专属的基础临时目录（存在即被清空重建）
+    env (dict[str, str] | None): 额外注入的环境变量（None 表示不额外注入）；
+      同名键覆盖 `_nested_env()` 的默认值
 
   返回:
     subprocess.CompletedProcess[bytes]: 子进程结果（含 returncode 与原始输出）
@@ -437,6 +453,9 @@ def _run_nested_pytest(
   异常:
     subprocess.TimeoutExpired: 子进程超出预算时抛出（视为严重失败）
   """
+  child_env = _nested_env()
+  if env:
+    child_env.update(env)
   return subprocess.run(
     [
       sys.executable,
@@ -454,7 +473,7 @@ def _run_nested_pytest(
     ],
     cwd=str(PROJECT_ROOT),
     capture_output=True,
-    env=_nested_env(),
+    env=child_env,
     check=False,
     timeout=NESTED_PYTEST_TIMEOUT_SECONDS,
   )
@@ -1670,4 +1689,96 @@ def test_source_compiles_without_invalid_escape_warnings(plugin: ModuleType) -> 
   ]
   assert escape_warnings == [], escape_warnings
   assert r"\bin\s+" in (plugin.__doc__ or "")
+
+
+@allure.feature("Day59 Day58复核归位")
+@allure.story("P3-④ 嵌套 pytest env 注入")
+@allure.title("_run_nested_pytest 的 env 参数按叠加语义生效，不替换 PYTHONPATH")
+def test_run_nested_pytest_merges_optional_env(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """
+  P3-④ 的目标: e2e 用例需要显式注入 `PYTEST_XDIST_WORKER` 等变量时，不必
+  再复制整份环境构造（复制会丢掉 `PYTHONPATH`，子进程随即加载不到插件）。
+  `env` 参数只做叠加，同名键覆盖默认值。
+
+  用替身 `subprocess.run` 取证而不是真起进程: 本用例要钉的是"传下去的环境
+  变量是什么"，真跑子进程只能间接观察，且要多付一次冷启动。替身同时断言
+  `env=None` 时传下去的就是 `_nested_env()` 本身，防止默认路径被悄悄改掉。
+  """
+  captured: dict[str, Any] = {}
+
+  def _fake_run(
+    args: list[str], **kwargs: Any
+  ) -> subprocess.CompletedProcess[bytes]:
+    """替身子进程: 只记录实参，不真起进程"""
+    captured["args"] = list(args)
+    captured.update(kwargs)
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+
+  monkeypatch.setattr(subprocess, "run", _fake_run)
+  baseline_env = _nested_env()
+
+  _run_nested_pytest(["-q"], ["probe_demo.py"], Path("probe_basetemp"))
+  assert captured["env"] == baseline_env
+
+  payload = {"PYTEST_XDIST_WORKER": "gw9", "TM_DAY59_PROBE": "1"}
+  _run_nested_pytest(
+    ["-q"], ["probe_demo.py"], Path("probe_basetemp"), env=payload
+  )
+  merged = captured["env"]
+  assert merged["PYTEST_XDIST_WORKER"] == "gw9"
+  assert merged["TM_DAY59_PROBE"] == "1"
+  # 基础环境不丢: 编码设置与 PYTHONPATH 与默认值逐字相同
+  assert merged["PYTHONPATH"] == baseline_env["PYTHONPATH"]
+  assert merged["PYTHONIOENCODING"] == baseline_env["PYTHONIOENCODING"]
+  # 传的是副本: 调用方的 dict 不被就地修改，可安全复用
+  assert payload == {"PYTEST_XDIST_WORKER": "gw9", "TM_DAY59_PROBE": "1"}
+
+
+@allure.feature("Day59 Day58复核归位")
+@allure.story("P3-⑤ testnodedown 崩溃路径")
+@allure.title("worker 崩溃（error 非 None 且无 workeroutput）时合并静默跳过、保留已有统计")
+def test_testnodedown_survives_crashed_worker(
+  plugin: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  """
+  P3-⑤ 的靶子: 崩溃 worker 不会走正常的 `workerfinished` 上报，master 收到的
+  `error` 非 None，`workeroutput` 可能为 None / 缺键 / 形态非法。三条路径都
+  必须 ①不抛异常（否则 master 收尾被打断、整场报告的写入也随之中断）；
+  ②保留先到 worker 的统计，绝不因为一个 worker 崩了就把已有数据清空。
+
+  与既有用例的分工: 既有 `test_worker_collection_stats_are_reported_and_merged`
+  覆盖的是"error 恒为 None 的非法上报形态"，本用例专门把 `error` 设为异常对象
+  ——崩溃路径的真实入参形状，防止后续重构把 `error` 当成"必须为 None"。
+  """
+  healthy = {
+    "total": 4,
+    "marker_counts": {"smoke": 1},
+    "module_counts": {"tests.test_probe": 4},
+    "unregistered_marker_counts": {},
+  }
+  monkeypatch.setattr(plugin._STATE, "worker_collection_stats", None)
+  plugin.pytest_testnodedown(
+    SimpleNamespace(workeroutput={plugin.WORKER_COLLECTION_STATS_KEY: healthy}), None
+  )
+  assert plugin._STATE.worker_collection_stats == healthy
+
+  crash = RuntimeError("worker gw1 exited unexpectedly during collection")
+  for crashed_node in (
+    SimpleNamespace(workeroutput=None),
+    SimpleNamespace(workeroutput={}),
+    SimpleNamespace(workeroutput="broken"),
+    SimpleNamespace(),
+  ):
+    plugin.pytest_testnodedown(crashed_node, crash)
+    assert plugin._STATE.worker_collection_stats == healthy
+
+  # 崩溃之后健康 worker 仍可继续合并（状态未被崩溃分支改成不可写）
+  fuller = dict(healthy, total=5)
+  plugin.pytest_testnodedown(
+    SimpleNamespace(workeroutput={plugin.WORKER_COLLECTION_STATS_KEY: fuller}), crash
+  )
+  assert plugin._STATE.worker_collection_stats == fuller
+  monkeypatch.setattr(plugin._STATE, "worker_collection_stats", None)
 
