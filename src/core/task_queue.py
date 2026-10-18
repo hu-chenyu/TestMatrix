@@ -710,7 +710,7 @@ class TaskQueueClient:
     if self._backend is not None:
       try:
         self._backend.close()
-      except Exception as exc: # noqa: BLE001 测试重置不关心关闭异常
+      except Exception as exc:  # noqa: BLE001 测试重置不关心关闭异常
         logger.debug(f"任务队列后端关闭异常已忽略 | {exc}")
     self._backend = None
     # 一并清空失败冷却（Day44 热修 P1-1）：否则用例内先触发一次构建失败
@@ -1748,7 +1748,7 @@ class TaskWorker:
         continue
       try:
         self.queue_client.heartbeat(execution_id)
-      except Exception as exc: # noqa: BLE001 心跳线程绝不能因单轮异常退出
+      except Exception as exc:  # noqa: BLE001 心跳线程绝不能因单轮异常退出
         logger.debug(
           f"心跳线程单轮刷新异常（继续下一轮）| "
           f"execution_id={execution_id} | {exc}"
@@ -1911,7 +1911,7 @@ class TaskWorker:
           f"worker开始执行任务 | execution_id={execution_id} | "
           f"worker_id={self.worker_id}"
         )
-      except Exception as exc: # noqa: BLE001 线程绝不能因单轮异常退出
+      except Exception as exc:  # noqa: BLE001 线程绝不能因单轮异常退出
         logger.error(
           f"worker单轮处理异常（已跳过本轮，循环继续）| "
           f"异常: {type(exc).__name__}: {exc}"
@@ -1927,7 +1927,7 @@ class TaskWorker:
           cases=payload.get("cases", []),
           executor_kind=payload.get("executor_kind"),
         )
-      except Exception as exc: # noqa: BLE001 双保险: 理论上执行体已全兜底
+      except Exception as exc:  # noqa: BLE001 双保险: 理论上执行体已全兜底
         # worker绝不能因任务异常退出循环
         task_error = f"{type(exc).__name__}: {exc}"
         logger.error(
@@ -1971,7 +1971,7 @@ class TaskWorker:
         else:
           terminal_status = STATUS_FAILED
           terminal_error = task_error or "批次状态查询为空"
-      except Exception as exc: # noqa: BLE001 状态查询失败不阻断收尾
+      except Exception as exc:  # noqa: BLE001 状态查询失败不阻断收尾
         terminal_status = STATUS_FAILED
         terminal_error = task_error or f"终态查询异常: {exc}"
 
@@ -2051,7 +2051,7 @@ def start_worker() -> threading.Thread | None:
       )
       _worker_thread.start()
       return _worker_thread
-    except Exception as exc: # noqa: BLE001 启动失败不阻断应用
+    except Exception as exc:  # noqa: BLE001 启动失败不阻断应用
       logger.error(f"任务队列worker启动异常 | {exc}")
       _worker_thread = None
       _stop_event = None

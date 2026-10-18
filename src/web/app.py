@@ -90,7 +90,7 @@ def create_app(config_name: str | None = None) -> Flask:
   # Day53: 执行器双模式切换（GET/POST /api/executor/mode）
   app.register_blueprint(executor_bp)     # URL前缀: /api/executor
   app.register_blueprint(reports_bp)      # URL前缀: /api/reports
-  app.register_blueprint(notifications_bp, url_prefix="/api/notifications") # 通知历史/死信查询
+  app.register_blueprint(notifications_bp, url_prefix="/api/notifications")  # 通知历史/死信查询
   # Day35: HTML页面蓝图（无/api前缀），页面路由与JSON接口严格分离，
   # 根路径 / 仍由 base_bp 返回 JSON，前端入口为 /dashboard
   app.register_blueprint(pages_bp)       # URL前缀: /（HTML页面）

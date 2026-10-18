@@ -696,7 +696,7 @@ class ExecutionOutputBus:
         self._history.append(item)
         self.last_activity = time.monotonic()
         self._condition.notify_all()
-    except Exception as exc: # noqa: BLE001 输出通道故障不得影响执行主流程
+    except Exception as exc:  # noqa: BLE001 输出通道故障不得影响执行主流程
       logger.error(
         f"执行输出投递异常（已吞掉，不影响执行主流程）| {exc}"
       )
@@ -767,7 +767,7 @@ class ExecutionOutputBus:
         self._closed = True
         self._close_reason = reason
         self._condition.notify_all()
-    except Exception as exc: # noqa: BLE001 关闭故障不得影响执行主流程
+    except Exception as exc:  # noqa: BLE001 关闭故障不得影响执行主流程
       logger.error(f"执行输出通道关闭异常 | 原因: {reason} | {exc}")
 
   @property
@@ -922,7 +922,7 @@ def prune_idle_output_buses(idle_seconds: float = OUTPUT_BUS_IDLE_SECONDS) -> li
     if stale:
       logger.info(f"已回收空闲执行输出通道 {len(stale)} 个 | {stale}")
     return stale
-  except Exception as exc: # noqa: BLE001 回收失败不影响执行主流程
+  except Exception as exc:  # noqa: BLE001 回收失败不影响执行主流程
     logger.warning(f"回收空闲执行输出通道失败（不影响执行结果）| {exc}")
     return []
 
@@ -1087,7 +1087,7 @@ class SimulatedExecutor(BaseExecutor):
       无
     """
     start_time = time.perf_counter()
-    time.sleep(0.01) # 模拟用例执行耗时
+    time.sleep(0.01)  # 模拟用例执行耗时
     duration = time.perf_counter() - start_time
 
     # case_id末尾数字奇偶决定结果（无数字时视为偶数→passed）
@@ -1691,18 +1691,18 @@ class PytestRunner(BaseExecutor):
         读线程抛异常不该污染执行主流程）
       """
       try:
-        for line in iter(stream.readline, ""): # type: ignore[attr-defined]
+        for line in iter(stream.readline, ""):  # type: ignore[attr-defined]
           parts.append(line)
           output_bus.publish(source, line)
-      except Exception as exc: # noqa: BLE001 读线程异常不得影响执行结果
+      except Exception as exc:  # noqa: BLE001 读线程异常不得影响执行结果
         logger.warning(
           f"子进程输出读取异常（该流后续输出不再展示）| "
           f"来源: {source} | {type(exc).__name__}: {exc}"
         )
       finally:
         try:
-          stream.close() # type: ignore[attr-defined]
-        except Exception: # noqa: BLE001 关流失败无需上报
+          stream.close()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 关流失败无需上报
           logger.debug(f"子进程输出流关闭失败（可忽略）| 来源: {source}")
 
     reader_threads = [

@@ -354,7 +354,7 @@ class CacheClient:
     if self._backend is not None:
       try:
         self._backend.close()
-      except Exception as exc: # noqa: BLE001 测试重置不关心关闭异常
+      except Exception as exc:  # noqa: BLE001 测试重置不关心关闭异常
         logger.debug(f"缓存后端关闭异常已忽略 | {exc}")
     self._backend = None
 

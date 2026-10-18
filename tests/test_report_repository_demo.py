@@ -56,7 +56,7 @@ def make_stat(
   return StatisticsResult(
     total=total,
     passed=passed,
-    failed=failed, # 注意: 此处failed为failed+broken合计口径
+    failed=failed,  # 注意: 此处failed为failed+broken合计口径
     broken=broken,
     skipped=skipped,
     pass_rate=round(passed / total, 4) if total else 0.0,
@@ -115,8 +115,8 @@ class TestSaveStatistics:
 
     assert record.total_cases == 10
     assert record.passed == 5
-    assert record.failed == 2 # 3合计 - 1broken = 2纯failed
-    assert record.error == 1 # broken映射error
+    assert record.failed == 2  # 3合计 - 1broken = 2纯failed
+    assert record.error == 1  # broken映射error
     assert record.skipped == 2
     assert record.pass_rate == 0.5
     assert record.id is not None
@@ -220,7 +220,7 @@ class TestQueryStatistics:
         make_stat(total=10, passed=index + 1),
         f"RUN-LATEST-{index:04d}",
       )
-      time.sleep(0.02) # 保证created_at可区分
+      time.sleep(0.02)  # 保证created_at可区分
 
     records = ReportRepository.get_latest_statistics(limit=3)
 

@@ -370,9 +370,9 @@ class TestImportEndpointSanitization:
   def test_valid_yaml_import_still_works(self, import_client, tmp_path):
     good = (
       b"- case_id: SAN-001\n"
-      b" name: \xe5\x90\x88\xe6\xb3\x95\xe5\xaf\xbc\xe5\x85\xa5\xe7\x94\xa8\xe4\xbe\x8b\n"
-      b" module: default\n"
-      b" priority: P2\n"
+      b"  name: \xe5\x90\x88\xe6\xb3\x95\xe5\xaf\xbc\xe5\x85\xa5\xe7\x94\xa8\xe4\xbe\x8b\n"
+      b"  module: default\n"
+      b"  priority: P2\n"
     )
     data = {"file": (io.BytesIO(good), "good.yaml")}
     resp = import_client.post(
@@ -392,9 +392,9 @@ class TestImportEndpointSanitization:
   def test_reimport_is_idempotent(self, import_client):
     good = (
       b"- case_id: SAN-002\n"
-      b" name: \xe5\x8c\x95\xe6\x96\x87\xe6\xa1\x88\xe4\xbe\x8b\n"
-      b" module: default\n"
-      b" priority: P3\n"
+      b"  name: \xe5\x8c\x95\xe6\x96\x87\xe6\xa1\x88\xe4\xbe\x8b\n"
+      b"  module: default\n"
+      b"  priority: P3\n"
     )
     for _ in range(2):
       resp = import_client.post(

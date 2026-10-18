@@ -198,7 +198,7 @@ class TestCliMain:
         "--dry-run",
       ],
     )
-    main() # 正常运行不应抛SystemExit
+    main()  # 正常运行不应抛SystemExit
 
     captured = capsys.readouterr()
     assert "待执行用例列表" in captured.out
@@ -271,10 +271,10 @@ class TestSimulateExecute:
   @pytest.mark.parametrize(
     "case_id, expected_result",
     [
-      ("TM-API-0202", "passed"), # 末尾2偶数→通过
-      ("TM-API-0204", "passed"), # 末尾4偶数→通过
-      ("TM-API-0201", "failed"), # 末尾1奇数→失败
-      ("TM-API-0203", "failed"), # 末尾3奇数→失败
+      ("TM-API-0202", "passed"),  # 末尾2偶数→通过
+      ("TM-API-0204", "passed"),  # 末尾4偶数→通过
+      ("TM-API-0201", "failed"),  # 末尾1奇数→失败
+      ("TM-API-0203", "failed"),  # 末尾3奇数→失败
     ],
     ids=["偶数2通过", "偶数4通过", "奇数1失败", "奇数3失败"],
   )

@@ -370,7 +370,7 @@ class TestTaskQueueClientUnit:
     client._backend = _DownRedis()
     assert client.enqueue("RUN-DOWN", {"execution_id": "RUN-DOWN"}) is False
     assert client.dequeue(timeout=0.1) is None, "出队异常也应返回None"
-    client.set_status("RUN-DOWN", "pending") # 静默no-op不抛异常
+    client.set_status("RUN-DOWN", "pending")  # 静默no-op不抛异常
     # Day45 问题1：出队故障必须被记录下来，worker 才能退避。
     # 修复前 dequeue 对故障与"队列空"一视同仁地返回 None，worker 的
     # 判据 `_backend is None` 在"后端已构建但连接断开"时为假，

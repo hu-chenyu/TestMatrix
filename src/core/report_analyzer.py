@@ -272,7 +272,7 @@ class ReportAnalyzer:
       try:
         results.append(ReportAnalyzer.parse_result_file(file_path))
       except (
-        json.JSONDecodeError, # JSON语法非法
+        json.JSONDecodeError,  # JSON语法非法
         ValueError,       # 顶层结构非JSON对象
         AttributeError,     # 字段形态异常
         TypeError,       # 字段类型异常
@@ -982,8 +982,8 @@ class ReportRepository:
       execution_id=execution_id,
       total_cases=stat.total,
       passed=stat.passed,
-      failed=stat.failed - stat.broken, # 剔除broken得到纯failed
-      error=stat.broken, # broken映射error（环境/代码异常）
+      failed=stat.failed - stat.broken,  # 剔除broken得到纯failed
+      error=stat.broken,  # broken映射error（环境/代码异常）
       skipped=stat.skipped,
       pass_rate=stat.pass_rate,
       remark=remark,
@@ -991,7 +991,7 @@ class ReportRepository:
     try:
       with DatabaseSession.session_scope() as session:
         session.add(record)
-        session.flush() # 立即写库以获取自增id与created_at
+        session.flush()  # 立即写库以获取自增id与created_at
         saved_id = record.id
         logger.info(
           f"统计结果入库成功 | 批次: {execution_id} | "

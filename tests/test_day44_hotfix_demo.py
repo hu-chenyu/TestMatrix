@@ -169,7 +169,7 @@ class TestP11WorkerNoHotSpin:
       calls.append(1)
       return original()
 
-    client._get_backend = counting # type: ignore[method-assign]
+    client._get_backend = counting  # type: ignore[method-assign]
     stop = threading.Event()
     worker = tq_mod.TaskWorker(queue_client=client, stop_event=stop)
     thread = threading.Thread(target=worker.run, daemon=True)
@@ -219,7 +219,7 @@ class TestP11WorkerNoHotSpin:
       assert client._get_backend() is None, "坏 URL 应构建失败"
       assert client._failed_until > 0.0, "失败后应进入冷却"
       monkeypatch.setenv("TM_REDIS_URL", "fake://")
-      client._failed_until = time.monotonic() - 0.1 # 冷却已过期、标记仍为正
+      client._failed_until = time.monotonic() - 0.1  # 冷却已过期、标记仍为正
       with loguru_records(level="INFO") as records:
         backend = client._get_backend()
       assert backend is not None, "冷却期满后应能重新构建并自愈"
@@ -302,7 +302,7 @@ class TestP11WorkerNoHotSpin:
     """
     assert queue_client._get_backend() is not None, "fake:// 应构建成功"
     stop = threading.Event()
-    stop.set() # 循环不进入，验证 run() 干净返回
+    stop.set()  # 循环不进入，验证 run() 干净返回
     worker = tq_mod.TaskWorker(queue_client=queue_client, stop_event=stop)
     started = time.monotonic()
     worker.run()

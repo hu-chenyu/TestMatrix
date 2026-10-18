@@ -66,7 +66,7 @@ def _extract_function_body(source: str, func_name: str) -> str:
   )
   assert match is not None, f"未找到函数定义: {func_name}"
 
-  index = match.end() - 1 # 指向函数体的开括号
+  index = match.end() - 1  # 指向函数体的开括号
   depth = 0
   quote: str | None = None
   position = index

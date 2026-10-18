@@ -9,15 +9,15 @@
 
 1. **任务调度**：trigger 接口产生"执行某批次"的任务，需要可靠地被 worker 取走执行，不能丢。
 2. **执行事件**：批次执行过程中向前端 SSE 推送 batch_start/case_finished/batch_finished，
-  订阅者可以多个（多标签页），允许在通道终态后走 DB 快照补发。
+    订阅者可以多个（多标签页），允许在通道终态后走 DB 快照补发。
 
 ## 决策
 
 - **任务调度**：Redis **list**（LPUSH 入队 + BRPOP 阻塞出队，FIFO），见 `src/core/task_queue.py`。
 - **执行事件**：保留**进程内事件通道** `src/core/event_bus.py`（有界历史环 + Condition 多订阅广播），
- 不替换为 pub/sub。两者并存、职责正交。
+  不替换为 pub/sub。两者并存、职责正交。
 - 队列与缓存均**默认关闭、故障静默降级**：Redis 不可用时队列 enqueue 返回 False，
- 路由回退 Day24 裸线程链路，任务不丢、接口不 500。
+  路由回退 Day24 裸线程链路，任务不丢、接口不 500。
 
 ## 备选方案与取舍
 
@@ -34,8 +34,8 @@
 ## 后果
 
 - 正向：任务不丢（持久取走）、事件不重（DB 为权威态，event_bus 只做实时扇出）；
- 默认关闭保证 422 条既有测试与离线体验零回归；单 worker 串行契合 SQLite 单文件写锁。
+  默认关闭保证 422 条既有测试与离线体验零回归；单 worker 串行契合 SQLite 单文件写锁。
 - 负向：单 worker 无水平扩展能力；进程重启时 list 中的任务 payload 仍在但 worker 需自行恢复
- （当前 payload 含 cases 快照，重启后可重新消费，批次状态以 DB 为准）。
+  （当前 payload 含 cases 快照，重启后可重新消费，批次状态以 DB 为准）。
 - 后续动作：worker 多机部署成为真实需求时，演进路径为 list → Stream（消费组）或切换 Celery，
- 届时新建 ADR；event_bus 的替换触发条件是"worker 与 web 不在同一进程"。
+  届时新建 ADR；event_bus 的替换触发条件是"worker 与 web 不在同一进程"。

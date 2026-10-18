@@ -313,7 +313,7 @@ def _safe_invalidate(operation: str, invalidate: Any) -> None:
   """
   try:
     invalidate()
-  except Exception as cache_exc: # noqa: BLE001 缓存故障不得阻断业务
+  except Exception as cache_exc:  # noqa: BLE001 缓存故障不得阻断业务
     logger.warning(
       f"缓存失效异常已忽略（不影响{operation}结果） | "
       f"操作: {operation} | {type(cache_exc).__name__}: {cache_exc}"
@@ -3010,7 +3010,7 @@ class CaseManager:
             status=allure_status,
             description="",
             start=0,
-            stop=int(round(record.duration * 1000)), # 秒→毫秒
+            stop=int(round(record.duration * 1000)),  # 秒→毫秒
             history_id=record.case_id,
             labels={
               "feature": [module or "unknown"],
@@ -3106,7 +3106,7 @@ class CaseManager:
       无
     """
     start_time = time.perf_counter()
-    time.sleep(0.01) # 模拟用例执行耗时
+    time.sleep(0.01)  # 模拟用例执行耗时
     duration = time.perf_counter() - start_time
 
     # case_id末尾数字奇偶决定结果（无数字时视为偶数→passed）

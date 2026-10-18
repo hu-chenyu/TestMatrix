@@ -23,14 +23,14 @@
 
 ```
 CaseManager._execute_batch_async
- → executors.run_one(case)           # case 字典来自 _to_dict
-   → resolve_bridge_execution_id(case)     # executors.py L497-530
-     ① case["execution_id"] 非空 → 直接复用
-     ② 否则 → f"pytest-{case_id}"      # ← 伪批次在此产生
-   → bridge_results_dir(allure_dir, 该批次号) # report_analyzer.py L1760
-     → ReportStatistics.aggregate(results)
-     → ReportRepository.save_statistics(stat, execution_id, remark)
-       # defect_statistics.execution_id 有 unique 约束，刻意不静默更新
+  → executors.run_one(case)           # case 字典来自 _to_dict
+      → resolve_bridge_execution_id(case)     # executors.py L497-530
+          ① case["execution_id"] 非空 → 直接复用
+          ② 否则 → f"pytest-{case_id}"      # ← 伪批次在此产生
+      → bridge_results_dir(allure_dir, 该批次号) # report_analyzer.py L1760
+          → ReportStatistics.aggregate(results)
+          → ReportRepository.save_statistics(stat, execution_id, remark)
+              # defect_statistics.execution_id 有 unique 约束，刻意不静默更新
 ```
 
 ### 2.2 三条代码注释已经把问题写明了（Day50 作者已知并显式声明）

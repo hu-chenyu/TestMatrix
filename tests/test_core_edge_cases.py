@@ -93,7 +93,7 @@ class TestDataDriverEdgeCases:
     """
     bad_file = tmp_path / "missing_field.yaml"
     bad_file.write_text(
-      "- name: 缺失编号用例\n module: 用户管理\n priority: P0\n",
+      "- name: 缺失编号用例\n  module: 用户管理\n  priority: P0\n",
       encoding="utf-8",
     )
 
@@ -131,7 +131,7 @@ class TestDataDriverEdgeCases:
     sheet = workbook.active
     sheet.append(["case_id", "name", "module", "priority", "tags"])
     sheet.append(["TM-E-001", "正常用例", "边界测试", "P0", "smoke"])
-    sheet.append([None, None, None, None, None]) # 整行空，跳过
+    sheet.append([None, None, None, None, None])  # 整行空，跳过
     sheet.append(["TM-E-002", "第二条", "边界测试", "P1", "api"])
     excel_file = tmp_path / "blank_rows.xlsx"
     workbook.save(excel_file)
@@ -154,8 +154,8 @@ class TestDataDriverEdgeCases:
     """
     data_file = tmp_path / "cases.yaml"
     data_file.write_text(
-      "- case_id: TM-0001\n name: 用例\n module: 用户管理\n"
-      " priority: P0\n tags: [smoke]\n",
+      "- case_id: TM-0001\n  name: 用例\n  module: 用户管理\n"
+      "  priority: P0\n  tags: [smoke]\n",
       encoding="utf-8",
     )
     cases = DataDriver.load_cases(data_file)
@@ -182,12 +182,12 @@ class TestDataDriverEdgeCases:
     """
     data_file = tmp_path / "multi.yaml"
     data_file.write_text(
-      "- case_id: TM-0001\n name: 命中\n module: 用户管理\n"
-      " priority: P0\n tags: [smoke, api]\n"
-      "- case_id: TM-0002\n name: 模块不符\n module: 订单\n"
-      " priority: P0\n tags: [smoke]\n"
-      "- case_id: TM-0003\n name: 标签不符\n module: 用户管理\n"
-      " priority: P0\n tags: [regression]\n",
+      "- case_id: TM-0001\n  name: 命中\n  module: 用户管理\n"
+      "  priority: P0\n  tags: [smoke, api]\n"
+      "- case_id: TM-0002\n  name: 模块不符\n  module: 订单\n"
+      "  priority: P0\n  tags: [smoke]\n"
+      "- case_id: TM-0003\n  name: 标签不符\n  module: 用户管理\n"
+      "  priority: P0\n  tags: [regression]\n",
       encoding="utf-8",
     )
     cases = DataDriver.load_cases(data_file)
@@ -431,7 +431,7 @@ class TestReportAnalyzerEdgeCases:
       {"failed_details": [{"name": f"case_{i}", "error": "x" * 50} for i in range(100)]},
       ensure_ascii=False,
     )
-    assert len(long_remark) > 5000 # 确认构造出超长文本
+    assert len(long_remark) > 5000  # 确认构造出超长文本
 
     ReportRepository.save_statistics(
       StatisticsResult(total=5, passed=5, pass_rate=1.0),

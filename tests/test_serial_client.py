@@ -169,13 +169,13 @@ class TestSerialClientCommands:
     fake_serial.is_open = True
     client = SerialClient(port="loop://")
     client._serial = fake_serial
-    client.read_until = MagicMock(return_value="DEVICE_READY") # send_command 调 self.read_until
+    client.read_until = MagicMock(return_value="DEVICE_READY")  # send_command 调 self.read_until
     client.read_all = MagicMock(return_value="ALL_OUTPUT")
     try:
       result = client.send_command("AT+VERSION\n", expect="DEVICE_READY", wait_time=0)
       assert result == "DEVICE_READY"
       client.read_until.assert_called_once()
-      assert "DEVICE_READY" not in "AT+VERSION\n" # 特征串确实不来自命令回显
+      assert "DEVICE_READY" not in "AT+VERSION\n"  # 特征串确实不来自命令回显
       client.read_all.assert_not_called()
     finally:
       client.close()
@@ -217,8 +217,8 @@ class TestSerialClientCommands:
 
   def test_read_until超时抛串口异常(self, loop_client: SerialClient) -> None:
     """expect 特征在超时窗口内不出现（只写不含特征的数据）时抛 SerialClientError。"""
-    loop_client._serial.write(b"NO_MARKER_HERE\n") # noqa: SLF001 白盒构造超时输入
-    loop_client._serial.flush() # noqa: SLF001
+    loop_client._serial.write(b"NO_MARKER_HERE\n")  # noqa: SLF001 白盒构造超时输入
+    loop_client._serial.flush()  # noqa: SLF001
     with pytest.raises(SerialClientError, match="读取超时"):
       loop_client.read_until(expect="##NEVER_APPEAR##", timeout=0.2)
 
@@ -231,7 +231,7 @@ class TestSerialClientCommands:
 
   def test_read_all空缓冲返回空字符串(self, loop_client: SerialClient) -> None:
     """接收缓冲无数据时 read_all 返回空字符串而非报错。"""
-    loop_client._serial.reset_input_buffer() # noqa: SLF001 确保缓冲为空
+    loop_client._serial.reset_input_buffer()  # noqa: SLF001 确保缓冲为空
     assert loop_client.read_all() == ""
 
   def test_read_all未打开抛串口异常(self) -> None:
@@ -390,7 +390,7 @@ class TestSerialClientMockedPaths:
     fake_serial.close.side_effect = serial.SerialException("close io error")
     client = SerialClient(port="loop://")
     client._serial = fake_serial
-    client.close() # 不抛异常
+    client.close()  # 不抛异常
     assert client._serial is None
 
   def test_清空接收缓冲失败不阻断命令发送(self) -> None:

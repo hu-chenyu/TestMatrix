@@ -127,7 +127,7 @@ class TestEventBusClosedInsideLock:
       """发布方：会阻塞在 channel._condition 上直到主线程放锁"""
       try:
         channel.publish(published)
-      except BaseException as exc: # noqa: BLE001 测试需捕获全部
+      except BaseException as exc:  # noqa: BLE001 测试需捕获全部
         errors.append(exc)
 
     # 1. 主线程先持锁

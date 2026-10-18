@@ -30,7 +30,7 @@ from src.common.logger import LogManager
 # 脱敏原语与字段表已收敛到 src/common/security.py（Day45 第 2 批方案 A）。
 # 此处按名字再导出，是为了让既有调用方/测试继续从 http_client 取到它们——
 # 收敛的是实现的单点性，不是模块 API 面（6.33 决策）。
-from src.common.security import ( # noqa: F401
+from src.common.security import (  # noqa: F401
   MASK as QUERY_MASK,
 )
 from src.common.security import (
@@ -479,7 +479,7 @@ class HttpClient:
       # 显式标注 str：requests 未提供 py.typed，mypy 把
       # response.text 当 Any，直接 return 会触发 no-any-return
       raw: str = response.text
-    except Exception as exc: # noqa: BLE001 二进制/编码异常统一兜底
+    except Exception as exc:  # noqa: BLE001 二进制/编码异常统一兜底
       return f"<响应体读取失败: {exc}>"
 
     # 非 JSON 不做解析：保持原文，避免正则脱敏的误伤

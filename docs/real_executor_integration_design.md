@@ -52,8 +52,8 @@ path = str(case.get("script_path") or case.get("case_id", ""))
 （`case_manager.py:2601-2626`）也不产出该键。也就是说：
 
 - 生产链路里 `case.get("script_path")` **恒返回 `None`**（`TestCase` 无此字段、
- `_to_dict` 也不产出，字典取不到键时 `.get` 不会抛 `KeyError`），
- 于是 `or` 表达式永远回落到 `case_id`；
+  `_to_dict` 也不产出，字典取不到键时 `.get` 不会抛 `KeyError`），
+  于是 `or` 表达式永远回落到 `case_id`；
 - 于是命令变成 `pytest -q --tb=short -- TM-API-0001`；
 - pytest 报 `file or directory not found: TM-API-0001`，退出码 **4**；
 - 退出码 4 落在 `run_one()` 的"其他退出码 → error"分支（`executors.py:291-302`）。
@@ -102,63 +102,63 @@ Windows 上残留的 xdist worker 进程会继续占用 `output/allure_results`�
 
 ```mermaid
 flowchart TD
-  subgraph Web["Web 层（src/web）"]
-    TRIGGER["POST /api/executions/trigger<br/>executions.py:251"]
-    STATUS["GET /api/executions/&lt;id&gt;/status"]
-    SSE["GET /api/executions/&lt;id&gt;/events<br/>SSE 流"]
-    PAGES["/executions 页面<br/>Day53 接入真实输出"]
-  end
+    subgraph Web["Web 层（src/web）"]
+        TRIGGER["POST /api/executions/trigger<br/>executions.py:251"]
+        STATUS["GET /api/executions/&lt;id&gt;/status"]
+        SSE["GET /api/executions/&lt;id&gt;/events<br/>SSE 流"]
+        PAGES["/executions 页面<br/>Day53 接入真实输出"]
+    end
 
-  subgraph Core["核心层（src/core）"]
-    CM["CaseManager<br/>_execute_batch_async<br/>case_manager.py:1881"]
-    EXEC["执行器层（Day48 重构）"]
-    SIM["SimulatedExecutor<br/>（保留，Day53 双模式）"]
-    PYR["PytestRunner（重写）"]
-    PROC["ProcessRunner<br/>Popen + 流式读取 + 超时杀树"]
-    PARSER["ResultBridge<br/>AllureResult → CaseResult"]
-    RA["ReportAnalyzer<br/>（Day11 既有，不改）"]
-  end
+    subgraph Core["核心层（src/core）"]
+        CM["CaseManager<br/>_execute_batch_async<br/>case_manager.py:1881"]
+        EXEC["执行器层（Day48 重构）"]
+        SIM["SimulatedExecutor<br/>（保留，Day53 双模式）"]
+        PYR["PytestRunner（重写）"]
+        PROC["ProcessRunner<br/>Popen + 流式读取 + 超时杀树"]
+        PARSER["ResultBridge<br/>AllureResult → CaseResult"]
+        RA["ReportAnalyzer<br/>（Day11 既有，不改）"]
+    end
 
-  subgraph Queue["调度层"]
-    TQ["TaskQueueClient / TaskWorker<br/>（Day32 既有）"]
-    PEND["pending + worker_id + 心跳<br/>（Day51 新增）"]
-  end
+    subgraph Queue["调度层"]
+        TQ["TaskQueueClient / TaskWorker<br/>（Day32 既有）"]
+        PEND["pending + worker_id + 心跳<br/>（Day51 新增）"]
+    end
 
-  subgraph Ext["外部进程与产物"]
-    PYTEST["pytest 子进程<br/>（批次级单进程）"]
-    ART["output/executions/&lt;batch&gt;/<br/>allure_results/ + stdout.log"]
-  end
+    subgraph Ext["外部进程与产物"]
+        PYTEST["pytest 子进程<br/>（批次级单进程）"]
+        ART["output/executions/&lt;batch&gt;/<br/>allure_results/ + stdout.log"]
+    end
 
-  subgraph Bus["实时事件"]
-    EB["EventChannel<br/>（Day25/26 既有）"]
-  end
+    subgraph Bus["实时事件"]
+        EB["EventChannel<br/>（Day25/26 既有）"]
+    end
 
-  subgraph DB["持久化（src/db）"]
-    BATCH["test_execution_batches<br/>状态机 + 冗余计数"]
-    EXEC_TBL["test_executions<br/>单用例明细"]
-    STAT["defect_statistics<br/>批次汇总"]
-  end
+    subgraph DB["持久化（src/db）"]
+        BATCH["test_execution_batches<br/>状态机 + 冗余计数"]
+        EXEC_TBL["test_executions<br/>单用例明细"]
+        STAT["defect_statistics<br/>批次汇总"]
+    end
 
-  TRIGGER --> CM
-  CM --> TQ
-  TQ --> PEND
-  PEND --> CM
-  CM --> EXEC
-  EXEC --> SIM
-  EXEC --> PYR
-  PYR --> PROC
-  PROC --> PYTEST
-  PYTEST --> ART
-  ART --> PARSER
-  PARSER --> RA
-  RA --> EXEC_TBL
-  RA --> STAT
-  EXEC_TBL --> BATCH
-  CM --> EB
-  EB --> SSE
-  BATCH --> STATUS
-  EXEC_TBL --> PAGES
-  SSE --> PAGES
+    TRIGGER --> CM
+    CM --> TQ
+    TQ --> PEND
+    PEND --> CM
+    CM --> EXEC
+    EXEC --> SIM
+    EXEC --> PYR
+    PYR --> PROC
+    PROC --> PYTEST
+    PYTEST --> ART
+    ART --> PARSER
+    PARSER --> RA
+    RA --> EXEC_TBL
+    RA --> STAT
+    EXEC_TBL --> BATCH
+    CM --> EB
+    EB --> SSE
+    BATCH --> STATUS
+    EXEC_TBL --> PAGES
+    SSE --> PAGES
 ```
 
 ### 2.2 各环节职责边界
@@ -180,17 +180,17 @@ flowchart TD
 
 ```
 用例(含 source_ref)
- → PytestRunner.build_command → 命令列表
- → ProcessRunner 起进程    → stdout/stderr 逐行
- → 实时进度解析（仅供 SSE）  → case_progress 事件
- → 进程退出 + 产物落 output/executions/<batch>/
- → ResultBridge 读 allure_results/*.json
- → ReportAnalyzer.parse_results_dir → list[AllureResult]
- → 状态映射 + traceback 解析  → CaseResult
- → record_execution 落 test_executions（逐条）
- → case_finished 事件 → SSE
- → finish_execution 聚合 → defect_statistics
- → batch_finished 事件 → 关闭通道 → 通知
+  → PytestRunner.build_command → 命令列表
+  → ProcessRunner 起进程    → stdout/stderr 逐行
+  → 实时进度解析（仅供 SSE）  → case_progress 事件
+  → 进程退出 + 产物落 output/executions/<batch>/
+  → ResultBridge 读 allure_results/*.json
+  → ReportAnalyzer.parse_results_dir → list[AllureResult]
+  → 状态映射 + traceback 解析  → CaseResult
+  → record_execution 落 test_executions（逐条）
+  → case_finished 事件 → SSE
+  → finish_execution 聚合 → defect_statistics
+  → batch_finished 事件 → 关闭通道 → 通知
 ```
 
 ---
@@ -205,25 +205,25 @@ flowchart TD
 
 ```python
 [
-  sys.executable, "-m", "pytest",
-  "-p", "no:cacheprovider",
-  "-q", "--tb=long",
-  "--alluredir", str(batch_dir / "allure_results"),
-  "--junitxml", str(batch_dir / "junit.xml"),
-  "--", *target_paths,     # 多个目标（用例的 source_ref 去重）
+    sys.executable, "-m", "pytest",
+    "-p", "no:cacheprovider",
+    "-q", "--tb=long",
+    "--alluredir", str(batch_dir / "allure_results"),
+    "--junitxml", str(batch_dir / "junit.xml"),
+    "--", *target_paths,     # 多个目标（用例的 source_ref 去重）
 ]
 ```
 
 要点与理由：
 
 1. **`--` 必须在所有选项之后、目标路径之前**（Day44 P1-01 的教训，不可再犯）。
-  argparse 在 `--` 之后停止解析选项，其后全部元素都是位置参数。
+    argparse 在 `--` 之后停止解析选项，其后全部元素都是位置参数。
 2. **目标路径由 `source_ref` 提供**（第 5 章），多用例的 `source_ref` 去重后
-  一次性传入，让 pytest 一次收集并跑完。**不再逐条起进程**。
+    一次性传入，让 pytest 一次收集并跑完。**不再逐条起进程**。
 3. **保留单用例模式**：`case_type=chip`（串口/telnet 用例）需要独占硬件，
-  仍走"一条用例一个进程"，但这是显式例外而非默认路径。
+    仍走"一条用例一个进程"，但这是显式例外而非默认路径。
 4. **`--alluredir` 必须指向批次隔离目录**，不能是共享的 `output/allure_results`
-  （理由见 3.6）。
+    （理由见 3.6）。
 
 **为什么不是"每用例一进程"**：见 1.2 缺口一的实测数据（31.4 分钟 vs 70 秒）。
 **为什么不是"in-process 调用 pytest.main()"**：`pytest.main()` 会在 worker 线程里
@@ -233,11 +233,11 @@ flowchart TD
 ### 3.2 命令拼装的安全性约束
 
 - **绝不把 `case_id` 直接当路径**（缺口二）。目标路径只能来自 `source_ref`，
- 且入库前经 `DataDriver.CASE_ID_PATTERN`（`data_driver.py:62`）同级校验。
+  且入库前经 `DataDriver.CASE_ID_PATTERN`（`data_driver.py:62`）同级校验。
 - 路径必须落在项目根内：`Path(target).resolve().relative_to(PROJECT_ROOT)`
- 失败即拒绝执行（防路径穿越）。
+  失败即拒绝执行（防路径穿越）。
 - 环境变量透传白名单：不透传子进程继承的任意 `TM_*`（避免子进程里的
- 平台配置影响被测代码），只显式设置下节列出的那几个。
+  平台配置影响被测代码），只显式设置下节列出的那几个。
 
 ### 3.3 超时控制（三层防线）
 
@@ -254,10 +254,10 @@ flowchart TD
 ```python
 # Windows: 建独立进程组，taskkill /T 杀整棵树
 proc = subprocess.Popen(cmd, stdout=PIPE, stderr=STDOUT,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
 def kill_tree(proc):
-  subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-          capture_output=True)
+    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True)
 # POSIX: 先杀子进程组，再杀主进程
 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
 ```
@@ -274,31 +274,31 @@ Day50 引入批次隔离目录后风险面进一步扩大，必须 L1/L3 都杀�
 
 ```python
 proc = subprocess.Popen(
-  cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-  text=True, encoding="utf-8", errors="replace", bufsize=1,
-  # cwd 必须是**项目根**，不是批次目录（3.6 表格 + ADR 决策 4 的唯一口径）：
-  # pytest 依赖项目根的 pytest.ini（testpaths/pythonpath=.）与 conftest.py，
-  # 改 cwd 会让 pythonpath=. 失效、用例 import 不到 src。隔离靠 batch_dir
-  # 承载产物（alluredir/junit/日志/tmp），不靠工作目录。
-  cwd=str(PROJECT_ROOT), env=child_env, creationflags=NEW_PROCESS_GROUP,
+    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    text=True, encoding="utf-8", errors="replace", bufsize=1,
+    # cwd 必须是**项目根**，不是批次目录（3.6 表格 + ADR 决策 4 的唯一口径）：
+    # pytest 依赖项目根的 pytest.ini（testpaths/pythonpath=.）与 conftest.py，
+    # 改 cwd 会让 pythonpath=. 失效、用例 import 不到 src。隔离靠 batch_dir
+    # 承载产物（alluredir/junit/日志/tmp），不靠工作目录。
+    cwd=str(PROJECT_ROOT), env=child_env, creationflags=NEW_PROCESS_GROUP,
 )
 for line in proc.stdout:     # 逐行，天然流式
-  ring.append(line)       # 环形缓冲（留尾部 N 行）
-  full_log.write(line)     # 完整落盘
-  progress_parser.feed(line)  # 实时进度（仅供 SSE，不作结果来源）
+    ring.append(line)       # 环形缓冲（留尾部 N 行）
+    full_log.write(line)     # 完整落盘
+    progress_parser.feed(line)  # 实时进度（仅供 SSE，不作结果来源）
 ```
 
 设计要点：
 
 - **合并 stderr 到 stdout**：pytest 的进度与失败信息主要走 stdout，
- 分开捕获会**丢失二者的相对顺序**，实时展示时"错误先于失败出现"很难解释。
- 退出码已足够区分用法错误（4）与测试失败（1）。
+  分开捕获会**丢失二者的相对顺序**，实时展示时"错误先于失败出现"很难解释。
+  退出码已足够区分用法错误（4）与测试失败（1）。
 - **编码固定 `utf-8` + `errors="replace"`**：沿用 `executors.py:50-51` 已固化的常量
- （`SUBPROCESS_ENCODING` / `SUBPROCESS_ERRORS`），Windows cp936 遇 UTF-8 中文
- 用例名会抛 `UnicodeDecodeError` 并穿透到批次级 except。
+  （`SUBPROCESS_ENCODING` / `SUBPROCESS_ERRORS`），Windows cp936 遇 UTF-8 中文
+  用例名会抛 `UnicodeDecodeError` 并穿透到批次级 except。
 - **双写**：完整输出落 `output/executions/<batch>/stdout.log`（可事后追溯），
- 内存只留环形缓冲尾部（`executors.py:54` 的 `truncate_output_tail` 已有
- "取尾部"的正确实现，直接复用其思路）。
+  内存只留环形缓冲尾部（`executors.py:54` 的 `truncate_output_tail` 已有
+  "取尾部"的正确实现，直接复用其思路）。
 - **`bufsize=1`（行缓冲）**：否则管道缓冲会让"流式"退化成"攒够 4KB 才吐"。
 
 ### 3.5 退出码语义映射
@@ -360,23 +360,23 @@ pytest 退出码契约与平台结果的映射（替换 `executors.py:272-302` �
 
 理由三条：
 1. **既有资产复用**：`ReportAnalyzer.parse_results_dir` / `AllureResult`
-  （`report_analyzer.py:78/246`）已把容错、标签合并、耗时统计写好并被 1207 条测试覆盖，
-  真实执行只是**换一个数据来源喂给它**，不是新写一套解析器。
+    （`report_analyzer.py:78/246`）已把容错、标签合并、耗时统计写好并被 1207 条测试覆盖，
+    真实执行只是**换一个数据来源喂给它**，不是新写一套解析器。
 2. **行级解析不能作权威源**：`-q` 级别、终端宽度换行、颜色转义、xdist 前缀
-  （`[gw0] `）都会改变文本形状；pytest 每次改版都可能让正则失配。
-  Day45 写这个 POC 时已吃过一次同族亏：命令行里把 `-p` 放在 `--` 之后，
-  直接被当路径报 `file or directory not found: -p`——**命令的文本形状极脆**。
+    （`[gw0] `）都会改变文本形状；pytest 每次改版都可能让正则失配。
+    Day45 写这个 POC 时已吃过一次同族亏：命令行里把 `-p` 放在 `--` 之后，
+    直接被当路径报 `file or directory not found: -p`——**命令的文本形状极脆**。
 3. **JUnit XML 作为兜底**：当 `allure-pytest` 未安装/插件加载失败时，
-  仍能拿到"哪条失败 + 失败文本"，不至于整批次无结果。JUnit 是 pytest 的稳定输出。
+    仍能拿到"哪条失败 + 失败文本"，不至于整批次无结果。JUnit 是 pytest 的稳定输出。
 
 ### 4.2 Allure 结果桥接链路
 
 ```
 output/executions/<batch>/allure_results/*-result.json
- → ReportAnalyzer.scan_results_dir(dir)   # 排序取全部 *-result.json
- → ReportAnalyzer.parse_results_dir(dir)   # → list[AllureResult]（已容错）
- → ResultBridge.to_case_results(results)   # 平台模型 + 状态映射 + traceback 解析
- → CaseManager.record_execution(...)     # 逐条落 test_executions
+  → ReportAnalyzer.scan_results_dir(dir)   # 排序取全部 *-result.json
+  → ReportAnalyzer.parse_results_dir(dir)   # → list[AllureResult]（已容错）
+  → ResultBridge.to_case_results(results)   # 平台模型 + 状态映射 + traceback 解析
+  → CaseManager.record_execution(...)     # 逐条落 test_executions
 ```
 
 `ResultBridge`（Day50 新增，建议 `src/core/result_bridge.py`）只做三件事，
@@ -390,7 +390,7 @@ output/executions/<batch>/allure_results/*-result.json
 1. 优先取 allure 标签 `feature`/`story` 上按约定写入的业务编号；
 2. 无标签时按"该 result 的 `fullName` 前缀文件路径 → 平台 `source_ref` → 用例"反查；
 3. 仍匹配不上 → 记 `unmatched` 计数并写批次日志，**不静默丢弃**
-  （丢弃会让通过率虚高）。
+    （丢弃会让通过率虚高）。
 
 **参数化与平台用例的关系**：一个平台用例可能对应多条 allure result（多组参数）。
 Day52 门禁前先按"文件级归属 + 结果按 (source_ref, 批次) 聚合"落库，
@@ -421,32 +421,32 @@ Day52 门禁前先按"文件级归属 + 结果按 (source_ref, 批次) 聚合"�
 **真实 traceback 的三个具体问题**：
 
 1. **体积**：`--tb=long` 的失败堆栈可达数十 KB，1 万条用例全失败会把
-  `test_executions.error_message`（Text）与 SSE 帧撑爆。
-  → **分层存储**：`error_message` 只存"结构化摘要 + 堆栈尾部 N 行"，
-  **完整堆栈落 `output/executions/<batch>/allure_results/`（本就在产物里）**，
-  前端按需展开时再取。当前 `truncate_output_tail` 的"取尾部"策略直接适用。
+    `test_executions.error_message`（Text）与 SSE 帧撑爆。
+    → **分层存储**：`error_message` 只存"结构化摘要 + 堆栈尾部 N 行"，
+    **完整堆栈落 `output/executions/<batch>/allure_results/`（本就在产物里）**，
+    前端按需展开时再取。当前 `truncate_output_tail` 的"取尾部"策略直接适用。
 2. **信息抽取**：`statusDetails.message` 是断言失败的一句话摘要（如
-  `assert 1 == 2`），是失败 Top 榜最该展示的字段；
-  `statusDetails.trace` 是完整堆栈。两者要**分开取**，
-  不能只存 trace 让人自己在几十 KB 里找那句话。
+    `assert 1 == 2`），是失败 Top 榜最该展示的字段；
+    `statusDetails.trace` 是完整堆栈。两者要**分开取**，
+    不能只存 trace 让人自己在几十 KB 里找那句话。
 3. **行尾与转义**：traceback 含 ANSI 颜色码（pytest 默认开）与 `\r` 进度符，
-  落库前必须清洗，否则前端 `<pre>` 里会出现乱色块。
+    落库前必须清洗，否则前端 `<pre>` 里会出现乱色块。
 
 **`TestFailure` 结构（Day50 实现）**：
 
 ```python
 @dataclass
 class TestFailure:
-  case_id: str       # 平台业务编号
-  node_id: str       # pytest node id（tests/x.py::test_y[参数]）
-  status: str        # failed / broken / skipped
-  duration: float      # 秒
-  message: str       # 断言摘要（statusDetails.message）
-  error_type: str      # 异常类名（从 trace 末行解析，如 AssertionError）
-  file_path: str | None   # 失败所在源码文件
-  line_no: int | None    # 失败所在行号
-  trace_tail: str      # 堆栈尾部（截断后落 error_message）
-  trace_full_ref: str    # 完整堆栈的产物文件引用（前端按需展开）
+    case_id: str       # 平台业务编号
+    node_id: str       # pytest node id（tests/x.py::test_y[参数]）
+    status: str        # failed / broken / skipped
+    duration: float      # 秒
+    message: str       # 断言摘要（statusDetails.message）
+    error_type: str      # 异常类名（从 trace 末行解析，如 AssertionError）
+    file_path: str | None   # 失败所在源码文件
+    line_no: int | None    # 失败所在行号
+    trace_tail: str      # 堆栈尾部（截断后落 error_message）
+    trace_full_ref: str    # 完整堆栈的产物文件引用（前端按需展开）
 ```
 
 **为什么不把完整 trace 落库**：`test_executions` 会被
@@ -456,14 +456,14 @@ class TestFailure:
 ### 4.5 实时进度解析（Day50/53）
 
 - **只做展示，不做结果**：进度事件（`case_started`/`progress`）失败或丢帧，
- **绝不影响最终落库结果**（与 6.14"事件发布绝不阻断真实执行"铁律一致）。
+  **绝不影响最终落库结果**（与 6.14"事件发布绝不阻断真实执行"铁律一致）。
 - 行级解析的可用信号：`test_x.py::test_y FAILED`、`=== FAILURES ===`、
- `[gw0] [ 45%] ...`、末尾汇总行 `3 failed, 27 passed in 1.2s`。
+  `[gw0] [ 45%] ...`、末尾汇总行 `3 failed, 27 passed in 1.2s`。
 - **xdist 前缀必须容忍**：`[gw0] ` 前缀是并发下的必然形态，Day58 接 xdist 后
- 进度行会带 worker 编号，解析器不能假设行首即 node id。
+  进度行会带 worker 编号，解析器不能假设行首即 node id。
 - **准确率的正解是自研插件**：行级解析注定是"尽力而为"。
- Day56 的自定义 pytest 插件（`pytest_collection_modifyitems` + 自定义钩子）
- 才是准确进度与结构化上报的正路，**Day50 的行级解析明确标注为过渡方案**。
+  Day56 的自定义 pytest 插件（`pytest_collection_modifyitems` + 自定义钩子）
+  才是准确进度与结构化上报的正路，**Day50 的行级解析明确标注为过渡方案**。
 
 ### 4.6 结果数据模型
 
@@ -475,8 +475,8 @@ ExecutionResult(result, error_message, duration)
 
 # 新增（Day50）：把一条 allure 结果映射为平台落库所需
 CaseResult(
-  case_id: str, node_id: str, result: str,
-  duration: float, failure: TestFailure | None, source_ref: str,
+    case_id: str, node_id: str, result: str,
+    duration: float, failure: TestFailure | None, source_ref: str,
 )
 ```
 
@@ -510,38 +510,38 @@ CaseResult(
 
 ```python
 source_ref: Mapped[str | None] = mapped_column(
-  String(512),
-  nullable=True,
-  default=None,
-  comment="用例关联的测试脚本路径（pytest 可执行目标），为空表示该用例不可被 pytest 执行",
+    String(512),
+    nullable=True,
+    default=None,
+    comment="用例关联的测试脚本路径（pytest 可执行目标），为空表示该用例不可被 pytest 执行",
 )
 ```
 
 - 用 `String(512)`（**Day46-fix 定稿，原为 `Text`**）：路径 + node id 正常不超 200 字符，
- 512 留足余量；MySQL 严格模式下 VARCHAR 有长度校验，能提前拦截异常超长输入
- （`Text` 无长度上限，异常数据会静默落库）；录入侧（Day47）再加长度校验兜底，
- 超 512 字符在录入时就拒绝，不让异常值走到库层才炸。
- 代价与边界：**SQLite 不实现 VARCHAR 长度约束**，该列在 SQLite 上不做拦截
- （Day46 已用测试钉住），真正的拦截依赖 MySQL 严格模式与录入侧校验。
+  512 留足余量；MySQL 严格模式下 VARCHAR 有长度校验，能提前拦截异常超长输入
+  （`Text` 无长度上限，异常数据会静默落库）；录入侧（Day47）再加长度校验兜底，
+  超 512 字符在录入时就拒绝，不让异常值走到库层才炸。
+  代价与边界：**SQLite 不实现 VARCHAR 长度约束**，该列在 SQLite 上不做拦截
+  （Day46 已用测试钉住），真正的拦截依赖 MySQL 严格模式与录入侧校验。
 - `nullable=True` + `default=None`：存量与手工录入用例允许为空，**空值语义是
- "该用例不可被 pytest 执行"**，编排层遇空值必须跳过并明确记录
- （不能像现在这样回落到 case_id）。
+  "该用例不可被 pytest 执行"**，编排层遇空值必须跳过并明确记录
+  （不能像现在这样回落到 case_id）。
 - 类型标注写 `Mapped[str | None]` 而非裸 `Mapped[str]`：该列的空值是**业务语义**
- 而非数据瑕疵，裸 `str` 会让 mypy 放行 `case.source_ref.strip()`，运行时拿到 None
- 直接 AttributeError——用类型系统把这条契约前置到编译期。
+  而非数据瑕疵，裸 `str` 会让 mypy 放行 `case.source_ref.strip()`，运行时拿到 None
+  直接 AttributeError——用类型系统把这条契约前置到编译期。
 
 ### 5.2 与用例模型的关系：1:N 的折中
 
 **决策：一期 1:1（一列存一个目标），但表结构与查询层为 1:N 预留**。
 
 - 一期 1:1 的理由：平台当前 9 条种子用例都是"一条用例 = 一个测试文件"的粒度；
- 用一列存一列，改造成本最低、回填逻辑最简单。
+  用一列存一列，改造成本最低、回填逻辑最简单。
 - 1:N 的真实场景：一条业务用例被 3 个测试函数覆盖（正向 + 异常 + 边界）。
- 一期不做，但如果一列里塞 `path::a,path::b` 逗号串，查询与校验会立刻变复杂
- （要拆串、去重、判空），**属于为不确定的需求提前付代价**。
+  一期不做，但如果一列里塞 `path::a,path::b` 逗号串，查询与校验会立刻变复杂
+  （要拆串、去重、判空），**属于为不确定的需求提前付代价**。
 - 预留方式：`source_ref` 用 String(512) 存单值（不塞多值），**1:N 演进路径是新增
- `test_case_sources` 关联表**（Day47 视实际需要决定是否建），而不是把一列撑成多值串。
- 关联表方案还能顺手承载"主/次"标记与历史。
+  `test_case_sources` 关联表**（Day47 视实际需要决定是否建），而不是把一列撑成多值串。
+  关联表方案还能顺手承载"主/次"标记与历史。
 
 ### 5.3 存量回填策略
 
@@ -618,9 +618,9 @@ MySQL 场景下 `ALTER TABLE ... ADD COLUMN` 是原子的、不丢数据，届�
 
 真实执行最容易出的事故不是报错，而是**假绿**：
 - 退出码 0 但没收集到用例（`--collect-only` 误配）→ 必须校验
- `len(case_results) > 0`；
+  `len(case_results) > 0`；
 - 产物目录残留上一次的旧结果 → **批次隔离目录 + 运行前清空**是硬要求
- （`--clean-alluredir` 在共享目录上的 WinError 145 已有前车之鉴）；
+  （`--clean-alluredir` 在共享目录上的 WinError 145 已有前车之鉴）；
 - `unmatched` 计数 > 0 却仍记 `finished` → 门禁要求 `unmatched == 0`。
 
 **Day52 门禁要显式断言这三条**，而不是只看 `status == "finished"`。
@@ -629,14 +629,14 @@ MySQL 场景下 `ALTER TABLE ... ADD COLUMN` 是原子的、不丢数据，届�
 
 ```
 pending ──(worker 领取, 写 worker_id+心跳)──> running ──> finished
-  ↑                       │
-  └──────(崩溃扫描: pending 超时 → 回 pending)──── failed
+    ↑                       │
+    └──────(崩溃扫描: pending 超时 → 回 pending)──── failed
 ```
 
 - Day51 要求的 `(batch_id, case_id)` 唯一键是**防重复消费的最后一道闸**：
- worker 崩溃后任务重回队列，若原 worker 其实已落库，重跑会产生重复明细。
+  worker 崩溃后任务重回队列，若原 worker 其实已落库，重跑会产生重复明细。
 - 心跳的作用是区分"卡住"与"已死"：心跳超时的 pending 任务才可被回收，
- 否则慢批次会被误回收。
+  否则慢批次会被误回收。
 - 这些都在 `task_queue.py`（Day51），与执行器解耦，**Day48-50 不碰**。
 
 ---
@@ -690,32 +690,32 @@ Day48 之后全部顺延——**这是本阶段最大的排期风险**。
 ### 9.1 功能门禁（全部必过）
 
 1. **真跑通过**：`TM_EXECUTOR=pytest` 跑一条 `assert True` 用例 →
-  `test_executions.result == "passed"`，`start_time`/`end_time`/`duration` 非空。
+    `test_executions.result == "passed"`，`start_time`/`end_time`/`duration` 非空。
 2. **真跑失败**：`assert False` 用例 → `result == "failed"`，
-  `error_message` 含**真实** `AssertionError` 文本（不是"模拟执行失败"）。
+    `error_message` 含**真实** `AssertionError` 文本（不是"模拟执行失败"）。
 3. **真实 traceback 贯通**：失败堆栈能从 pytest → 桥接 → DB → Web API
-  完整取回，且 `statusDetails.message` 的断言摘要与 trace 尾部**分字段可见**。
+    完整取回，且 `statusDetails.message` 的断言摘要与 trace 尾部**分字段可见**。
 4. **结果入库聚合一致**：`test_executions` 明细计数
-  == `defect_statistics` 汇总 == `test_execution_batches` 冗余计数（三层对得上，同 6.17）。
+    == `defect_statistics` 汇总 == `test_execution_batches` 冗余计数（三层对得上，同 6.17）。
 5. **Web 可见**：批次详情接口返回真实用例名与真实失败堆栈，非模拟文案。
 6. **退出码 4 有诊断**：故意配不存在的 `source_ref` → 批次 `failed` 且
-  error_message **点名具体路径**，不出现"静默 passed"。
+    error_message **点名具体路径**，不出现"静默 passed"。
 
 ### 9.2 健壮性门禁
 
 7. **超时可杀**：构造一个 `time.sleep(999)` 的用例 → 触发 L1 超时后
-  **进程树全灭**（`tasklist` 查无残留 pytest/xdist 进程），批次 `failed`。
+    **进程树全灭**（`tasklist` 查无残留 pytest/xdist 进程），批次 `failed`。
 8. **崩溃可恢复**：worker 执行中 `kill -9` → pending 任务超时后回队列被重新消费，
-  **DB 中该任务只有一条明细**（`(batch_id, case_id)` 唯一键生效）。
+    **DB 中该任务只有一条明细**（`(batch_id, case_id)` 唯一键生效）。
 9. **并发不重复**：两个 worker 同时启动 → 同一任务不被双跑（pending+心跳生效）。
 10. **不假绿**：产物目录为空 / 未收集到用例 / `unmatched > 0` 三种情况
-  批次一律 `failed`，不得出现 `finished` + 0 明细。
+    批次一律 `failed`，不得出现 `finished` + 0 明细。
 
 ### 9.3 双模式门禁
 
 11. **切换无残留**：`simulated` 批次不产生任何 `output/executions/` 产物目录。
 12. **降级可见**：`source_ref` 为空的用例走模拟时，批次汇总的
-  `simulated_fallback > 0`，UI 与日志均可见（7.x 防"假真实"铁律）。
+    `simulated_fallback > 0`，UI 与日志均可见（7.x 防"假真实"铁律）。
 
 ---
 

@@ -345,7 +345,7 @@ class DataDriver:
     """
     try:
       workbook = load_workbook(path, data_only=True, read_only=True)
-    except Exception as exc: # noqa: BLE001 openpyxl抛出类型多样，统一包装
+    except Exception as exc:  # noqa: BLE001 openpyxl抛出类型多样，统一包装
       logger.error(f"Excel文件打开失败 | {path} | {exc}")
       raise DataDriverError(f"Excel文件打开失败: {exc}", file_path=path) from exc
 
@@ -385,7 +385,7 @@ class DataDriver:
           cell_value = row[col_index] if col_index < len(row) else None
           if cell_value is not None:
             case[header] = cell_value
-        case["_row_number"] = row_index # 行号暂存，校验环节用于错误定位
+        case["_row_number"] = row_index  # 行号暂存，校验环节用于错误定位
         cases.append(case)
 
       logger.info(

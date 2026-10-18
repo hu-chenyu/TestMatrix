@@ -26,6 +26,6 @@ Web 后端（Day17 启动）需要一个 Python Web 框架承载：多页面后�
 ## 后果
 
 - 正向：同步栈与后台线程模型（`_execute_batch_async`/event_bus/task_queue worker）天然契合；
- SSE 三分支（实时订阅/终态补发/DB 重建）实现直接；依赖面小。
+  SSE 三分支（实时订阅/终态补发/DB 重建）实现直接；依赖面小。
 - 负向：Flask 2.3 自 3.0（2023-09）起无安全 backport；无自动 OpenAPI（API.md 人工维护）。
 - 后续动作：经 v3.6 共识调整，Flask 大版本冻结，D75 仅做 Werkzeug/Jinja2/itsdangerous/blinker CVE 核查，不升级 3.x（升级收益低于回归风险）；3.13 兼容性在 Day74 Python 升级窗口统一验证。

@@ -1522,7 +1522,7 @@ def _safe_batch_status(execution_id: str) -> str:
   """
   try:
     status_data = CaseManager.get_execution_status(execution_id)
-  except Exception as exc: # noqa: BLE001 状态查询失败不得中断已开启的输出流
+  except Exception as exc:  # noqa: BLE001 状态查询失败不得中断已开启的输出流
     logger.warning(
       f"输出流批次状态查询异常（按未知状态继续跟流）| "
       f"批次: {execution_id} | {type(exc).__name__}: {exc}"

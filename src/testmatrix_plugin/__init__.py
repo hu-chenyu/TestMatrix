@@ -298,7 +298,7 @@ def _is_xdist_worker(config: pytest.Config) -> bool:
     if getattr(config, "pluginmanager", None) is None:
       # 替身/极端场景: 没有任何可自证的通道，只能看环境变量
       return bool(os.environ.get("PYTEST_XDIST_WORKER", ""))
-  except Exception: # noqa: BLE001 替身对象上取属性抛错时按 master 处理
+  except Exception:  # noqa: BLE001 替身对象上取属性抛错时按 master 处理
     return False
   return False
 
@@ -323,7 +323,7 @@ def read_plugin_config(config: pytest.Config) -> PluginConfig:
     report_path = str(config.getini(INI_REPORT_PATH))
     report_enabled = bool(config.getini(INI_REPORT_ENABLED))
     summary_enabled = bool(config.getini(INI_SUMMARY_ENABLED))
-  except Exception: # noqa: BLE001 ini 不可读时按默认行为继续
+  except Exception:  # noqa: BLE001 ini 不可读时按默认行为继续
     return PluginConfig(
       report_path=DEFAULT_REPORT_PATH,
       report_enabled=True,
@@ -394,7 +394,7 @@ def collect_collection_stats(config: pytest.Config) -> dict[str, Any] | None:
         "module_counts": dict(view.module_counts),
         "unregistered_marker_counts": dict(view.unregistered_marker_counts),
       }
-  except Exception: # noqa: BLE001 同上
+  except Exception:  # noqa: BLE001 同上
     return None
   return None
 
@@ -666,13 +666,13 @@ def emit_message(config: pytest.Config, message: str) -> None:
   """
   try:
     terminal = config.pluginmanager.get_plugin("terminalreporter")
-  except Exception: # noqa: BLE001 取 writer 失败同样只降级（P4-1）
+  except Exception:  # noqa: BLE001 取 writer 失败同样只降级（P4-1）
     return
   if terminal is None:
     return
   try:
     terminal.write_line(message)
-  except Exception: # noqa: BLE001 终端输出是旁路能力，写不出去不得影响会话收尾
+  except Exception:  # noqa: BLE001 终端输出是旁路能力，写不出去不得影响会话收尾
     return
 
 
@@ -848,7 +848,7 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     return
   try:
     record_report(stats, report)
-  except Exception: # noqa: BLE001 同上
+  except Exception:  # noqa: BLE001 同上
     return
 
 

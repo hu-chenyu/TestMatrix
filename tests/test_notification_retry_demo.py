@@ -239,7 +239,7 @@ class TestRetryStrategy:
     返回:
       无
     """
-    notifier = FakeNotifier("email", succeed_from=999) # 恒失败
+    notifier = FakeNotifier("email", succeed_from=999)  # 恒失败
     repo = NotificationDeadLetterRepository()
     router, sleeper = make_router(
       [notifier], repo=repo, max_retries=3
@@ -370,9 +370,9 @@ class TestDeadLetterPersistence:
     letter = dead_letters[0]
     assert letter["channel"] == "wechat"
     assert letter["execution_id"] == "RUN-DL1"
-    assert "RUN-DL1" in letter["title"] # 通知标题含批次号
-    assert letter["level"] == "info" # 全通过→info
-    assert letter["attempts"] == 2 # 1+max_retries=2
+    assert "RUN-DL1" in letter["title"]  # 通知标题含批次号
+    assert letter["level"] == "info"  # 全通过→info
+    assert letter["attempts"] == 2  # 1+max_retries=2
     assert letter["status"] == "dead"
     # content为完整消息体（企微markdown摘要全文）
     assert "测试批次执行完成" in letter["content"]

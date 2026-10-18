@@ -72,14 +72,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
   sys.path.insert(0, str(PROJECT_ROOT))
 
-from sqlalchemy import CursorResult, inspect, text # noqa: E402 (需先补 sys.path)
-from src.common.logger import LogManager # noqa: E402
-from src.core.case_manager import ( # noqa: E402
+from sqlalchemy import CursorResult, inspect, text  # noqa: E402 (需先补 sys.path)
+from src.common.logger import LogManager  # noqa: E402
+from src.core.case_manager import (  # noqa: E402
   MAX_SOURCE_REF_LENGTH,
   SOURCE_REF_PATTERN,
 )
-from src.db.db_session import DatabaseSession # noqa: E402
-from src.db.models import TestCase as CaseModel # noqa: E402
+from src.db.db_session import DatabaseSession  # noqa: E402
+from src.db.models import TestCase as CaseModel  # noqa: E402
 
 logger = LogManager.get_logger()
 
@@ -481,7 +481,7 @@ def main() -> None:
       dry_run=args.dry_run,
       limit=args.limit,
     )
-  except Exception as exc: # noqa: BLE001 CLI 顶层兜底，不甩 traceback
+  except Exception as exc:  # noqa: BLE001 CLI 顶层兜底，不甩 traceback
     # CLI 入口不能把 traceback 甩给使用者。异常消息已按类型区分：
     # RuntimeError = "列不存在，先跑迁移"这类可操作的前置条件问题；
     # 其它异常 = 数据库/文件系统故障，一并如实报出类型名。

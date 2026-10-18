@@ -25,7 +25,7 @@ logger = LogManager.get_logger()
 try:
   import serial
   import serial.tools.list_ports
-except ImportError as exc: # pragma: no cover 环境缺依赖分支
+except ImportError as exc:  # pragma: no cover 环境缺依赖分支
   raise ImportError(
     "串口功能依赖pyserial，请先安装: pip install pyserial==3.5"
   ) from exc

@@ -31,11 +31,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
   sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.common import security # noqa: E402
-from src.common.assertion import assert_header, assert_status_code # noqa: E402
-from src.common.http_client import HttpClient # noqa: E402
-from src.common.logger import LogManager # noqa: E402
-from src.common.security import ( # noqa: E402
+from src.common import security  # noqa: E402
+from src.common.assertion import assert_header, assert_status_code  # noqa: E402
+from src.common.http_client import HttpClient  # noqa: E402
+from src.common.logger import LogManager  # noqa: E402
+from src.common.security import (  # noqa: E402
   CIRCULAR_MARK,
   DEPTH_EXCEEDED_MARK,
   MASK,
@@ -324,7 +324,7 @@ def test_问题6_断言的判定逻辑本身不受影响():
   # 匹配 -> 不抛
   assert_status_code(ok, 200)
   assert_header(ok, "X-A", expected="1")
-  assert_header(ok, "Content-Type") # expected 省略时只校验存在
+  assert_header(ok, "Content-Type")  # expected 省略时只校验存在
   # 不匹配 -> 抛
   with pytest.raises(AssertionError):
     assert_status_code(ok, 404)
@@ -567,7 +567,7 @@ def test_问题1_setup失败时降级不抛(monkeypatch):
   monkeypatch.setattr(LogManager, "setup", staticmethod(boom))
   monkeypatch.setattr(LogManager, "_initialized", False)
 
-  logger = LogManager.get_logger() # 不应抛出
+  logger = LogManager.get_logger()  # 不应抛出
 
   assert logger is not None
 

@@ -79,8 +79,8 @@ logger = LogManager.get_logger()
 # publish收到非法类型直接丢弃并记警告，绝不抛异常）
 VALID_EVENT_TYPES = (
   "batch_start",   # 批次开始执行（置running后发布）
-  "case_finished", # 单条用例执行完成（record_execution成功后发布）
-  "batch_finished", # 批次正常完成（置finished后发布）
+  "case_finished",  # 单条用例执行完成（record_execution成功后发布）
+  "batch_finished",  # 批次正常完成（置finished后发布）
   "batch_failed",  # 批次异常失败（置failed后发布）
 )
 

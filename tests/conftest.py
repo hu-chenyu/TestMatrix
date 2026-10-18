@@ -50,10 +50,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
   sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.common.env_manager import env_manager # noqa: E402 (路径兜底后导入)
-from src.common.http_client import HttpClient # noqa: E402
-from src.common.logger import LogManager # noqa: E402
-from src.db.db_session import DatabaseSession # noqa: E402
+from src.common.env_manager import env_manager  # noqa: E402 (路径兜底后导入)
+from src.common.http_client import HttpClient  # noqa: E402
+from src.common.logger import LogManager  # noqa: E402
+from src.db.db_session import DatabaseSession  # noqa: E402
 
 logger = LogManager.get_logger()
 
@@ -457,7 +457,7 @@ def pytest_runtest_makereport(item, call):
         name="失败详情-自动附加",
         attachment_type=allure.attachment_type.TEXT,
       )
-    except Exception: # noqa: BLE001 附件为增强能力，失败仅降级为警告
+    except Exception:  # noqa: BLE001 附件为增强能力，失败仅降级为警告
       trace_logger.warning("失败详情附加Allure附件未成功（不影响测试结果）")
   elif report.skipped:
     trace_logger.warning(f"用例跳过 | {report.longrepr}")

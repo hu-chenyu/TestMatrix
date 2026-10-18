@@ -32,9 +32,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
   sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.db.db_session import DatabaseSession # noqa: E402
-from src.web.routes import executions as ex # noqa: E402
-from src.web.utils import MAX_LOG_FIELD_LENGTH, sanitize_log_field # noqa: E402
+from src.db.db_session import DatabaseSession  # noqa: E402
+from src.web.routes import executions as ex  # noqa: E402
+from src.web.utils import MAX_LOG_FIELD_LENGTH, sanitize_log_field  # noqa: E402
 
 PLACEHOLDER_CRED = "PLACEHOLDER-NOT-A-REAL-CRED"
 
@@ -160,7 +160,7 @@ def test_问题1_名额归还幂等(exec_client):
   )
 
   with ex._SSE_CONNECTIONS_LOCK:
-    ex._SSE_ACTIVE_CONNECTIONS["9.9.9.9"] = 2 # 两条并发流
+    ex._SSE_ACTIVE_CONNECTIONS["9.9.9.9"] = 2  # 两条并发流
   lease = ex._SseSlotLease("9.9.9.9")
   lease.release()
   lease.release()
@@ -300,7 +300,7 @@ def test_问题2_空闲流走心跳分支同样受上界约束(exec_client, monk
 
   from src.core.event_bus import get_channel
 
-  get_channel(eid, create=True) # 只建通道，不发布任何事件
+  get_channel(eid, create=True)  # 只建通道，不发布任何事件
   body = client.get(f"/api/executions/{eid}/events").get_data(as_text=True)
 
   assert "stream-lifetime-exceeded" in body, (
@@ -597,8 +597,8 @@ def test_问题5_含换行的请求路径被单行化(exec_client):
 def test_sanitize_log_field_换行与控制字符折叠():
   """公共原语自身契约：控制字符全部折叠为空格"""
   assert sanitize_log_field("a\nb") == "a b"
-  assert sanitize_log_field("a\r\nb") == "a b"
-  assert sanitize_log_field("a\x00\x1bb") == "a b"
+  assert sanitize_log_field("a\r\nb") == "a  b"
+  assert sanitize_log_field("a\x00\x1bb") == "a  b"
   assert "\n" not in sanitize_log_field("x" * 10 + "\n" + "y" * 10)
 
 

@@ -19,7 +19,7 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
 面临二选一：
 
 - **方案甲**：继续在 `conftest.py` 里扩展钩子（追加 `pytest_sessionfinish` 的第二段逻辑与
- `pytest_runtest_logreport`）；
+  `pytest_runtest_logreport`）；
 - **方案乙**：抽离为独立的 `pytest11` entry point 插件，经 `pyproject.toml` 注册、安装后由 pytest 自动加载。
 
 七个决策点按影响面排序，每个都给出选定方案、被否决的备选与当时的判断依据。
@@ -92,7 +92,7 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
 ### 决策 1：分发方式用独立发行包 + `pytest11` entry point
 
 - **选择**：`[project.entry-points."pytest11"]` 注册 `testmatrix = "testmatrix_plugin"`，
- 插件源码放独立包 `src/testmatrix_plugin/`，与业务子包并列但独立分发。
+  插件源码放独立包 `src/testmatrix_plugin/`，与业务子包并列但独立分发。
 - **备选与取舍**：
 
 | 方案 | 问题 |
@@ -115,16 +115,16 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
 | 自动激活（选定） | **代价必须明写**：本地开发环境装的是 editable 包，CI 不安装本项目，于是"本地自动加载、CI 不加载"，同一份用例在两种环境下跑的不是同一条链路 |
 
 - **代价的处置**：测试子进程一律用 `-p src.testmatrix_plugin -p no:testmatrix` 固定链路——
- 前者显式加载源码路径下的那一份（CI 与本地都存在），后者挡住 entry point 那一份
- （本地已安装时它会自动加载）。若不做这两步，同一份 `__init__.py` 会作为两个模块对象同时存在，
- 注册两套钩子（摘要打印两次、报告写两遍）、持有两把 `StashKey`。
+  前者显式加载源码路径下的那一份（CI 与本地都存在），后者挡住 entry point 那一份
+  （本地已安装时它会自动加载）。若不做这两步，同一份 `__init__.py` 会作为两个模块对象同时存在，
+  注册两套钩子（摘要打印两次、报告写两遍）、持有两把 `StashKey`。
 
 ### 决策 3：与项目耦合度——单向依赖、不 import conftest、收集口径不重算
 
 - **选择**：插件对 conftest 零 import 依赖；只遍历 `config.pluginmanager.get_plugins()`，
- 对带 `COLLECTION_STATS_STASH_KEY` 属性的插件用**它自己的那把键**读 stash，
- 按结构化子类型（`Protocol`）只取四个字段：`total` / `marker_counts` /
- `module_counts` / `unregistered_marker_counts`。收集侧统计**一律不重算**。
+  对带 `COLLECTION_STATS_STASH_KEY` 属性的插件用**它自己的那把键**读 stash，
+  按结构化子类型（`Protocol`）只取四个字段：`total` / `marker_counts` /
+  `module_counts` / `unregistered_marker_counts`。收集侧统计**一律不重算**。
 - **备选与取舍**：
 
 | 方案 | 问题 |
@@ -134,12 +134,12 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
 | 不 import + 按 Protocol 读 stash（选定） | 代价是插件声明的字段面与 conftest 的实际结构之间没有编译期约束，靠 `hasattr` 判据与 `null` 降级兜住 |
 
 - **空值语义**：读不到时报告里 `collection_stats` 为 `null`，**不是缺键**——
- "读不到"与"字段不存在"在消费侧处置完全不同，缺键会让下游静默取到 `None`。
+  "读不到"与"字段不存在"在消费侧处置完全不同，缺键会让下游静默取到 `None`。
 
 ### 决策 4：可复用性——与业务代码物理隔离、白名单式包发现
 
 - **选择**：`[tool.setuptools] package-dir = {"" = "src"}` +
- `[tool.setuptools.packages.find] where = ["src"], include = ["testmatrix_plugin*"]`。
+  `[tool.setuptools.packages.find] where = ["src"], include = ["testmatrix_plugin*"]`。
 - **备选与取舍**：
 
 | 方案 | 问题 |
@@ -149,14 +149,14 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
 | 独立包 + 白名单 include（选定） | 实测 wheel 只含 `testmatrix_plugin/__init__.py` 与 `.dist-info`，`top_level.txt` 仅一个顶层名 |
 
 - **实测验收**：wheel 内容清单与 `top_level.txt` 两项均已在 Day57 亲验（见上文"打包验证实测"）；
- 测试侧另有静态契约断言——用 `src/` 下的**真实目录名**逐一匹配 include 规则，
- 命中集合必须恰好是插件包（只断言配置文本的话，"配置没动但 src 下新增了业务包"会被漏掉）。
+  测试侧另有静态契约断言——用 `src/` 下的**真实目录名**逐一匹配 include 规则，
+  命中集合必须恰好是插件包（只断言配置文本的话，"配置没动但 src 下新增了业务包"会被漏掉）。
 
 ### 决策 5：测试隔离——双路径验证，缺一不可
 
 - **选择**：
- 1. **直接驱动**：用替身 `config` / `session` / `report` 调用插件的纯函数与钩子；
- 2. **嵌套 pytest 端到端**：真起子进程跑探针用例，断言"注册 → 加载 → 钩子生效 → 报告落盘"。
+  1. **直接驱动**：用替身 `config` / `session` / `report` 调用插件的纯函数与钩子；
+  2. **嵌套 pytest 端到端**：真起子进程跑探针用例，断言"注册 → 加载 → 钩子生效 → 报告落盘"。
 - **备选与取舍**：
 
 | 方案 | 问题 |
@@ -166,14 +166,14 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
 | 双路径（选定） | 端到端证明链路真实可用，直接驱动把每条降级分支钉在单条断言上 |
 
 - **该决策当场兑现了价值**：Day57 补测用直接驱动构造"writer 存在却抛错"（终端关闭 / 输出管道断开），
- 实测该异常会从 `pytest_sessionfinish` 穿透出去——把展示层故障升级成会话故障（pytest 记 INTERNALERROR、
- 退出码被改写），与"绝不改变退出码与任何用例结果"的承诺相反。
- 修复前该用例实测变红、修复后转绿。
+  实测该异常会从 `pytest_sessionfinish` 穿透出去——把展示层故障升级成会话故障（pytest 记 INTERNALERROR、
+  退出码被改写），与"绝不改变退出码与任何用例结果"的承诺相反。
+  修复前该用例实测变红、修复后转绿。
 
 ### 决策 6：打包验证用标准构建流程，不用 editable 安装代替
 
 - **选择**：`python -m build` 生成 sdist + wheel → 校验 wheel/sdist 内容清单 →
- 在**独立临时 venv** 中安装 wheel 并真跑一次会话 → `twine check` → 删除临时 venv。
+  在**独立临时 venv** 中安装 wheel 并真跑一次会话 → `twine check` → 删除临时 venv。
 - **备选与取舍**：
 
 | 方案 | 问题 |
@@ -185,49 +185,49 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
 ### 决策 7：xdist 兼容性——Day58 已支持（原为边界声明）
 
 - **状态**：Day57 声明"当前不支持"作为边界；**Day58 已完成改造，插件支持 xdist 多进程并发
- （`-n`），串行（不传 `-n`）行为与 Day57 完全一致**。
+  （`-n`），串行（不传 `-n`）行为与 Day57 完全一致**。
 - **Day57 的边界声明与两条冲突机制（存档）**：
- 1. **模块级 `_STATE` 单例是"单进程单会话"假设**：每个 worker 是独立进程，各自持一份
-   `_STATE`，因此各进程的统计只覆盖自己执行的用例；
- 2. **报告路径固定**（默认 `output/testmatrix_report.json`）：多进程写同一个文件，
-   最终内容取决于写盘先后。
- 当时的实测（`-n 2` 跑 4 条用例，pytest-xdist 3.5.0）：stdout 只出现 1 行会话摘要、
- 数值为主进程汇总口径，最终报告 `collection_stats` 为 `null`、`execution_stats` 为完整汇总
+  1. **模块级 `_STATE` 单例是"单进程单会话"假设**：每个 worker 是独立进程，各自持一份
+      `_STATE`，因此各进程的统计只覆盖自己执行的用例；
+  2. **报告路径固定**（默认 `output/testmatrix_report.json`）：多进程写同一个文件，
+      最终内容取决于写盘先后。
+  当时的实测（`-n 2` 跑 4 条用例，pytest-xdist 3.5.0）：stdout 只出现 1 行会话摘要、
+  数值为主进程汇总口径，最终报告 `collection_stats` 为 `null`、`execution_stats` 为完整汇总
 ——"最终留下的是哪个进程的那一份"是时序产物而非设计保证。
 - **Day58 的实现要点**：
- 1. **worker 零副作用**：worker 的 `pytest_sessionfinish` 直接返回（不写报告、不输出摘要、
-   不清状态）。进程角色判定用 `workerinput` / `workeroutput` 两个 xdist 只注入给 worker 的
-   通道属性，`PYTEST_XDIST_WORKER` 环境变量仅作替身配置兜底——该变量会被子进程继承，
-   单凭它判定会把嵌套 pytest / 执行器子进程误判成 worker（报告静默不落盘）。
- 2. **master 唯一写报告 + 唯一输出摘要**：报告仍是单一固定路径，多进程共写冲突在结构上消除；
-   执行侧统计天然是全量口径（worker 把每条阶段报告回传 master，master 的
-   `pytest_runtest_logreport` 累加到的就是整场会话）。
- 3. **worker → master 的收集统计上报通道**：xdist 的 master **不做收集**（`DSession.pytest_collection`
-   直接 `return True`），故 master 不会执行根 conftest 的 `pytest_collection_modifyitems`、
-   stash 里也没有统计；真正持有完整统计的是 worker。worker 在 `pytest_collection_finish`
-   把统计写进 `config.workeroutput`，master 在 `pytest_testnodedown`
-   （`@pytest.hookimpl(optionalhook=True)`，未装 xdist 时不报"未知钩子"）收下并合并。
- 4. **合并口径是"取 total 更大的一份"而非相加**：各 worker 收集的是整场会话的完整用例集
-   （只执行其中一部分），N 份同口径统计相加会把总数放大 N 倍；total 更大者优先还能在
-   "某 worker 收集不完整"时取到最接近完整会话的那一份，且结果确定。
+  1. **worker 零副作用**：worker 的 `pytest_sessionfinish` 直接返回（不写报告、不输出摘要、
+      不清状态）。进程角色判定用 `workerinput` / `workeroutput` 两个 xdist 只注入给 worker 的
+      通道属性，`PYTEST_XDIST_WORKER` 环境变量仅作替身配置兜底——该变量会被子进程继承，
+      单凭它判定会把嵌套 pytest / 执行器子进程误判成 worker（报告静默不落盘）。
+  2. **master 唯一写报告 + 唯一输出摘要**：报告仍是单一固定路径，多进程共写冲突在结构上消除；
+      执行侧统计天然是全量口径（worker 把每条阶段报告回传 master，master 的
+      `pytest_runtest_logreport` 累加到的就是整场会话）。
+  3. **worker → master 的收集统计上报通道**：xdist 的 master **不做收集**（`DSession.pytest_collection`
+      直接 `return True`），故 master 不会执行根 conftest 的 `pytest_collection_modifyitems`、
+      stash 里也没有统计；真正持有完整统计的是 worker。worker 在 `pytest_collection_finish`
+      把统计写进 `config.workeroutput`，master 在 `pytest_testnodedown`
+      （`@pytest.hookimpl(optionalhook=True)`，未装 xdist 时不报"未知钩子"）收下并合并。
+  4. **合并口径是"取 total 更大的一份"而非相加**：各 worker 收集的是整场会话的完整用例集
+      （只执行其中一部分），N 份同口径统计相加会把总数放大 N 倍；total 更大者优先还能在
+      "某 worker 收集不完整"时取到最接近完整会话的那一份，且结果确定。
 - **已知限制（Day58-fix 记录，Day58-fix3 校正机制描述）**：`-n` 模式下**项目根 conftest 的
- 收集摘要行不输出**，两侧成因不同、结果相同:
- 1. **master 侧——没收集**：master 没有 stash 统计（`stats is None` 即返回）；
- 2. **worker 侧——写了但到不了 master 终端**：worker 进程**确实有** `terminalreporter`
-   （pytest 7.4.4 存在 `Config.InvocationParams`，xdist `remote.py` 因此走
-   `_prepareconfig(args, None)` 分支，那个只在旧 pytest 上执行的 `remote_initconfig`
-  ——它会往 worker 的启动参数里追加"禁用终端插件"一项——不会被调用），
-   `pytest_sessionfinish` 照常执行、`write_line` 也真的写；但写的是
-   **worker 自己的标准输出**，xdist 不把它转发到 master 终端（只在失败报告里回显）。
- （Day58-fix2 曾把成因 2 记成"worker 进程里没有终端插件、摘要从未产生"，Day58-fix3 以
- 源码分支 / worker 内插件实例 / 标记行行为三重取证证伪后改回。）
- Day58-fix 因此在 conftest 的 `pytest_sessionfinish` 入口显式加
- worker 守卫（早退，用 `workerinput` 单判据、不用会被子进程继承的 `PYTEST_XDIST_WORKER`
- 兜底），把这个事实写成代码而不是留给"恰好读不到"；`-n` 模式的会话级信息由插件
- "会话完成"摘要承担。若要恢复该摘要，需要 conftest 侧也接一条 worker→master 上报
- （不在当前范围）。
+  收集摘要行不输出**，两侧成因不同、结果相同:
+  1. **master 侧——没收集**：master 没有 stash 统计（`stats is None` 即返回）；
+  2. **worker 侧——写了但到不了 master 终端**：worker 进程**确实有** `terminalreporter`
+      （pytest 7.4.4 存在 `Config.InvocationParams`，xdist `remote.py` 因此走
+      `_prepareconfig(args, None)` 分支，那个只在旧 pytest 上执行的 `remote_initconfig`
+    ——它会往 worker 的启动参数里追加"禁用终端插件"一项——不会被调用），
+      `pytest_sessionfinish` 照常执行、`write_line` 也真的写；但写的是
+      **worker 自己的标准输出**，xdist 不把它转发到 master 终端（只在失败报告里回显）。
+  （Day58-fix2 曾把成因 2 记成"worker 进程里没有终端插件、摘要从未产生"，Day58-fix3 以
+  源码分支 / worker 内插件实例 / 标记行行为三重取证证伪后改回。）
+  Day58-fix 因此在 conftest 的 `pytest_sessionfinish` 入口显式加
+  worker 守卫（早退，用 `workerinput` 单判据、不用会被子进程继承的 `PYTEST_XDIST_WORKER`
+  兜底），把这个事实写成代码而不是留给"恰好读不到"；`-n` 模式的会话级信息由插件
+  "会话完成"摘要承担。若要恢复该摘要，需要 conftest 侧也接一条 worker→master 上报
+  （不在当前范围）。
 - **为什么 Day57 不预埋**（存档）：多进程下的正确形态依赖实际的 xdist 接入方案，
- 提前设计等于为不确定需求付代价；先声明边界、再按实际接入改造。
+  提前设计等于为不确定需求付代价；先声明边界、再按实际接入改造。
 
 ---
 
@@ -236,32 +236,32 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
 ### 收益
 
 - **可打包分发**：`python -m build` 产出 wheel/sdist，安装后对整个解释器生效，
- 包含真实执行器拉起的每一个 pytest 子进程——"平台自有的结果上报"不再依赖调用方记得挂载。
+  包含真实执行器拉起的每一个 pytest 子进程——"平台自有的结果上报"不再依赖调用方记得挂载。
 - **可独立测试**：插件与业务代码在物理上分离，测试可在干净 venv 中只装 wheel + pytest 就验证加载；
- 降级分支也能用纯函数直接驱动，不必构造完整平台环境。
+  降级分支也能用纯函数直接驱动，不必构造完整平台环境。
 - **与业务代码解耦**：wheel 只含 `testmatrix_plugin`，不引入任何业务顶层名，也不把平台的依赖闭包
- 强加给插件使用方。
+  强加给插件使用方。
 
 ### 代价
 
 - **需要 `pyproject.toml` 三处配置**：`[build-system]`（缺它时 pip 走 legacy 路径直接报错）、
- `[project.entry-points."pytest11"]`、`[tool.setuptools]` 的 `package-dir` 与白名单包发现。
+  `[project.entry-points."pytest11"]`、`[tool.setuptools]` 的 `package-dir` 与白名单包发现。
 - **本地需要 editable 安装**才能自动加载；CI 不安装本项目，故测试内固定
- `-p src.testmatrix_plugin -p no:testmatrix` 以保证两端链路一致。
+  `-p src.testmatrix_plugin -p no:testmatrix` 以保证两端链路一致。
 - **sdist 的产物形态与构建期 setuptools 版本绑定**（当日实测见上）：只声明 `setuptools>=64`
- 无上界时，sdist 会连同整个 `tests/`（74 个文件）一起打包、发行包文件名被归一为小写。
- **登记为待办**（不在 Day57 白名单内，当日未动）：或固定构建期依赖上界，或在 `pyproject.toml`
- 用显式配置收紧 sdist 文件集。此项不影响 wheel 与安装可用性，属"分发产物整洁度"问题。
+  无上界时，sdist 会连同整个 `tests/`（74 个文件）一起打包、发行包文件名被归一为小写。
+  **登记为待办**（不在 Day57 白名单内，当日未动）：或固定构建期依赖上界，或在 `pyproject.toml`
+  用显式配置收紧 sdist 文件集。此项不影响 wheel 与安装可用性，属"分发产物整洁度"问题。
 
 ### 当前边界（plugin 不替代 conftest）
 
 - 插件只承载**执行侧**的两件事：会话结果上报（JSON + 终端摘要）与逐阶段日志钩子。
 - **收集期能力仍全部留在项目根 `conftest.py`**（Day55）：三级字典序稳定排序、收集统计入 stash、
- 标记完整性检查、收集摘要输出。插件只**消费**这些统计，不重算、不替代。
+  标记完整性检查、收集摘要输出。插件只**消费**这些统计，不重算、不替代。
 - 插件不参与任何判定：报告写不出、统计读不到、终端不可用时一律只降级，
- **绝不改变 pytest 退出码与任何用例结果**。
+  **绝不改变 pytest 退出码与任何用例结果**。
 - **xdist 多进程并发已在 Day58 支持**（worker 零副作用 + master 唯一落盘/摘要 + 收集统计由
- worker 上报合并；已知限制见决策 7：`-n` 下根 conftest 的收集摘要不输出）。
+  worker 上报合并；已知限制见决策 7：`-n` 下根 conftest 的收集摘要不输出）。
 
 ### 实测证据清单（可复现）
 

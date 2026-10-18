@@ -222,7 +222,7 @@ class LogManager:
           log_level=env_manager.log_level,
           log_dir=env_manager.log_dir,
         )
-      except Exception as exc: # noqa: BLE001 日志是旁路能力，不阻断业务
+      except Exception as exc:  # noqa: BLE001 日志是旁路能力，不阻断业务
         logger.warning(f"日志自动初始化失败，降级为默认handler | {exc}")
     return logger
 

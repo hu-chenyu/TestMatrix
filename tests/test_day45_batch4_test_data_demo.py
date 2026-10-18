@@ -33,14 +33,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
   sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.core import notification as notif # noqa: E402
-from src.core.event_bus import ( # noqa: E402
+from src.core import notification as notif  # noqa: E402
+from src.core.event_bus import (  # noqa: E402
   HISTORY_RING_MAXLEN,
   STREAM_RESET_EVENT_TYPE,
   EventChannel,
   ExecutionEvent,
 )
-from src.web.routes import executions as ex # noqa: E402
+from src.web.routes import executions as ex  # noqa: E402
 
 PLACEHOLDER_ADDR = "203.0.113.7"
 
@@ -107,9 +107,9 @@ def test_问题1_通知预算耗尽后提前收尾(monkeypatch):
   router = notif.NotificationRouter(
     notifiers=[notifier],
     max_retries=3,
-    base_delay=10.0, # 远超预算 → 第一次退避即被夹到剩余预算
+    base_delay=10.0,  # 远超预算 → 第一次退避即被夹到剩余预算
     use_jitter=False,
-    sleeper=waits.append, # 记录型 sleeper，零真实等待
+    sleeper=waits.append,  # 记录型 sleeper，零真实等待
   )
 
   ok, attempts, reason = router._send_with_retry(notifier, _make_notification())
@@ -157,7 +157,7 @@ def test_问题1_通知预算充足时成功即收手(monkeypatch):
   router = notif.NotificationRouter(
     notifiers=[notifier],
     max_retries=3,
-    base_delay=10.0, # 基准退避大于预算：若预算逻辑误伤成功路径会暴露
+    base_delay=10.0,  # 基准退避大于预算：若预算逻辑误伤成功路径会暴露
     use_jitter=False,
     sleeper=waits.append,
   )
@@ -194,7 +194,7 @@ def test_问题1_SSE存活上限到期后名额被归还(exec_client, monkeypatc
 
   from src.core.event_bus import get_channel
 
-  get_channel(eid, create=True) # 空通道，只走心跳节拍
+  get_channel(eid, create=True)  # 空通道，只走心跳节拍
   body = client.get(f"/api/executions/{eid}/events").get_data(as_text=True)
 
   assert "stream-lifetime-exceeded" in body, "存活上限未触发收流"
@@ -723,7 +723,7 @@ def exec_client(tmp_path, monkeypatch):
   client = create_app("test").test_client()
   resp = client.post("/api/executions/trigger", json={"executor": "simulated"})
   execution_id = resp.get_json()["data"]["execution_id"]
-  for _ in range(200): # 轮询至终态（禁固定 sleep 赌时序）
+  for _ in range(200):  # 轮询至终态（禁固定 sleep 赌时序）
     status = client.get(f"/api/executions/{execution_id}/status").get_json()
     if status["data"]["status"] in ("finished", "failed"):
       break

@@ -60,16 +60,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
   sys.path.insert(0, str(PROJECT_ROOT))
 
-import redis # noqa: E402
-from flask import Flask # noqa: E402
-from src.common.logger import LogManager # noqa: E402
-from src.core.cache import ( # noqa: E402
+import redis  # noqa: E402
+from flask import Flask  # noqa: E402
+from src.common.logger import LogManager  # noqa: E402
+from src.core.cache import (  # noqa: E402
   cache_client,
   cases_list_key,
 )
-from src.core.case_manager import CaseManager # noqa: E402
-from src.db.db_session import DatabaseSession # noqa: E402
-from src.web import create_app # noqa: E402
+from src.core.case_manager import CaseManager  # noqa: E402
+from src.db.db_session import DatabaseSession  # noqa: E402
+from src.web import create_app  # noqa: E402
 
 logger = LogManager.get_logger()
 
@@ -122,7 +122,7 @@ class RedisHealthChecker:
     try:
       client = redis.from_url(url, socket_timeout=2)
       return bool(client.ping())
-    except Exception as exc: # noqa: BLE001 健康探测必须吞全部异常
+    except Exception as exc:  # noqa: BLE001 健康探测必须吞全部异常
       logger.warning(f"Redis连通性检测失败 | url={url} | {exc}")
       return False
 
@@ -195,9 +195,9 @@ class BenchmarkDataSeeder:
   # 优先级分布权重（累计区间，随机数落点决定优先级）
   PRIORITY_BUCKETS = (
     (0.15, "P0"),
-    (0.40, "P1"), # 累计0.40 => P1占25%
-    (0.80, "P2"), # 累计0.80 => P2占40%
-    (1.01, "P3"), # 累计1.01 => P3占20%（含1.0边界）
+    (0.40, "P1"),  # 累计0.40 => P1占25%
+    (0.80, "P2"),  # 累计0.80 => P2占40%
+    (1.01, "P3"),  # 累计1.01 => P3占20%（含1.0边界）
   )
 
   def __init__(self) -> None:
@@ -835,7 +835,7 @@ class CacheBenchmarkRunner:
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
       futures = [pool.submit(worker) for _ in range(concurrency)]
       for future in as_completed(futures):
-        future.result() # 让工作线程断言异常向上冒泡
+        future.result()  # 让工作线程断言异常向上冒泡
     stats.record_wall(time.perf_counter() - wall_start)
     return stats
 
@@ -910,7 +910,7 @@ class CacheBenchmarkRunner:
       # 探针用例立即删除（其失效动作会再次清缓存，无副作用）
       try:
         CaseManager.delete_case(invalidation_case_id)
-      except Exception: # noqa: BLE001 清理失败不影响验证结论
+      except Exception:  # noqa: BLE001 清理失败不影响验证结论
         pass
 
     # ---- c. TTL到期兜底（确定性等待1.5s，仅此处理sleep）----
@@ -920,7 +920,7 @@ class CacheBenchmarkRunner:
       self.client.get(list_path)
       ttl_key = cases_list_key(active_params)
       assert cache_client.get_json(ttl_key) is not None, "先确认已写入"
-      time.sleep(1.5) # TTL验证必须等待真实过期，非时序赌运气
+      time.sleep(1.5)  # TTL验证必须等待真实过期，非时序赌运气
       ttl_expires = cache_client.get_json(ttl_key) is None
     finally:
       # 还原TTL配置并重建后端，避免污染后续场景
@@ -1399,7 +1399,7 @@ def main() -> None:
       from src.core.task_queue import stop_worker
 
       stop_worker()
-    except Exception: # noqa: BLE001 收尾防御
+    except Exception:  # noqa: BLE001 收尾防御
       pass
     if not args.no_cleanup:
       seeder.cleanup()

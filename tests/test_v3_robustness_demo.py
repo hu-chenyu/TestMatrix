@@ -130,7 +130,7 @@ class TestStopWorkerRace:
         """模拟 join 期间另一线程建了新 worker 并接管引用"""
         self._joined = True
         race_holder["replacement"] = replacement
-        tq._worker_thread = replacement # type: ignore[assignment]
+        tq._worker_thread = replacement  # type: ignore[assignment]
 
     stale = _JoinRacingThread()
     monkeypatch.setattr(tq, "_worker_thread", stale, raising=False)
@@ -702,7 +702,7 @@ class TestCacheInvalidateIsolation:
     captured: list[str] = []
     sink_id = loguru_logger.add(captured.append, level="WARNING")
     try:
-      _safe_invalidate("测试操作", _boom) # 不抛异常即为通过
+      _safe_invalidate("测试操作", _boom)  # 不抛异常即为通过
     finally:
       loguru_logger.remove(sink_id)
 

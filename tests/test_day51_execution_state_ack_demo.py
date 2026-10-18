@@ -484,8 +484,8 @@ class TestQueueAckRobustness:
       calls.append("ack")
       return bool(original_ack(*args, **kwargs))
 
-    fake_queue.set_status = _spy_set_status # type: ignore[method-assign]
-    fake_queue.ack = _spy_ack # type: ignore[method-assign]
+    fake_queue.set_status = _spy_set_status  # type: ignore[method-assign]
+    fake_queue.ack = _spy_ack  # type: ignore[method-assign]
 
     completed = fake_queue.complete_task(execution_id, "finished")
 
@@ -697,7 +697,7 @@ class TestQueueAckRobustness:
     worker._current_execution_id = None
     assert worker._heartbeat_thread is None, "心跳线程必须在预算内退出"
     # 心跳线程赖着不退时只告警不抛（daemon 兜底），否则会杀死消费线程
-    worker._heartbeat_thread = _StubAliveThread() # type: ignore[assignment]
+    worker._heartbeat_thread = _StubAliveThread()  # type: ignore[assignment]
     worker._stop_heartbeat()
     assert worker._heartbeat_thread is None
 

@@ -179,7 +179,7 @@ class TestTablesRendering:
       FailedCaseDetail(
         uuid="u2", name="test_query_timeout", full_name="tests#test_query_timeout",
         status="broken", duration_ms=300, module="订单管理",
-        priority="normal", error_message="x" * 250, # 超长错误信息
+        priority="normal", error_message="x" * 250,  # 超长错误信息
       ),
     ]
     html = EmailReportTemplate().render(make_stat(), failed_details=details)
@@ -236,9 +236,9 @@ class TestFormattingAndEdge:
     )
     html = EmailReportTemplate().render(stat)
 
-    assert "1.50 s" in html # 总耗时1500ms
-    assert "15.50 ms" in html # 平均耗时15.5ms
-    assert "50.00 ms" in html # P95耗时50.0ms
+    assert "1.50 s" in html  # 总耗时1500ms
+    assert "15.50 ms" in html  # 平均耗时15.5ms
+    assert "50.00 ms" in html  # P95耗时50.0ms
 
   def test_empty_total_edge_case(self):
     """

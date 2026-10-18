@@ -312,7 +312,7 @@ class TestStopWorkerKeepsReference:
         self.joined = True
 
     stuck = _StuckThread()
-    tq._worker_thread = stuck # type: ignore[assignment]
+    tq._worker_thread = stuck  # type: ignore[assignment]
     tq._stop_event = threading.Event()
 
     tq.stop_worker()
@@ -350,7 +350,7 @@ class TestStopWorkerKeepsReference:
         raise AssertionError("不应重新 start 已存活的worker")
 
     alive = _AliveThread()
-    tq._worker_thread = alive # type: ignore[assignment]
+    tq._worker_thread = alive  # type: ignore[assignment]
     tq._stop_event = threading.Event()
     try:
       returned = tq.start_worker()

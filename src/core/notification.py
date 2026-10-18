@@ -379,7 +379,7 @@ class EmailNotifier(BaseNotifier):
     finally:
       if client is not None:
         try:
-          client.quit() # 确保连接释放，防止连接泄漏
+          client.quit()  # 确保连接释放，防止连接泄漏
         except smtplib.SMTPException:
           logger.debug("SMTP连接关闭时异常（已忽略）")
 
@@ -1676,7 +1676,7 @@ class NotificationRouter:
           logger.debug(
             f"渠道未启用已跳过 | 渠道: {channel} | 批次: {execution_id}"
           )
-      except Exception as exc: # 防御性捕获: 渠道契约不抛，万一抛也不影响其他渠道
+      except Exception as exc:  # 防御性捕获: 渠道契约不抛，万一抛也不影响其他渠道
         logger.warning(
           f"渠道通知异常已捕获 | 渠道: {channel} | "
           f"{type(exc).__name__}: {exc}"
@@ -1735,7 +1735,7 @@ class NotificationRouter:
         if notifier.send(notification):
           return True, attempts, ""
         last_reason = "send返回False"
-      except Exception as exc: # 防御性: 契约不抛，万一是抛也算失败重试
+      except Exception as exc:  # 防御性: 契约不抛，万一是抛也算失败重试
         last_reason = f"{type(exc).__name__}: {exc}"
 
       # 还有下一次才计算等待（最后一次失败后不再空等）
@@ -1949,7 +1949,7 @@ class NotificationRouter:
     if stat.failed_details:
       lines.append("")
       lines.append("**失败用例：**")
-      for detail in stat.failed_details[:10]: # 摘要最多列10条防超长
+      for detail in stat.failed_details[:10]:  # 摘要最多列10条防超长
         owner_suffix = f",{detail.owner}" if detail.owner else ""
         message = detail.error_message or "无错误信息"
         if len(message) > 50:

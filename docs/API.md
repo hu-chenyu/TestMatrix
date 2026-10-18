@@ -25,9 +25,9 @@
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {}
+  "code": 200,
+  "message": "ok",
+  "data": {}
 }
 ```
 
@@ -55,13 +55,13 @@
 
 ```json
 {
- "code": 400,
- "message": "用例入参校验失败: priority: Must be one of: P0, P1, P2, P3.",
- "data": {
-  "priority": [
-   "Must be one of: P0, P1, P2, P3."
-  ]
- }
+  "code": 400,
+  "message": "用例入参校验失败: priority: Must be one of: P0, P1, P2, P3.",
+  "data": {
+    "priority": [
+      "Must be one of: P0, P1, P2, P3."
+    ]
+  }
 }
 ```
 
@@ -69,11 +69,11 @@
 
 ```json
 {
- "code": 404,
- "message": "用例不存在",
- "data": {
-  "case_id": "TM-UC-9999"
- }
+  "code": 404,
+  "message": "用例不存在",
+  "data": {
+    "case_id": "TM-UC-9999"
+  }
 }
 ```
 
@@ -81,9 +81,9 @@
 
 ```json
 {
- "code": 405,
- "message": "请求方法不被允许",
- "data": null
+  "code": 405,
+  "message": "请求方法不被允许",
+  "data": null
 }
 ```
 
@@ -91,11 +91,11 @@
 
 ```json
 {
- "code": 409,
- "message": "用例编号已存在",
- "data": {
-  "case_id": "TM-UC-0001"
- }
+  "code": 409,
+  "message": "用例编号已存在",
+  "data": {
+    "case_id": "TM-UC-0001"
+  }
 }
 ```
 
@@ -103,9 +103,9 @@
 
 ```json
 {
- "code": 500,
- "message": "服务器内部错误",
- "data": null
+  "code": 500,
+  "message": "服务器内部错误",
+  "data": null
 }
 ```
 
@@ -122,34 +122,34 @@
 
 ```json
 {
- "items": [],
- "total": 0,
- "page": 1,
- "page_size": 20,
- "total_pages": 0
+  "items": [],
+  "total": 0,
+  "page": 1,
+  "page_size": 20,
+  "total_pages": 0
 }
 ```
 
 ### 1.4 编码、时间与 SSE 约定
 
 - **字符编码**：所有请求与响应统一使用 UTF-8；响应 `Content-Type` 为
- `application/json`（SSE 接口除外）。
+  `application/json`（SSE 接口除外）。
 - **时间字段**：统一为**带时区标识**的 ISO 8601 字符串，如
- `2026-09-20T10:30:45+00:00`；健康检查的 timestamp 带微秒精度，
- 如 `2026-09-20T02:30:45.123456+00:00`；可空时间字段未产生时为 `null`。
- 说明（Day44 P3-19 修正）：后端时间列有**两种来源**——UTC 来源
- （`server_default=func.now()`）补 `+00:00` 标识，数值不动；本地来源
- （`datetime.now()` 显式写入）换算成 UTC 后同样带 `+00:00`。因此**所有**
- 响应中的时间都是 UTC，客户端需自行按本地时区渲染。本文档此前示例写的
- `2026-09-20T10:30:45`（无时区标识）与实现不符，已更正。
+  `2026-09-20T10:30:45+00:00`；健康检查的 timestamp 带微秒精度，
+  如 `2026-09-20T02:30:45.123456+00:00`；可空时间字段未产生时为 `null`。
+  说明（Day44 P3-19 修正）：后端时间列有**两种来源**——UTC 来源
+  （`server_default=func.now()`）补 `+00:00` 标识，数值不动；本地来源
+  （`datetime.now()` 显式写入）换算成 UTC 后同样带 `+00:00`。因此**所有**
+  响应中的时间都是 UTC，客户端需自行按本地时区渲染。本文档此前示例写的
+  `2026-09-20T10:30:45`（无时区标识）与实现不符，已更正。
 - **SSE 接口**：响应类型为 `text/event-stream`，帧格式为
- `event: 事件类型\nid: 序号\ndata: JSON载荷\n\n`；客户端断线重连时可通过
- `Last-Event-ID` 请求头携带最后收到的事件 id，服务端只回放该 id 之后的事件
- （请求头缺失或非法时全量回放）；空闲时服务端发送 `: heartbeat` 注释帧保活。
+  `event: 事件类型\nid: 序号\ndata: JSON载荷\n\n`；客户端断线重连时可通过
+  `Last-Event-ID` 请求头携带最后收到的事件 id，服务端只回放该 id 之后的事件
+  （请求头缺失或非法时全量回放）；空闲时服务端发送 `: heartbeat` 注释帧保活。
 - **curl 示例约定**：本文所有命令在 Windows PowerShell 中直接运行，统一使用
- 系统自带的 `curl.exe`（不要用 `curl` 别名）。JSON 请求体中的双引号统一写为
- `\"`；请求体含中文时建议先执行 `chcp 65001` 切换 UTF-8 代码页，
- 或使用 PowerShell 7。
+  系统自带的 `curl.exe`（不要用 `curl` 别名）。JSON 请求体中的双引号统一写为
+  `\"`；请求体含中文时建议先执行 `chcp 65001` 切换 UTF-8 代码页，
+  或使用 PowerShell 7。
 
 ---
 
@@ -171,12 +171,12 @@ curl.exe "http://127.0.0.1:5000/"
 
 ```json
 {
- "code": 200,
- "message": "TestMatrix API",
- "data": {
-  "version": "1.0.0",
-  "status": "running"
- }
+  "code": 200,
+  "message": "TestMatrix API",
+  "data": {
+    "version": "1.0.0",
+    "status": "running"
+  }
 }
 ```
 
@@ -199,14 +199,14 @@ curl.exe "http://127.0.0.1:5000/health"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "status": "healthy",
-  "database": "connected",
-  "timestamp": "2026-09-20T02:30:45.123456+00:00",
-  "env": "dev"
- }
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "status": "healthy",
+    "database": "connected",
+    "timestamp": "2026-09-20T02:30:45.123456+00:00",
+    "env": "dev"
+  }
 }
 ```
 
@@ -214,15 +214,15 @@ curl.exe "http://127.0.0.1:5000/health"
 
 ```json
 {
- "code": 503,
- "message": "服务降级：数据库连接失败",
- "data": {
-  "status": "degraded",
-  "database": "disconnected",
-  "error": "数据库探测超时（超过3.0秒）",
-  "timestamp": "2026-09-20T02:31:02.882104+00:00",
-  "env": "dev"
- }
+  "code": 503,
+  "message": "服务降级：数据库连接失败",
+  "data": {
+    "status": "degraded",
+    "database": "disconnected",
+    "error": "数据库探测超时（超过3.0秒）",
+    "timestamp": "2026-09-20T02:31:02.882104+00:00",
+    "env": "dev"
+  }
 }
 ```
 
@@ -242,12 +242,12 @@ curl.exe "http://127.0.0.1:5000/api/version"
 
 ```json
 {
- "code": 200,
- "message": "version info",
- "data": {
-  "version": "1.0.0",
-  "api_version": "v1"
- }
+  "code": 200,
+  "message": "version info",
+  "data": {
+    "version": "1.0.0",
+    "api_version": "v1"
+  }
 }
 ```
 
@@ -304,44 +304,44 @@ curl.exe "http://127.0.0.1:5000/api/cases/?priority=P1&page=1&page_size=2"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "items": [
-   {
-    "id": 1,
-    "case_id": "TM-UC-0001",
-    "name": "用户登录成功校验",
-    "module": "用户中心",
-    "priority": "P1",
-    "case_type": "api",
-    "status": "active",
-    "description": "跨API集成测试种子用例",
-    "source_ref": "tests/api_demo/test_api_login.py",
-    "creator": "admin",
-    "created_at": "2026-09-20T10:15:30",
-    "updated_at": "2026-09-20T10:15:30"
-   },
-   {
-    "id": 2,
-    "case_id": "TM-UC-0002",
-    "name": "用户登录密码错误校验",
-    "module": "用户中心",
-    "priority": "P1",
-    "case_type": "api",
-    "status": "active",
-    "description": "跨API集成测试种子用例",
-    "source_ref": null,
-    "creator": "admin",
-    "created_at": "2026-09-20T10:15:31",
-    "updated_at": "2026-09-20T10:15:31"
-   }
-  ],
-  "total": 2,
-  "page": 1,
-  "page_size": 2,
-  "total_pages": 1
- }
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "items": [
+      {
+        "id": 1,
+        "case_id": "TM-UC-0001",
+        "name": "用户登录成功校验",
+        "module": "用户中心",
+        "priority": "P1",
+        "case_type": "api",
+        "status": "active",
+        "description": "跨API集成测试种子用例",
+        "source_ref": "tests/api_demo/test_api_login.py",
+        "creator": "admin",
+        "created_at": "2026-09-20T10:15:30",
+        "updated_at": "2026-09-20T10:15:30"
+      },
+      {
+        "id": 2,
+        "case_id": "TM-UC-0002",
+        "name": "用户登录密码错误校验",
+        "module": "用户中心",
+        "priority": "P1",
+        "case_type": "api",
+        "status": "active",
+        "description": "跨API集成测试种子用例",
+        "source_ref": null,
+        "creator": "admin",
+        "created_at": "2026-09-20T10:15:31",
+        "updated_at": "2026-09-20T10:15:31"
+      }
+    ],
+    "total": 2,
+    "page": 1,
+    "page_size": 2,
+    "total_pages": 1
+  }
 }
 ```
 
@@ -349,9 +349,9 @@ curl.exe "http://127.0.0.1:5000/api/cases/?priority=P1&page=1&page_size=2"
 
 ```json
 {
- "code": 400,
- "message": "case_type只能为api或chip",
- "data": null
+  "code": 400,
+  "message": "case_type只能为api或chip",
+  "data": null
 }
 ```
 
@@ -387,22 +387,22 @@ curl.exe -X POST "http://127.0.0.1:5000/api/cases/" -H "Content-Type: applicatio
 
 ```json
 {
- "code": 201,
- "message": "created",
- "data": {
-  "id": 1,
-  "case_id": "TM-UC-0001",
-  "name": "用户登录成功校验",
-  "module": "用户中心",
-  "priority": "P1",
-  "case_type": "api",
-  "status": "active",
-  "description": "",
-  "source_ref": null,
-  "creator": "admin",
-  "created_at": "2026-09-20T10:15:30",
-  "updated_at": "2026-09-20T10:15:30"
- }
+  "code": 201,
+  "message": "created",
+  "data": {
+    "id": 1,
+    "case_id": "TM-UC-0001",
+    "name": "用户登录成功校验",
+    "module": "用户中心",
+    "priority": "P1",
+    "case_type": "api",
+    "status": "active",
+    "description": "",
+    "source_ref": null,
+    "creator": "admin",
+    "created_at": "2026-09-20T10:15:30",
+    "updated_at": "2026-09-20T10:15:30"
+  }
 }
 ```
 
@@ -410,17 +410,17 @@ curl.exe -X POST "http://127.0.0.1:5000/api/cases/" -H "Content-Type: applicatio
 
 - `400` 请求体非 JSON：`{"code":400,"message":"请求体必须为JSON格式","data":null}`
 - `400` 字段校验失败：message 形如
- `用例入参校验失败: name: Length must be between 1 and 200.`，
- data 为字段级错误字典（示例见 1.2 节）。
+  `用例入参校验失败: name: Length must be between 1 and 200.`，
+  data 为字段级错误字典（示例见 1.2 节）。
 - `409` 编号重复：
 
 ```json
 {
- "code": 409,
- "message": "用例编号已存在",
- "data": {
-  "case_id": "TM-UC-0001"
- }
+  "code": 409,
+  "message": "用例编号已存在",
+  "data": {
+    "case_id": "TM-UC-0001"
+  }
 }
 ```
 
@@ -444,22 +444,22 @@ curl.exe "http://127.0.0.1:5000/api/cases/TM-UC-0001"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "id": 1,
-  "case_id": "TM-UC-0001",
-  "name": "用户登录成功校验",
-  "module": "用户中心",
-  "priority": "P1",
-  "case_type": "api",
-  "status": "active",
-  "description": "跨API集成测试种子用例",
-  "source_ref": "tests/api_demo/test_api_login.py",
-  "creator": "admin",
-  "created_at": "2026-09-20T10:15:30",
-  "updated_at": "2026-09-20T10:15:30"
- }
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "id": 1,
+    "case_id": "TM-UC-0001",
+    "name": "用户登录成功校验",
+    "module": "用户中心",
+    "priority": "P1",
+    "case_type": "api",
+    "status": "active",
+    "description": "跨API集成测试种子用例",
+    "source_ref": "tests/api_demo/test_api_login.py",
+    "creator": "admin",
+    "created_at": "2026-09-20T10:15:30",
+    "updated_at": "2026-09-20T10:15:30"
+  }
 }
 ```
 
@@ -467,11 +467,11 @@ curl.exe "http://127.0.0.1:5000/api/cases/TM-UC-0001"
 
 ```json
 {
- "code": 404,
- "message": "用例不存在",
- "data": {
-  "case_id": "TM-UC-9999"
- }
+  "code": 404,
+  "message": "用例不存在",
+  "data": {
+    "case_id": "TM-UC-9999"
+  }
 }
 ```
 
@@ -509,22 +509,22 @@ curl.exe -X PUT "http://127.0.0.1:5000/api/cases/TM-UC-0001" -H "Content-Type: a
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "id": 1,
-  "case_id": "TM-UC-0001",
-  "name": "用户登录成功校验",
-  "module": "用户中心",
-  "priority": "P1",
-  "case_type": "api",
-  "status": "disabled",
-  "description": "跨API集成测试种子用例",
-  "source_ref": "tests/api_demo/test_api_login.py",
-  "creator": "admin",
-  "created_at": "2026-09-20T10:15:30",
-  "updated_at": "2026-09-20T10:20:05"
- }
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "id": 1,
+    "case_id": "TM-UC-0001",
+    "name": "用户登录成功校验",
+    "module": "用户中心",
+    "priority": "P1",
+    "case_type": "api",
+    "status": "disabled",
+    "description": "跨API集成测试种子用例",
+    "source_ref": "tests/api_demo/test_api_login.py",
+    "creator": "admin",
+    "created_at": "2026-09-20T10:15:30",
+    "updated_at": "2026-09-20T10:20:05"
+  }
 }
 ```
 
@@ -535,9 +535,9 @@ curl.exe -X PUT "http://127.0.0.1:5000/api/cases/TM-UC-0001" -H "Content-Type: a
 
 ```json
 {
- "code": 400,
- "message": "至少提供一个待更新字段",
- "data": null
+  "code": 400,
+  "message": "至少提供一个待更新字段",
+  "data": null
 }
 ```
 
@@ -569,11 +569,11 @@ HTTP/1.1 204 NO CONTENT
 
 ```json
 {
- "code": 404,
- "message": "用例不存在",
- "data": {
-  "case_id": "TM-UC-9999"
- }
+  "code": 404,
+  "message": "用例不存在",
+  "data": {
+    "case_id": "TM-UC-9999"
+  }
 }
 ```
 
@@ -607,14 +607,14 @@ curl.exe -X POST "http://127.0.0.1:5000/api/cases/import" -F "file=@cases.yaml"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "file_name": "cases.yaml",
-  "total": 4,
-  "inserted": 4,
-  "updated": 0
- }
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "file_name": "cases.yaml",
+    "total": 4,
+    "inserted": 4,
+    "updated": 0
+  }
 }
 ```
 
@@ -625,9 +625,9 @@ curl.exe -X POST "http://127.0.0.1:5000/api/cases/import" -F "file=@cases.yaml"
 
 ```json
 {
- "code": 400,
- "message": "不支持的文件格式: .txt，仅支持 .yaml/.yml/.xlsx",
- "data": null
+  "code": 400,
+  "message": "不支持的文件格式: .txt，仅支持 .yaml/.yml/.xlsx",
+  "data": null
 }
 ```
 
@@ -666,27 +666,27 @@ curl.exe "http://127.0.0.1:5000/api/executions/?page=1&page_size=20"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "items": [
-   {
-    "execution_id": "RUN-20260920-103045-a1b2",
-    "total_cases": 4,
-    "passed": 2,
-    "failed": 2,
-    "error": 0,
-    "skipped": 0,
-    "pass_rate": 0.5,
-    "status": "finished",
-    "created_at": "2026-09-20T10:30:46+00:00"
-   }
-  ],
-  "total": 1,
-  "page": 1,
-  "page_size": 20,
-  "total_pages": 1
- }
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "items": [
+      {
+        "execution_id": "RUN-20260920-103045-a1b2",
+        "total_cases": 4,
+        "passed": 2,
+        "failed": 2,
+        "error": 0,
+        "skipped": 0,
+        "pass_rate": 0.5,
+        "status": "finished",
+        "created_at": "2026-09-20T10:30:46+00:00"
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "page_size": 20,
+    "total_pages": 1
+  }
 }
 ```
 
@@ -694,9 +694,9 @@ curl.exe "http://127.0.0.1:5000/api/executions/?page=1&page_size=20"
 
 ```json
 {
- "code": 400,
- "message": "page_size必须在1到100之间",
- "data": null
+  "code": 400,
+  "message": "page_size必须在1到100之间",
+  "data": null
 }
 ```
 
@@ -721,50 +721,50 @@ curl.exe "http://127.0.0.1:5000/api/executions/RUN-20260920-103045-a1b2"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "summary": {
-   "execution_id": "RUN-20260920-103045-a1b2",
-   "total_cases": 4,
-   "passed": 2,
-   "failed": 2,
-   "error": 0,
-   "skipped": 0,
-   "pass_rate": 0.5,
-   "created_at": "2026-09-20T10:30:46"
-  },
-  "items": [
-   {
-    "id": 1,
-    "execution_id": "RUN-20260920-103045-a1b2",
-    "case_id": "TM-UC-0001",
-    "case_name": "用户登录成功校验",
-    "result": "failed",
-    "start_time": "2026-09-20T10:30:45",
-    "end_time": "2026-09-20T10:30:45",
-    "duration": 0.01,
-    "error_message": "模拟执行失败: 断言不通过",
-    "environment": "dev",
-    "executor": "web",
-    "created_at": "2026-09-20T10:30:45"
-   },
-   {
-    "id": 2,
-    "execution_id": "RUN-20260920-103045-a1b2",
-    "case_id": "TM-UC-0002",
-    "case_name": "用户登录密码错误校验",
-    "result": "passed",
-    "start_time": "2026-09-20T10:30:45",
-    "end_time": "2026-09-20T10:30:45",
-    "duration": 0.01,
-    "error_message": null,
-    "environment": "dev",
-    "executor": "web",
-    "created_at": "2026-09-20T10:30:45"
-   }
-  ]
- }
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "summary": {
+      "execution_id": "RUN-20260920-103045-a1b2",
+      "total_cases": 4,
+      "passed": 2,
+      "failed": 2,
+      "error": 0,
+      "skipped": 0,
+      "pass_rate": 0.5,
+      "created_at": "2026-09-20T10:30:46"
+    },
+    "items": [
+      {
+        "id": 1,
+        "execution_id": "RUN-20260920-103045-a1b2",
+        "case_id": "TM-UC-0001",
+        "case_name": "用户登录成功校验",
+        "result": "failed",
+        "start_time": "2026-09-20T10:30:45",
+        "end_time": "2026-09-20T10:30:45",
+        "duration": 0.01,
+        "error_message": "模拟执行失败: 断言不通过",
+        "environment": "dev",
+        "executor": "web",
+        "created_at": "2026-09-20T10:30:45"
+      },
+      {
+        "id": 2,
+        "execution_id": "RUN-20260920-103045-a1b2",
+        "case_id": "TM-UC-0002",
+        "case_name": "用户登录密码错误校验",
+        "result": "passed",
+        "start_time": "2026-09-20T10:30:45",
+        "end_time": "2026-09-20T10:30:45",
+        "duration": 0.01,
+        "error_message": null,
+        "environment": "dev",
+        "executor": "web",
+        "created_at": "2026-09-20T10:30:45"
+      }
+    ]
+  }
 }
 ```
 
@@ -775,11 +775,11 @@ error_message 为可空字段，无值时为 `null`。
 
 ```json
 {
- "code": 404,
- "message": "执行批次不存在",
- "data": {
-  "execution_id": "RUN-00000000-000000-0000"
- }
+  "code": 404,
+  "message": "执行批次不存在",
+  "data": {
+    "execution_id": "RUN-00000000-000000-0000"
+  }
 }
 ```
 
@@ -811,13 +811,13 @@ curl.exe -X POST "http://127.0.0.1:5000/api/executions/trigger" -H "Content-Type
 
 ```json
 {
- "code": 202,
- "message": "执行批次已受理，后台执行中",
- "data": {
-  "execution_id": "RUN-20260920-103045-a1b2",
-  "status": "pending",
-  "total_cases": 2
- }
+  "code": 202,
+  "message": "执行批次已受理，后台执行中",
+  "data": {
+    "execution_id": "RUN-20260920-103045-a1b2",
+    "status": "pending",
+    "total_cases": 2
+  }
 }
 ```
 
@@ -829,9 +829,9 @@ curl.exe -X POST "http://127.0.0.1:5000/api/executions/trigger" -H "Content-Type
 
 ```json
 {
- "code": 400,
- "message": "请求体必须为JSON对象",
- "data": null
+  "code": 400,
+  "message": "请求体必须为JSON对象",
+  "data": null
 }
 ```
 
@@ -839,9 +839,9 @@ curl.exe -X POST "http://127.0.0.1:5000/api/executions/trigger" -H "Content-Type
 
 ```json
 {
- "code": 400,
- "message": "executor非法: 'real'，合法取值: ['simulated', 'pytest']",
- "data": null
+  "code": 400,
+  "message": "executor非法: 'real'，合法取值: ['simulated', 'pytest']",
+  "data": null
 }
 ```
 
@@ -869,22 +869,22 @@ curl.exe "http://127.0.0.1:5000/api/executions/RUN-20260920-103045-a1b2/status"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "execution_id": "RUN-20260920-103045-a1b2",
-  "status": "finished",
-  "total_cases": 4,
-  "passed": 2,
-  "failed": 2,
-  "error": 0,
-  "skipped": 0,
-  "pass_rate": 0.5,
-  "error_message": null,
-  "started_at": "2026-09-20T10:30:45",
-  "finished_at": "2026-09-20T10:30:46",
-  "created_at": "2026-09-20T10:30:45"
- }
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "execution_id": "RUN-20260920-103045-a1b2",
+    "status": "finished",
+    "total_cases": 4,
+    "passed": 2,
+    "failed": 2,
+    "error": 0,
+    "skipped": 0,
+    "pass_rate": 0.5,
+    "error_message": null,
+    "started_at": "2026-09-20T10:30:45",
+    "finished_at": "2026-09-20T10:30:46",
+    "created_at": "2026-09-20T10:30:45"
+  }
 }
 ```
 
@@ -896,11 +896,11 @@ status 取值：`pending`（已受理未开始）/`running`（执行中）/
 
 ```json
 {
- "code": 404,
- "message": "执行批次不存在",
- "data": {
-  "execution_id": "RUN-00000000-000000-0000"
- }
+  "code": 404,
+  "message": "执行批次不存在",
+  "data": {
+    "execution_id": "RUN-00000000-000000-0000"
+  }
 }
 ```
 
@@ -971,11 +971,11 @@ data: {"total": 4, "passed": 2, "failed": 2, "error": 0, "skipped": 0, "pass_rat
 
 ```json
 {
- "code": 404,
- "message": "执行批次不存在",
- "data": {
-  "execution_id": "RUN-00000000-000000-0000"
- }
+  "code": 404,
+  "message": "执行批次不存在",
+  "data": {
+    "execution_id": "RUN-00000000-000000-0000"
+  }
 }
 ```
 
@@ -1001,22 +1001,22 @@ curl.exe "http://127.0.0.1:5000/api/reports/summary"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "total_batches": 1,
-  "total_executed": 4,
-  "passed": 2,
-  "failed": 2,
-  "error": 0,
-  "skipped": 0,
-  "overall_pass_rate": 0.5,
-  "latest_batch": {
-   "execution_id": "RUN-20260920-103045-a1b2",
-   "pass_rate": 0.5,
-   "created_at": "2026-09-20T10:30:46"
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "total_batches": 1,
+    "total_executed": 4,
+    "passed": 2,
+    "failed": 2,
+    "error": 0,
+    "skipped": 0,
+    "overall_pass_rate": 0.5,
+    "latest_batch": {
+      "execution_id": "RUN-20260920-103045-a1b2",
+      "pass_rate": 0.5,
+      "created_at": "2026-09-20T10:30:46"
+    }
   }
- }
 }
 ```
 
@@ -1040,19 +1040,19 @@ curl.exe "http://127.0.0.1:5000/api/reports/trend?limit=20"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": [
-  {
-   "execution_id": "RUN-20260920-103045-a1b2",
-   "pass_rate": 0.5,
-   "total_cases": 4,
-   "passed": 2,
-   "failed": 2,
-   "error": 0,
-   "created_at": "2026-09-20T10:30:46"
-  }
- ]
+  "code": 200,
+  "message": "ok",
+  "data": [
+    {
+      "execution_id": "RUN-20260920-103045-a1b2",
+      "pass_rate": 0.5,
+      "total_cases": 4,
+      "passed": 2,
+      "failed": 2,
+      "error": 0,
+      "created_at": "2026-09-20T10:30:46"
+    }
+  ]
 }
 ```
 
@@ -1060,9 +1060,9 @@ curl.exe "http://127.0.0.1:5000/api/reports/trend?limit=20"
 
 ```json
 {
- "code": 400,
- "message": "limit必须在1到100之间",
- "data": null
+  "code": 400,
+  "message": "limit必须在1到100之间",
+  "data": null
 }
 ```
 
@@ -1085,28 +1085,28 @@ curl.exe "http://127.0.0.1:5000/api/reports/module-distribution"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": [
-  {
-   "module": "用户中心",
-   "total": 2,
-   "passed": 1,
-   "failed": 1,
-   "error": 0,
-   "skipped": 0,
-   "pass_rate": 0.5
-  },
-  {
-   "module": "订单中心",
-   "total": 2,
-   "passed": 1,
-   "failed": 1,
-   "error": 0,
-   "skipped": 0,
-   "pass_rate": 0.5
-  }
- ]
+  "code": 200,
+  "message": "ok",
+  "data": [
+    {
+      "module": "用户中心",
+      "total": 2,
+      "passed": 1,
+      "failed": 1,
+      "error": 0,
+      "skipped": 0,
+      "pass_rate": 0.5
+    },
+    {
+      "module": "订单中心",
+      "total": 2,
+      "passed": 1,
+      "failed": 1,
+      "error": 0,
+      "skipped": 0,
+      "pass_rate": 0.5
+    }
+  ]
 }
 ```
 
@@ -1129,37 +1129,37 @@ curl.exe "http://127.0.0.1:5000/api/reports/priority-distribution"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": [
-  {
-   "priority": "P0",
-   "total": 5,
-   "passed": 5,
-   "failed": 0,
-   "error": 0,
-   "skipped": 0,
-   "pass_rate": 1.0
-  },
-  {
-   "priority": "P1",
-   "total": 8,
-   "passed": 6,
-   "failed": 2,
-   "error": 0,
-   "skipped": 0,
-   "pass_rate": 0.75
-  },
-  {
-   "priority": "unknown",
-   "total": 1,
-   "passed": 0,
-   "failed": 1,
-   "error": 0,
-   "skipped": 0,
-   "pass_rate": 0.0
-  }
- ]
+  "code": 200,
+  "message": "ok",
+  "data": [
+    {
+      "priority": "P0",
+      "total": 5,
+      "passed": 5,
+      "failed": 0,
+      "error": 0,
+      "skipped": 0,
+      "pass_rate": 1.0
+    },
+    {
+      "priority": "P1",
+      "total": 8,
+      "passed": 6,
+      "failed": 2,
+      "error": 0,
+      "skipped": 0,
+      "pass_rate": 0.75
+    },
+    {
+      "priority": "unknown",
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "error": 0,
+      "skipped": 0,
+      "pass_rate": 0.0
+    }
+  ]
 }
 ```
 
@@ -1197,24 +1197,24 @@ curl.exe "http://127.0.0.1:5000/api/reports/failed-top?limit=10"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": [
-  {
-   "case_id": "TM-OD-0001",
-   "case_name": "订单创建成功校验",
-   "fail_count": 1,
-   "last_failed_at": "2026-09-20T10:30:45",
-   "last_error_message": "模拟执行失败: 断言不通过"
-  },
-  {
-   "case_id": "TM-UC-0001",
-   "case_name": "用户登录成功校验",
-   "fail_count": 1,
-   "last_failed_at": "2026-09-20T10:30:45",
-   "last_error_message": "模拟执行失败: 断言不通过"
-  }
- ]
+  "code": 200,
+  "message": "ok",
+  "data": [
+    {
+      "case_id": "TM-OD-0001",
+      "case_name": "订单创建成功校验",
+      "fail_count": 1,
+      "last_failed_at": "2026-09-20T10:30:45",
+      "last_error_message": "模拟执行失败: 断言不通过"
+    },
+    {
+      "case_id": "TM-UC-0001",
+      "case_name": "用户登录成功校验",
+      "fail_count": 1,
+      "last_failed_at": "2026-09-20T10:30:45",
+      "last_error_message": "模拟执行失败: 断言不通过"
+    }
+  ]
 }
 ```
 
@@ -1250,19 +1250,19 @@ curl.exe "http://127.0.0.1:5000/api/reports/quality-metrics"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "case_execution_coverage": 1.0,
-  "defect_density": 0.5,
-  "problem_case_ratio": 0.5,
-  "execution_efficiency": {
-   "avg_duration_sec": 0.01,
-   "p95_duration_sec": 0.01,
-   "avg_cases_per_batch": 4.0
-  },
-  "code_coverage": null
- }
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "case_execution_coverage": 1.0,
+    "defect_density": 0.5,
+    "problem_case_ratio": 0.5,
+    "execution_efficiency": {
+      "avg_duration_sec": 0.01,
+      "p95_duration_sec": 0.01,
+      "avg_cases_per_batch": 4.0
+    },
+    "code_coverage": null
+  }
 }
 ```
 
@@ -1273,9 +1273,9 @@ curl.exe "http://127.0.0.1:5000/api/reports/quality-metrics"
 通知模块的只读可观测性接口（Day41 新增）。通知发送有两张留痕表：
 
 - `notification_history`：每次真实发送尝试一行结果（`success` /
- `dead_letter`），渠道未启用（配置性跳过）不记录；
+  `dead_letter`），渠道未启用（配置性跳过）不记录；
 - `notification_dead_letters`：仅重试耗尽进入死信的通知，存完整消息体
- （HTML/markdown 全文）供人工排查与后续重放。
+  （HTML/markdown 全文）供人工排查与后续重放。
 
 两个接口均为只读 GET，不提供重放/删除。
 
@@ -1304,26 +1304,26 @@ curl.exe "http://127.0.0.1:5000/api/notifications/history?status=success&page=1&
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "items": [
-   {
-    "id": 1,
-    "channel": "wechat",
-    "execution_id": "RUN-20261001-103045-a1b2",
-    "status": "success",
-    "subject": "批次执行完成 RUN-20261001-103045-a1b2",
-    "attempts": 1,
-    "error_message": "",
-    "created_at": "2026-10-01T10:30:47"
-   }
-  ],
-  "total": 1,
-  "page": 1,
-  "page_size": 20,
-  "total_pages": 1
- }
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "items": [
+      {
+        "id": 1,
+        "channel": "wechat",
+        "execution_id": "RUN-20261001-103045-a1b2",
+        "status": "success",
+        "subject": "批次执行完成 RUN-20261001-103045-a1b2",
+        "attempts": 1,
+        "error_message": "",
+        "created_at": "2026-10-01T10:30:47"
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "page_size": 20,
+    "total_pages": 1
+  }
 }
 ```
 
@@ -1372,28 +1372,28 @@ curl.exe "http://127.0.0.1:5000/api/notifications/dead-letters?channel=wechat"
 
 ```json
 {
- "code": 200,
- "message": "ok",
- "data": {
-  "items": [
-   {
-    "id": 1,
-    "channel": "wechat",
-    "execution_id": "RUN-20261001-103045-a1b2",
-    "title": "批次执行失败通知",
-    "content": "### 批次执行完成 ...（完整 markdown/HTML 消息体，不截断）",
-    "level": "critical",
-    "fail_reason": "ConnectionError: 企微接口连接超时",
-    "attempts": 4,
-    "status": "dead",
-    "created_at": "2026-10-01T10:31:20"
-   }
-  ],
-  "total": 1,
-  "page": 1,
-  "page_size": 20,
-  "total_pages": 1
- }
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "items": [
+      {
+        "id": 1,
+        "channel": "wechat",
+        "execution_id": "RUN-20261001-103045-a1b2",
+        "title": "批次执行失败通知",
+        "content": "### 批次执行完成 ...（完整 markdown/HTML 消息体，不截断）",
+        "level": "critical",
+        "fail_reason": "ConnectionError: 企微接口连接超时",
+        "attempts": 4,
+        "status": "dead",
+        "created_at": "2026-10-01T10:31:20"
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "page_size": 20,
+    "total_pages": 1
+  }
 }
 ```
 
@@ -1428,7 +1428,7 @@ curl.exe "http://127.0.0.1:5000/api/notifications/dead-letters?channel=wechat"
 2. 末位数字为**偶数** → `passed`，为**奇数** → `failed`；
 3. case_id 不含数字时按偶数处理 → `passed`；
 4. 每条用例模拟约 0.01 秒耗时；failed 时 error_message 固定为
-  `模拟执行失败: 断言不通过`，passed 时 error_message 为 null。
+    `模拟执行失败: 断言不通过`，passed 时 error_message 为 null。
 
 示例：`TM-UC-0001` 末位为 1（奇数）→ failed；
 `TM-UC-0002` 末位为 2（偶数）→ passed。
@@ -1438,13 +1438,13 @@ curl.exe "http://127.0.0.1:5000/api/notifications/dead-letters?channel=wechat"
 trigger 接口为异步语义，完整调用流程如下：
 
 1. `POST /api/executions/trigger` 提交筛选条件，立即得到
-  `202` 响应，data 中记录 execution_id、status=pending、total_cases；
+    `202` 响应，data 中记录 execution_id、status=pending、total_cases；
 2. 按固定间隔轮询 `GET /api/executions/{execution_id}/status`
-  （建议间隔 0.3 ~ 1 秒），观察 status 由 pending → running 迁移；
+    （建议间隔 0.3 ~ 1 秒），观察 status 由 pending → running 迁移；
 3. status 到达终态 `finished` 或 `failed` 后停止轮询：
-  - finished：读取计数与 pass_rate，再调
-   `GET /api/executions/{execution_id}` 查看明细；
-  - failed：读取 error_message 排查批次级异常；
+    - finished：读取计数与 pass_rate，再调
+      `GET /api/executions/{execution_id}` 查看明细；
+    - failed：读取 error_message 排查批次级异常；
 4. 需要实时观察执行过程时，可在触发后连接
-  `GET /api/executions/{execution_id}/events`（SSE），断线重连带上
-  `Last-Event-ID` 请求头即可从断点续传，无需重新全量拉取。
+    `GET /api/executions/{execution_id}/events`（SSE），断线重连带上
+    `Last-Event-ID` 请求头即可从断点续传，无需重新全量拉取。

@@ -1173,10 +1173,10 @@ class TestDay53DefensiveBranches:
     一条本来跑得好好的用例打成 failed。
     """
     bus = ExecutionOutputBus()
-    bus.publish(OUTPUT_SOURCE_STDOUT, None) # type: ignore[arg-type]
+    bus.publish(OUTPUT_SOURCE_STDOUT, None)  # type: ignore[arg-type]
     assert bus.snapshot() == []
 
-    bus._condition = None # type: ignore[assignment]
+    bus._condition = None  # type: ignore[assignment]
     bus.close(reason="broken_condition")
     # 临界区已被破坏，close 内部在加锁处即失败 → 关闭标记不得被置上，
     # 但异常必须被吞掉（本用例"不抛出"即通过；is_closed 只读不加锁）
@@ -1240,7 +1240,7 @@ class TestDay53DefensiveBranches:
     capture = executors_mod._StreamedOutput()
     process = _StubProcess(_BrokenStream(True), _BrokenStream(False))
     stdout, stderr = PytestRunner()._consume_stream(
-      process, bus, capture # type: ignore[arg-type]
+      process, bus, capture  # type: ignore[arg-type]
     )
     assert stdout == ""
     assert stderr == "一行输出\n"
@@ -1289,7 +1289,7 @@ class TestDay53DefensiveBranches:
     capture = executors_mod._StreamedOutput()
     with pytest.raises(subprocess.TimeoutExpired):
       PytestRunner()._consume_stream(
-        _TimeoutProcess(), bus, capture # type: ignore[arg-type]
+        _TimeoutProcess(), bus, capture  # type: ignore[arg-type]
       )
     assert capture.cleanup_note, "超时必须在抛出前留下进程树清理描述"
     assert "超时前已输出" in capture.text

@@ -190,7 +190,7 @@ def prune_old_per_run_dirs(
         continue
       removed.append(path.name)
     return removed
-  except Exception: # noqa: BLE001 清理失败绝不能把整轮 pytest 搞挂
+  except Exception:  # noqa: BLE001 清理失败绝不能把整轮 pytest 搞挂
     return []
 
 
@@ -213,7 +213,7 @@ def apply_per_run_allure_dir(config: Any) -> str:
   """
   try:
     raw_dir = config.getoption("--alluredir", default=None)
-  except Exception: # noqa: BLE001 配置访问异常不阻断会话
+  except Exception:  # noqa: BLE001 配置访问异常不阻断会话
     return ""
   if not raw_dir:
     return ""
@@ -226,14 +226,14 @@ def apply_per_run_allure_dir(config: Any) -> str:
     # 此处再包一层是防"配置改写路径上的任何意外"）
     try:
       prune_old_per_run_dirs(effective_dir, run_dir)
-    except Exception: # noqa: BLE001 同上
+    except Exception:  # noqa: BLE001 同上
       pass
     effective_dir = str(run_dir)
 
   # 第二道闸：关闭破坏性清理（详见模块 docstring 的"两道闸"）
   try:
     config.option.clean_alluredir = False
-  except Exception: # noqa: BLE001 无该选项时忽略（allure 插件未安装）
+  except Exception:  # noqa: BLE001 无该选项时忽略（allure 插件未安装）
     return effective_dir
   return effective_dir
 
@@ -331,7 +331,7 @@ def registered_marker_names(config: Any) -> frozenset[str]:
       name = str(entry).split(":", 1)[0].strip()
       if name:
         names.add(name)
-  except Exception: # noqa: BLE001 读不到 markers 配置就不做完整性检查
+  except Exception:  # noqa: BLE001 读不到 markers 配置就不做完整性检查
     pass
   return frozenset(names)
 
@@ -516,7 +516,7 @@ def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:
     config.stash[COLLECTION_STATS_STASH_KEY] = build_collection_stats(
       items, registered
     )
-  except Exception: # noqa: BLE001 排序/统计失败不得阻断整轮收集
+  except Exception:  # noqa: BLE001 排序/统计失败不得阻断整轮收集
     return
 
 

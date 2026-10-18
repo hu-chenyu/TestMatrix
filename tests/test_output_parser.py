@@ -404,7 +404,7 @@ class TestProgressPercent:
     first = ParsedResult()
     second = ParsedResult()
 
-    first.failed_cases.append # noqa: B018 - 确认属性存在即可
+    first.failed_cases.append  # noqa: B018 - 确认属性存在即可
     assert first.failed_cases == []
     assert first.failed_cases is not second.failed_cases, (
       "可变默认值必须用 default_factory 隔离"

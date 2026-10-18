@@ -419,5 +419,5 @@ class TestPenetrationProtection:
     )
     assert cache_client.get_json(key) is not None, "写入后应立即存在"
 
-    time.sleep(1.5) # 等待超过1秒TTL，验证SETEX兜底过期
+    time.sleep(1.5)  # 等待超过1秒TTL，验证SETEX兜底过期
     assert cache_client.get_json(key) is None, "TTL到期后缓存应自动失效"

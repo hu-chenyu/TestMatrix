@@ -478,7 +478,7 @@ class TestFormattingFallbacks:
     耗时缺失时格式化会抛 TypeError，邮件渲染整段失败——用户
     收到的是一封渲染报错的残缺邮件，比显示"N/A"糟糕得多。
     """
-    assert EmailReportTemplate._format_duration(None) == "N/A" # type: ignore[arg-type]
+    assert EmailReportTemplate._format_duration(None) == "N/A"  # type: ignore[arg-type]
     assert EmailReportTemplate._format_duration(500) == "500 ms"
     assert EmailReportTemplate._format_duration(1500) == "1.50 s"
 
@@ -489,7 +489,7 @@ class TestFormattingFallbacks:
     浮点指标与整数耗时是两套格式化：avg/p95 是浮点要保留两位小数，
     混用会让"0.1 ms"显示成"0 ms"。
     """
-    assert EmailReportTemplate._format_ms(None) == "N/A" # type: ignore[arg-type]
+    assert EmailReportTemplate._format_ms(None) == "N/A"  # type: ignore[arg-type]
     assert EmailReportTemplate._format_ms(0.5) == "0.50 ms"
     assert EmailReportTemplate._format_ms(999.99) == "999.99 ms"
     assert EmailReportTemplate._format_ms(1000) == "1.00 s", (
@@ -505,7 +505,7 @@ class TestFormattingFallbacks:
     "None" 这种占位文本。
     """
     assert EmailReportTemplate._truncate("") == ""
-    assert EmailReportTemplate._truncate(None) == "" # type: ignore[arg-type]
+    assert EmailReportTemplate._truncate(None) == ""  # type: ignore[arg-type]
     assert EmailReportTemplate._truncate("短消息", max_length=100) == "短消息"
     truncated = EmailReportTemplate._truncate("A" * 200, max_length=50)
     assert truncated.endswith("..."), "超长消息应截断并以省略号结尾"
@@ -690,7 +690,7 @@ class TestColorAndBackoff:
     # 必须在构造外面包 sink，否则只截到后续的重试日志
     with capture:
       router = NotificationRouter(
-        base_delay="not-a-number", # type: ignore[arg-type]
+        base_delay="not-a-number",  # type: ignore[arg-type]
         max_retries=2,
         sleeper=sleeper,
         dead_letter_repo=_NullRepo(),
@@ -823,7 +823,7 @@ class TestRouterIsolation:
       """模拟内层守卫失效：历史写入直接抛出"""
       raise RuntimeError("模拟内层兜底被打破")
 
-    router._save_history = _raise_on_history # type: ignore[method-assign]
+    router._save_history = _raise_on_history  # type: ignore[method-assign]
     capture = _LogCapture(level="WARNING")
 
     with capture:

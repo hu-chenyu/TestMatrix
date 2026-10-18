@@ -27,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # 被测脚本路径（GBK 守卫测试需要读它的源码文本）
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "ast_regression_poc.py"
 
-from scripts.ast_regression_poc import ( # noqa: E402
+from scripts.ast_regression_poc import (  # noqa: E402
   CoverageMapper,
   ImportGraph,
   RegressionSelector,
@@ -297,7 +297,7 @@ def test_is_out_of_project_三类判据跨平台一致(tmp_path):
   assert ":" not in posix_abs.split("/")[0]     # 旧判据在此失效
   assert is_out_of_project(posix_abs) is True     # 新判据跨平台认 POSIX 绝对路径
   assert is_out_of_project("C:/venv/lib/site-packages/third.py") is True
-  assert is_out_of_project("//server/share/x.py") is True # Windows UNC 形态
+  assert is_out_of_project("//server/share/x.py") is True  # Windows UNC 形态
   assert PurePosixPath(posix_abs).is_absolute() is True
   assert PureWindowsPath(r"C:/venv/lib/site-packages/third.py").is_absolute() is True
 

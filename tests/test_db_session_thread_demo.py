@@ -88,7 +88,7 @@ class TestSqliteThreadSafety:
               text("INSERT INTO thread_touch VALUES (:value)"),
               {"value": worker_id * 100 + seq},
             )
-      except Exception as exc: # noqa: BLE001 子线程异常回传主线程统一断言
+      except Exception as exc:  # noqa: BLE001 子线程异常回传主线程统一断言
         errors.append(f"{type(exc).__name__}: {exc}")
 
     threads = [

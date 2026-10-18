@@ -464,7 +464,7 @@ class TestFailedTopAndPriorityOrder:
     bool 单独拦：bool 是 int 子类，True 会被当成 limit=1 放行。
     """
     with pytest.raises(ValueError, match="limit必须在1到100之间"):
-      ReportRepository.get_failed_top(bad_limit) # type: ignore[arg-type]
+      ReportRepository.get_failed_top(bad_limit)  # type: ignore[arg-type]
 
   def test_failed_top_accepts_boundary_limits(self, empty_db: Path) -> None:
     """

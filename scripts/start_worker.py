@@ -33,12 +33,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.core.task_queue import ( # noqa: E402
+from src.core.task_queue import (  # noqa: E402
   start_worker,
   stop_worker,
   task_queue_client,
 )
-from src.db.db_session import DatabaseSession # noqa: E402
+from src.db.db_session import DatabaseSession  # noqa: E402
 
 # 主进程阻塞等待的退出事件：信号处理器置位后 main 线程解除阻塞
 _exit_event = threading.Event()
@@ -75,7 +75,7 @@ def _ping_redis() -> tuple[bool, str]:
     return False, "后端未构建（队列开关关闭或后端依赖缺失）"
   try:
     backend.ping()
-  except Exception as exc: # noqa: BLE001 探活只展示状态，不允许打断启动
+  except Exception as exc:  # noqa: BLE001 探活只展示状态，不允许打断启动
     return False, f"连接失败：{type(exc).__name__}: {exc}"
   return True, "PING 成功"
 
@@ -121,15 +121,15 @@ def main() -> int:
   try:
     DatabaseSession.init_db()
     print(" 数据库表结构     = 已就绪（init_db 幂等）")
-  except Exception as exc: # noqa: BLE001 建表失败明确告知但不静默吞掉
+  except Exception as exc:  # noqa: BLE001 建表失败明确告知但不静默吞掉
     print(f"[失败] 数据库初始化失败：{type(exc).__name__}: {exc}")
     return 1
 
   # 注册停止信号：Windows 支持 SIGINT 与 SIGBREAK；
   # SIGTERM 仅在平台提供时注册（POSIX 下由 kill/killall 触发）
   signal.signal(signal.SIGINT, _handle_stop_signal)
-  if hasattr(signal, "SIGBREAK"): # Windows 专属：Ctrl+Break
-    signal.signal(signal.SIGBREAK, _handle_stop_signal) # type: ignore[attr-defined]
+  if hasattr(signal, "SIGBREAK"):  # Windows 专属：Ctrl+Break
+    signal.signal(signal.SIGBREAK, _handle_stop_signal)  # type: ignore[attr-defined]
   if hasattr(signal, "SIGTERM") and sys.platform != "win32":
     signal.signal(signal.SIGTERM, _handle_stop_signal)
 

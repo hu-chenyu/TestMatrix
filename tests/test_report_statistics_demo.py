@@ -159,7 +159,7 @@ class TestAggregateStatus:
 
     assert stat.total == 10
     assert stat.passed == 5
-    assert stat.failed == 3 # 2 failed + 1 broken
+    assert stat.failed == 3  # 2 failed + 1 broken
     assert stat.broken == 1
     assert stat.skipped == 2
     assert stat.pass_rate == 0.5
@@ -298,7 +298,7 @@ class TestGroupStatistics:
 
     order_module = stat.by_module["订单管理"]
     assert order_module.total == 2
-    assert order_module.failed == 1 # broken计入failed
+    assert order_module.failed == 1  # broken计入failed
     assert order_module.pass_rate == 0.5
 
     report_module = stat.by_module["数据报表"]

@@ -365,10 +365,10 @@ class TestBackfillClassification:
     """
     case = {
       "case_id": "TM-C-0003",
-      "name": "查询返回结构", # name/module 都不含关键词
+      "name": "查询返回结构",  # name/module 都不含关键词
       "module": "用户管理",
-      "case_type": "chip", # 枚举也不含 api
-      "description": "标签: smoke, api", # 只有 description 含
+      "case_type": "chip",  # 枚举也不含 api
+      "description": "标签: smoke, api",  # 只有 description 含
     }
     assert classify_case(case) == TIER_SIMULATION, (
       "description 含 api 关键词必须判 C 档"

@@ -86,7 +86,7 @@ def _check_database() -> tuple[bool, str, str]:
     future.cancel()
     detail = f"数据库探测超时（超过{HEALTH_DB_PROBE_TIMEOUT}秒）"
     return False, detail, detail
-  except Exception as exc: # noqa: BLE001 健康检查需兜住全部数据库异常
+  except Exception as exc:  # noqa: BLE001 健康检查需兜住全部数据库异常
     # 完整上下文交由日志保留，供运维排查
     logger.warning(
       f"数据库健康探测失败 | 类型: {type(exc).__name__} | {exc}"

@@ -397,10 +397,10 @@ class TestClaimOwnerGuard:
     assert client_a.claim(control_id) is True
     naive_owner = client_b._backend.get(control_key)
     assert naive_owner == "worker-a"
-    client_b._backend.delete(control_key) # 模拟窗口内被接管
+    client_b._backend.delete(control_key)  # 模拟窗口内被接管
     client_b._backend.set(control_key, "worker-thief", ex=3600)
     if naive_owner == "worker-a":
-      client_b._backend.delete(control_key) # 迟到的 DEL 拆掉了别人的保护
+      client_b._backend.delete(control_key)  # 迟到的 DEL 拆掉了别人的保护
     assert client_b._backend.get(control_key) is None, (
       "朴素实现的对照未复现误删，说明本条的 CAS 断言可能测不到真实风险"
     )

@@ -147,7 +147,7 @@ def _pid_alive(pid: int) -> bool:
       if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
         # 查不到退出码时无法判定，保守认为它还在
         return True
-      return code.value == 259 # STILL_ACTIVE
+      return code.value == 259  # STILL_ACTIVE
     finally:
       ctypes.windll.kernel32.CloseHandle(handle)
 
@@ -167,7 +167,7 @@ def _pid_alive(pid: int) -> bool:
   except ProcessLookupError:
     return False
   except PermissionError:
-    return True # 存在，只是我们没权限查
+    return True  # 存在，只是我们没权限查
   return True
 
 
@@ -822,7 +822,7 @@ class TestPytestRunnerRunOne:
       PytestRunner()
     for illegal in (0, -1, True):
       with pytest.raises(ValueError, match="正整数"):
-        PytestRunner(timeout=illegal) # type: ignore[arg-type]
+        PytestRunner(timeout=illegal)  # type: ignore[arg-type]
 
     # 空串同样视为"未配置"（容器/CI 常把未设置的变量渲染成空串）
     monkeypatch.setenv("TM_PYTEST_TIMEOUT", "")
@@ -833,16 +833,16 @@ class TestPytestRunnerRunOne:
     # cwd / env 非法类型显式拒绝，消息须带字段名与实际类型
     for bad_cwd in (123, 1.5, ["a"], {"a": 1}):
       with pytest.raises(TypeError, match=r"cwd|工作目录"):
-        PytestRunner(cwd=bad_cwd) # type: ignore[arg-type]
+        PytestRunner(cwd=bad_cwd)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match=r"str 或 Path"):
-      PytestRunner(cwd=123) # type: ignore[arg-type]
+      PytestRunner(cwd=123)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match=r"int"):
-      PytestRunner(cwd=123) # type: ignore[arg-type]
+      PytestRunner(cwd=123)  # type: ignore[arg-type]
     for bad_env in ("PATH=x", ["PATH=x"], ("PATH", "x")):
       with pytest.raises(TypeError, match=r"env|环境变量"):
-        PytestRunner(env=bad_env) # type: ignore[arg-type]
+        PytestRunner(env=bad_env)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match=r"dict 或 None"):
-      PytestRunner(env="PATH=x") # type: ignore[arg-type]
+      PytestRunner(env="PATH=x")  # type: ignore[arg-type]
 
     # 合法类型照常通过（cwd 收 str/Path 并归一为 Path，env 收 dict）
     assert PytestRunner(cwd="sub/dir").cwd == Path("sub/dir"), (
@@ -855,12 +855,12 @@ class TestPytestRunnerRunOne:
     # 环境块全为 str。漏掉这层时 TypeError 会从子进程创建逃逸。
     for bad_value in (123, None, True, 1.5, b"bytes", ["x"]):
       with pytest.raises(TypeError, match="CUSTOM_VAR") as excinfo:
-        PytestRunner(env={"CUSTOM_VAR": bad_value}) # type: ignore[dict-item]
+        PytestRunner(env={"CUSTOM_VAR": bad_value})  # type: ignore[dict-item]
       message = str(excinfo.value)
       assert "值必须是 str" in message
       assert type(bad_value).__name__ in message, "消息须带实际类型"
     with pytest.raises(TypeError, match="键必须是 str"):
-      PytestRunner(env={123: "v"}) # type: ignore[dict-item]
+      PytestRunner(env={123: "v"})  # type: ignore[dict-item]
     with pytest.raises(ValueError, match="不能包含"):
       PytestRunner(env={"A=B": "v"})
     with pytest.raises(ValueError, match="不能为空串"):
@@ -999,7 +999,7 @@ class TestPytestRunnerRunOne:
     降级为单条 error——这正是 Day48-fix2 保留两层的原因。
     """
     runner = PytestRunner()
-    runner.env = {"BROKEN": 8080} # 绕过构造期校验直接赋值
+    runner.env = {"BROKEN": 8080}  # 绕过构造期校验直接赋值
     patch_subprocess.exc = TypeError("environment can only contain strings")
 
     result = runner.run_one({"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF})
@@ -1175,7 +1175,7 @@ class TestProcessTreeCleanup:
 
     slow = FakePopen(pid=555, poll_return=None)
     poll_states = [None, None, 0]
-    slow.poll = lambda: poll_states.pop(0) if poll_states else 0 # type: ignore[method-assign]
+    slow.poll = lambda: poll_states.pop(0) if poll_states else 0  # type: ignore[method-assign]
     note = runner._kill_group_posix(slow)
     assert len(slept) == 2, "宽限期内必须轮询等待，而不是一次性判死"
     assert slept == [PROCESS_TREE_POLL_INTERVAL_SECONDS] * 2

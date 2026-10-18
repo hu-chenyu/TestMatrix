@@ -84,7 +84,7 @@ class FakeRouter:
       "email": True, "wechat": True
     }
     self._raise = raise_exception
-    self.calls: list = [] # [(stat, execution_id, strategy), ...]
+    self.calls: list = []  # [(stat, execution_id, strategy), ...]
 
   def notify(self, stat, execution_id, strategy=None):
     self.calls.append((stat, execution_id, strategy))
@@ -151,8 +151,8 @@ class TestBuildNotificationStatistics:
     assert stat is not None
     assert stat.total == 4
     assert stat.passed == 1
-    assert stat.broken == 1 # DB error→Allure broken
-    assert stat.failed == 2 # failed+broken合计口径
+    assert stat.broken == 1  # DB error→Allure broken
+    assert stat.failed == 2  # failed+broken合计口径
     assert stat.skipped == 1
     assert stat.pass_rate == 0.25
 
@@ -235,7 +235,7 @@ class TestBuildNotificationStatistics:
 
     stat = CaseManager.build_notification_statistics("RUN-DUR-001")
 
-    assert stat.total_duration_ms == 1000 # 2条×500ms
+    assert stat.total_duration_ms == 1000  # 2条×500ms
     assert stat.avg_duration_ms == 500.0
     assert stat.max_duration_ms == 500
     assert stat.min_duration_ms == 500

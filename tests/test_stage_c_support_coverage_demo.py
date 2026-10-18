@@ -692,7 +692,7 @@ class TestEventBusFaultTolerance:
     channel = EventChannel()
     channel._condition = _RaisingCondition()
 
-    channel.close(reason="failed") # 不抛异常即为通过
+    channel.close(reason="failed")  # 不抛异常即为通过
     assert channel.is_closed is False, (
       "加锁失败时不应谎报已关闭"
     )

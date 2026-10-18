@@ -21,9 +21,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import requests # noqa: E402
-from src.common.env_manager import env_manager # noqa: E402
-from src.core.notification import Notification, WeChatNotifier # noqa: E402
+import requests  # noqa: E402
+from src.common.env_manager import env_manager  # noqa: E402
+from src.core.notification import Notification, WeChatNotifier  # noqa: E402
 
 WEBHOOK_KEY = "TM_WECHAT_WEBHOOK_URL"
 ENABLED_KEY = "TM_WECHAT_ENABLED"
@@ -66,7 +66,7 @@ def main() -> int:
 
   try:
     ok = notifier.send(notification)
-  except Exception as exc: # 防御性兜底，正常 Notifier 契约不抛
+  except Exception as exc:  # 防御性兜底，正常 Notifier 契约不抛
     print(f"[异常] 发送过程抛出异常：{type(exc).__name__}: {exc}")
     return 1
 

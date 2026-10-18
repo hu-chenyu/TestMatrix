@@ -618,13 +618,13 @@ class TestP2_13BatchUpsert:
     yaml_file = tmp_path / "dup.yaml"
     yaml_file.write_text(
       "- case_id: TM-DUP-1\n"
-      " name: 第一次\n"
-      " module: m\n"
-      " priority: P1\n"
+      "  name: 第一次\n"
+      "  module: m\n"
+      "  priority: P1\n"
       "- case_id: TM-DUP-1\n"
-      " name: 第二次\n"
-      " module: m\n"
-      " priority: P2\n",
+      "  name: 第二次\n"
+      "  module: m\n"
+      "  priority: P2\n",
       encoding="utf-8",
     )
     result = CaseManager.sync_cases_from_file(str(yaml_file))
@@ -637,9 +637,9 @@ class TestP2_13BatchUpsert:
     yaml_file = tmp_path / "multi.yaml"
     rows = "".join(
       f"- case_id: TM-BATCH-{i}\n"
-      f" name: 批量用例{i}\n"
-      f" module: m\n"
-      f" priority: P1\n"
+      f"  name: 批量用例{i}\n"
+      f"  module: m\n"
+      f"  priority: P1\n"
       for i in range(5)
     )
     yaml_file.write_text(rows, encoding="utf-8")
@@ -1032,9 +1032,9 @@ class TestReportAndDriver:
     yaml_file = tmp_path / "bad.yaml"
     yaml_file.write_text(
       "- case_id: ../../etc/passwd\n"
-      " name: 穿越用例\n"
-      " module: m\n"
-      " priority: P1\n",
+      "  name: 穿越用例\n"
+      "  module: m\n"
+      "  priority: P1\n",
       encoding="utf-8",
     )
     with pytest.raises(Exception, match="case_id"):
@@ -1048,15 +1048,15 @@ class TestReportAndDriver:
     yaml_file = tmp_path / "tags.yaml"
     yaml_file.write_text(
       "- case_id: TM-TAGS-1\n"
-      " name: 无标签用例\n"
-      " module: m\n"
-      " priority: P1\n"
-      " tags:\n"
+      "  name: 无标签用例\n"
+      "  module: m\n"
+      "  priority: P1\n"
+      "  tags:\n"
       "- case_id: TM-TAGS-2\n"
-      " name: 空列表用例\n"
-      " module: m\n"
-      " priority: P1\n"
-      " tags: []\n",
+      "  name: 空列表用例\n"
+      "  module: m\n"
+      "  priority: P1\n"
+      "  tags: []\n",
       encoding="utf-8",
     )
     cases = DataDriver.load_cases(str(yaml_file))

@@ -170,8 +170,8 @@ class TestNotificationEdgeCases:
         result = router.notify(stat, "RUN-BAD-RETRY")
 
       assert result == {"email": False}
-      assert len(send_calls) == 1 # 1+0次，无重试
-      assert sleeps == [] # 无等待
+      assert len(send_calls) == 1  # 1+0次，无重试
+      assert sleeps == []  # 无等待
 
   def test_adapter_batch_all_unknown(self, temp_db):
     """

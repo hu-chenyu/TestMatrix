@@ -36,7 +36,7 @@ try:
   with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     import telnetlib
-except ImportError: # pragma: no cover 仅Python 3.13+触发，当前锁定3.11
+except ImportError:  # pragma: no cover 仅Python 3.13+触发，当前锁定3.11
   telnetlib = None
 
 
@@ -197,7 +197,7 @@ class TelnetClient:
       raise TelnetClientError(
         "登录认证失败: 用户名或密码错误（对端关闭连接）", host=self.host
       ) from exc
-    except Exception as exc: # noqa: BLE001 expect超时等统一兜底
+    except Exception as exc:  # noqa: BLE001 expect超时等统一兜底
       logger.error(f"Telnet登录流程异常 | {self.host} | {exc}")
       raise TelnetClientError(f"登录流程异常: {exc}", host=self.host) from exc
 
@@ -229,7 +229,7 @@ class TelnetClient:
       try:
         self._conn.close()
         logger.info(f"Telnet连接已断开 | {self.host}:{self.port}")
-      except Exception as exc: # noqa: BLE001 关闭异常统一兜底
+      except Exception as exc:  # noqa: BLE001 关闭异常统一兜底
         logger.warning(f"Telnet断开异常（已忽略） | {self.host} | {exc}")
     self._conn = None
 

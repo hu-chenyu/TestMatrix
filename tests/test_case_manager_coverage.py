@@ -498,7 +498,7 @@ class TestListExecutionsStatusField:
     ):
       self._seed_batch(execution_id, status)
       self._seed_summary(execution_id)
-    self._seed_summary("RUN-MIXED-D") # 无批次行
+    self._seed_summary("RUN-MIXED-D")  # 无批次行
 
     result = CaseManager.list_executions_paged()
 
