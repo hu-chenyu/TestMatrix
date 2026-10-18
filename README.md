@@ -217,4 +217,4 @@ core 层架构设计见 [docs/core_architecture.md](docs/core_architecture.md)�
 
 ---
 
-**License**: MIT — Copyright (c) 2026 chenyu.hu
+**License**: MIT — Copyright (c) 2026 hu-chenyu
