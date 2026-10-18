@@ -14,44 +14,44 @@
 # ==============================================================================
 
 query_cases:
- - case_id: TM-API-0201
-  name: 管理员令牌查询用户信息成功
-  module: 用户管理
-  priority: P0
-  tags: [smoke, api]
-  token_required: true
-  query_user_id: 1
-  expected_status: 200
-  expected_code: 0
-  expected_username: admin
+  - case_id: TM-API-0201
+    name: 管理员令牌查询用户信息成功
+    module: 用户管理
+    priority: P0
+    tags: [smoke, api]
+    token_required: true
+    query_user_id: 1
+    expected_status: 200
+    expected_code: 0
+    expected_username: admin
 
- - case_id: TM-API-0202
-  name: 测试账号令牌查询用户信息成功
-  module: 用户管理
-  priority: P1
-  tags: [api, regression]
-  token_required: true
-  query_user_id: 2
-  expected_status: 200
-  expected_code: 0
-  expected_username: tester
+  - case_id: TM-API-0202
+    name: 测试账号令牌查询用户信息成功
+    module: 用户管理
+    priority: P1
+    tags: [api, regression]
+    token_required: true
+    query_user_id: 2
+    expected_status: 200
+    expected_code: 0
+    expected_username: tester
 
- - case_id: TM-API-0203
-  name: 无令牌查询用户被拒绝
-  module: 用户管理
-  priority: P1
-  tags: [regression, security]
-  token_required: false
-  query_user_id: 1
-  expected_status: 401
-  expected_code: 2001
+  - case_id: TM-API-0203
+    name: 无令牌查询用户被拒绝
+    module: 用户管理
+    priority: P1
+    tags: [regression, security]
+    token_required: false
+    query_user_id: 1
+    expected_status: 401
+    expected_code: 2001
 
- - case_id: TM-API-0204
-  name: 令牌查询不存在用户返回业务错误码
-  module: 用户管理
-  priority: P2
-  tags: [regression]
-  token_required: true
-  query_user_id: 999
-  expected_status: 200
-  expected_code: 2002
+  - case_id: TM-API-0204
+    name: 令牌查询不存在用户返回业务错误码
+    module: 用户管理
+    priority: P2
+    tags: [regression]
+    token_required: true
+    query_user_id: 999
+    expected_status: 200
+    expected_code: 2002
