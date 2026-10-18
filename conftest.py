@@ -530,15 +530,26 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
   `--collect-only` 同样会走到本钩子（统计在收集期已写好），故"只看收集"
   的场景也能看到摘要（Day55 验收第 4 条据此）。
 
-  xdist 下本摘要**不输出**（Day58-fix，Day58-fix2 校正机制描述）: ①xdist 的
-  master 不做收集（其在 `pytest_collection` 里直接 return True），master 的
-  stash 里没有统计，走到下面 `stats is None` 就会返回；②worker 以 `no:terminal`
-  运行（xdist `remote.py` 的 `remote_initconfig` 往 `option_dict["plugins"]`
-  追加 `no:terminal`，本机 pytest-xdist 3.5.0 实证），worker 进程里**根本没有**
-  `terminalreporter` 插件——`get_plugin("terminalreporter")` 返回 None，摘要
-  从未产生（**不是"写了但没转发"**）。故 `-n` 模式下会话级信息由插件
-  （`testmatrix_plugin`）的"会话完成"摘要承担。这里在入口显式加 worker 守卫，
-  是把这个事实写成代码而不是留给"恰好读不到"。
+  xdist 下本摘要**不输出**（Day58-fix 记录，Day58-fix3 校正机制描述）: 两侧成因
+  不同，结果都是"master 终端没有这一行":
+    ① **master 侧——没收集**: xdist 的 master 不做收集（其在 `pytest_collection`
+      里直接 return True），master 的 stash 里没有统计，走到下面 `stats is None`
+      就返回；
+    ② **worker 侧——写了但到不了 master 终端**: worker 进程**确实有**
+      `terminalreporter`（pytest 7.4.4 存在 `Config.InvocationParams`，xdist
+      `remote.py` 因此走 `_prepareconfig(args, None)` 分支，那个只在旧 pytest 上
+      执行的 `remote_initconfig`（它会往 worker 的启动参数里追加"禁用终端插件"
+      一项）**不会被调用**），它的 `pytest_sessionfinish` 会照常执行、`write_line`
+      也真的写；但写的是 **worker 进程自己的标准输出**，xdist 不把 worker 的终端
+      输出转发到 master 终端（只在失败报告里回显），所以 master 终端看不到。
+  （Day58-fix2 曾把②记成"worker 进程里没有终端插件、摘要从未产生"（依据就是上面那段
+  在当前 pytest 版本下不会执行的旧分支），Day58-fix3 已三重取证证伪并改回：源码分支
+  `hasattr(Config, "InvocationParams")` 在 pytest 7.4.4 为真；worker 内
+  `get_plugin("terminalreporter")` 实测返回 TerminalReporter 实例；worker 打标记行后
+  master 终端只出现 master 自己那行。写"没有终端"与写"没转发"在排障时指向完全不同的
+  方向，故这条必须按实测写。）
+  故 `-n` 模式下会话级信息由插件（`testmatrix_plugin`）的"会话完成"摘要承担。
+  这里在入口显式加 worker 守卫，是把这个事实写成代码而不是留给"恰好读不到"。
 
   判定就地用 `hasattr(config, "workerinput")` 单判据，理由是三条:
     1. 不 import 插件的同名工具函数——conftest 被每一个 pytest 进程加载，
@@ -562,7 +573,7 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
   """
   config = getattr(session, "config", None)
   if config is not None and hasattr(config, "workerinput"):
-    # xdist worker 以 no:terminal 运行、本就没有 terminalreporter，摘要无从产生
+    # xdist worker 会写摘要，但写进 worker 自己的输出流、到不了 master 终端
     return
   stash = getattr(config, "stash", None)
   if stash is None:
@@ -572,7 +583,7 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     return
   terminal = config.pluginmanager.get_plugin("terminalreporter")
   if terminal is None:
-    # `-p no:terminal` 等场景: 本就没有终端可写，静默跳过。
+    # 终端插件被显式禁用等场景: 本就没有终端可写，静默跳过。
     # 刻意不用 print（项目铁律: 日志走 loguru，不散落 print）
     return
   # 走终端写入器而非 print，保证在 pytest 的输出捕获机制下依然可见

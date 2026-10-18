@@ -210,12 +210,18 @@ Day56 需要新增两项执行期能力：**结果上报**（把"本次会话跑
  4. **合并口径是"取 total 更大的一份"而非相加**：各 worker 收集的是整场会话的完整用例集
    （只执行其中一部分），N 份同口径统计相加会把总数放大 N 倍；total 更大者优先还能在
    "某 worker 收集不完整"时取到最接近完整会话的那一份，且结果确定。
-- **已知限制（Day58-fix 记录，Day58-fix2 校正机制描述）**：`-n` 模式下**项目根 conftest 的
- 收集摘要行不输出**——master 没有 stash 统计（`stats is None` 即返回）；worker 虽有统计，
- 但它以 `no:terminal` 启动（xdist `remote.py` 的 `remote_initconfig` 往
- `option_dict["plugins"]` 追加 `no:terminal`，pytest-xdist 3.5.0 实证），worker 进程里
- **根本没有** `terminalreporter`，`get_plugin("terminalreporter")` 返回 None、摘要从未产生
- （**不是"写了但没转发"**）。Day58-fix 因此在 conftest 的 `pytest_sessionfinish` 入口显式加
+- **已知限制（Day58-fix 记录，Day58-fix3 校正机制描述）**：`-n` 模式下**项目根 conftest 的
+ 收集摘要行不输出**，两侧成因不同、结果相同:
+ 1. **master 侧——没收集**：master 没有 stash 统计（`stats is None` 即返回）；
+ 2. **worker 侧——写了但到不了 master 终端**：worker 进程**确实有** `terminalreporter`
+   （pytest 7.4.4 存在 `Config.InvocationParams`，xdist `remote.py` 因此走
+   `_prepareconfig(args, None)` 分支，那个只在旧 pytest 上执行的 `remote_initconfig`
+  ——它会往 worker 的启动参数里追加"禁用终端插件"一项——不会被调用），
+   `pytest_sessionfinish` 照常执行、`write_line` 也真的写；但写的是
+   **worker 自己的标准输出**，xdist 不把它转发到 master 终端（只在失败报告里回显）。
+ （Day58-fix2 曾把成因 2 记成"worker 进程里没有终端插件、摘要从未产生"，Day58-fix3 以
+ 源码分支 / worker 内插件实例 / 标记行行为三重取证证伪后改回。）
+ Day58-fix 因此在 conftest 的 `pytest_sessionfinish` 入口显式加
  worker 守卫（早退，用 `workerinput` 单判据、不用会被子进程继承的 `PYTEST_XDIST_WORKER`
  兜底），把这个事实写成代码而不是留给"恰好读不到"；`-n` 模式的会话级信息由插件
  "会话完成"摘要承担。若要恢复该摘要，需要 conftest 侧也接一条 worker→master 上报
