@@ -587,6 +587,33 @@ class TestNestedCollectionEndToEnd:
       shutil.rmtree(probe_dir, ignore_errors=True)
 
 
+def _session_with_terminal(stash: pytest.Stash, **extra: Any) -> tuple[Any, list[str]]:
+  """
+  构造 session 替身（config 只带钩子用到的 stash 与 terminalreporter 两个取用面）
+
+  stash 用真实的 `pytest.Stash`: 键以对象身份匹配，替身化会把"键写错位"一并掩盖。
+
+  参数:
+    stash (pytest.Stash): 会话 stash
+    **extra (Any): 追加到 config 上的属性（如 xdist 的 `workerinput`）
+
+  返回:
+    tuple[Any, list[str]]: (session 替身, 终端已写入的行列表)
+
+  异常:
+    无
+  """
+  emitted: list[str] = []
+  config = SimpleNamespace(
+    stash=stash,
+    pluginmanager=SimpleNamespace(
+      get_plugin=lambda name: SimpleNamespace(write_line=emitted.append)
+    ),
+    **extra,
+  )
+  return SimpleNamespace(config=config), emitted
+
+
 @allure.feature("Day58-fix 收集摘要xdist守卫")
 @allure.story("收集摘要输出")
 @allure.title("worker 进程不输出收集摘要，master/串行仍照常输出（阳性对照）")
@@ -607,27 +634,53 @@ def test_sessionfinish_skips_collection_summary_in_xdist_worker(
   stats = fake_config.stash[root_conftest.COLLECTION_STATS_STASH_KEY]
   expected_line = root_conftest.format_collection_summary(stats)
 
-  def _session_with(**extra: Any) -> tuple[Any, list[str]]:
-    """构造 session 替身（config 只带 stash 与 terminalreporter 两个取用面）"""
-    emitted: list[str] = []
-    config = SimpleNamespace(
-      stash=fake_config.stash,
-      pluginmanager=SimpleNamespace(
-        get_plugin=lambda name: SimpleNamespace(write_line=emitted.append)
-      ),
-      **extra,
-    )
-    return SimpleNamespace(config=config), emitted
-
   # 阳性对照: 串行/master 形态（无 workerinput）必须照常输出一行摘要
-  serial_session, serial_lines = _session_with()
+  serial_session, serial_lines = _session_with_terminal(fake_config.stash)
   root_conftest.pytest_sessionfinish(serial_session, 0)
   assert serial_lines == [expected_line]
 
   # worker 形态（xdist 只给 worker 注入 workerinput）: 一行都不许写
-  worker_session, worker_lines = _session_with(workerinput={"workerid": "gw0"})
+  worker_session, worker_lines = _session_with_terminal(
+    fake_config.stash, workerinput={"workerid": "gw0"}
+  )
   root_conftest.pytest_sessionfinish(worker_session, 0)
   assert worker_lines == []
 
   # 兜底: config 缺失时同样安全返回（不抛异常、不写终端）
   root_conftest.pytest_sessionfinish(SimpleNamespace(), 0)
+
+
+@allure.feature("Day58-fix2 env钉子")
+@allure.story("收集摘要输出")
+@allure.title("继承来的 PYTEST_XDIST_WORKER 环境变量不得触发 worker 守卫（摘要照常输出）")
+def test_sessionfinish_guard_not_triggered_by_inherited_env_var(
+  root_conftest: ModuleType,
+  fake_config: _FakeConfig,
+  unsorted_items: list[_FakeItem],
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """
+  钉子测试（Day58-fix2）: 守卫只认 `workerinput`，**绝不能用 `PYTEST_XDIST_WORKER`
+  环境变量兜底**。
+
+  风险场景: `PYTEST_XDIST_WORKER` 是进程环境变量，会被子进程继承——本仓的嵌套
+  pytest（`tests/test_pytest_runner.py`、`tests/test_day44_bugfix_demo.py`、
+  本文件第 5 组的端到端用例）与真实执行器拉起的 pytest 子进程，只要父进程是
+  xdist worker 就天然带着它。若有人为了"与插件侧对齐"把守卫改成 env 判据，
+  这些普通 pytest 进程会被误判成 worker、**摘要被静默吞掉**；而串行开发期没有
+  该环境变量，本地看不出问题，只有 CI 的 `-n 2` 才会暴露。
+
+  本用例就是那一格的显式覆盖: 环境变量存在 + config 无 `workerinput`，摘要必须照常输出。
+  `monkeypatch.setenv` 在用例结束后自动还原，不污染同进程的其它用例。
+  """
+  root_conftest.pytest_collection_modifyitems(fake_config, unsorted_items)
+  stats = fake_config.stash[root_conftest.COLLECTION_STATS_STASH_KEY]
+  expected_line = root_conftest.format_collection_summary(stats)
+
+  # 模拟"父进程是 xdist worker、子进程继承了 PYTEST_XDIST_WORKER"
+  monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
+
+  session, emitted = _session_with_terminal(fake_config.stash)
+  root_conftest.pytest_sessionfinish(session, 0)
+
+  assert emitted == [expected_line]

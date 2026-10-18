@@ -530,15 +530,25 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
   `--collect-only` 同样会走到本钩子（统计在收集期已写好），故"只看收集"
   的场景也能看到摘要（Day55 验收第 4 条据此）。
 
-  xdist 下本摘要**不输出**（Day58-fix，实测口径）: ①xdist 的 master 不做收集
-  （其在 `pytest_collection` 里直接 return True），master 的 stash 里没有统计，
-  走到下面 `stats is None` 就会返回；②worker 虽然有统计，但它的终端写入不会被
-  转发到 master 终端。故 `-n` 模式下会话级信息由插件（`testmatrix_plugin`）的
-  "会话完成"摘要承担。这里在入口显式加 worker 守卫，是把这个事实写成代码而不是
-  留给"恰好读不到"，顺带省掉 worker 侧一次无意义的终端写。
-  判定就地写 `hasattr(config, "workerinput")`，刻意不 import 插件的同名工具
-  函数——conftest 被每一个 pytest 进程加载，反向依赖插件会把"插件没装/装错版本"
-  变成"整轮收集起不来"。
+  xdist 下本摘要**不输出**（Day58-fix，Day58-fix2 校正机制描述）: ①xdist 的
+  master 不做收集（其在 `pytest_collection` 里直接 return True），master 的
+  stash 里没有统计，走到下面 `stats is None` 就会返回；②worker 以 `no:terminal`
+  运行（xdist `remote.py` 的 `remote_initconfig` 往 `option_dict["plugins"]`
+  追加 `no:terminal`，本机 pytest-xdist 3.5.0 实证），worker 进程里**根本没有**
+  `terminalreporter` 插件——`get_plugin("terminalreporter")` 返回 None，摘要
+  从未产生（**不是"写了但没转发"**）。故 `-n` 模式下会话级信息由插件
+  （`testmatrix_plugin`）的"会话完成"摘要承担。这里在入口显式加 worker 守卫，
+  是把这个事实写成代码而不是留给"恰好读不到"。
+
+  判定就地用 `hasattr(config, "workerinput")` 单判据，理由是三条:
+    1. 不 import 插件的同名工具函数——conftest 被每一个 pytest 进程加载，
+      反向依赖插件会把"插件没装/装错版本"变成"整轮收集起不来"；
+    2. 不用 `PYTEST_XDIST_WORKER` 环境变量兜底——该变量会被嵌套 pytest /
+      执行器子进程继承，用 env 判据会**误杀普通子进程的摘要输出**；
+    3. 真实 xdist 进程里 `workerinput` / `workeroutput` 总是成对注入，
+      只认 `workerinput` 与插件侧的双通道 + env 兜底在本进程内等价；
+      插件那边之所以要双通道 + env，是因为它要在 worker 上报通道里区分
+      身份、并对替身配置留兜底，与本处的取舍不同。
 
   参数:
     session (Any): pytest 的 Session 对象（框架传入）
@@ -552,7 +562,7 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
   """
   config = getattr(session, "config", None)
   if config is not None and hasattr(config, "workerinput"):
-    # xdist worker: 摘要写了也到不了 master 终端，直接跳过
+    # xdist worker 以 no:terminal 运行、本就没有 terminalreporter，摘要无从产生
     return
   stash = getattr(config, "stash", None)
   if stash is None:
