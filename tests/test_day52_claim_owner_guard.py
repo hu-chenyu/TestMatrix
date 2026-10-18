@@ -1,7 +1,7 @@
 """
 TestMatrix Day52: claim 属主校验与释放防护回归用例（6 条）
 
-Day52 开工前必处理的 P2（+ 在 Day51 复核中共同发现）：
+Day52 开工前必处理的 P2（Day51 复核中发现）：
 
   `release_claim` 是**无条件 DEL**，而 worker 主循环每轮收尾都会调用它
  ——**包括"入口被别的 worker 的 claim 挡下、零用例执行"的那一轮**。

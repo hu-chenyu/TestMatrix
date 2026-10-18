@@ -200,7 +200,7 @@ REQUEUE_GUARD_TTL_SECONDS = STALE_PROCESSING_SECONDS
 # claim 属主校验（Day52 P2 修复）
 # ===========================================================================
 #
-# Day51 收口时 + 双方共同发现的问题：`release_claim` 是
+# Day51 收口时复核发现的问题：`release_claim` 是
 # **无条件 DEL**，而 worker 主循环每轮收尾都调用它——**包括"入口被 claim
 # 挡下、零用例执行"的那一轮**。后果是：被挡的消费者会 DEL 掉自己并不持有
 # 的旧 worker claim，使 claim 层对"进程冻结但未死透"的防护只持续一个重投
