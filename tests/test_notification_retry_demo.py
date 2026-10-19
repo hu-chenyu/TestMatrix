@@ -14,7 +14,6 @@
   （零真实sleep）+ 临时SQLite（对齐Day8模式）。
 """
 
-import contextlib
 from unittest.mock import patch
 
 import allure
@@ -28,6 +27,8 @@ from src.core.notification import (
 )
 from src.core.report_analyzer import StatisticsResult
 from src.db.db_session import DatabaseSession
+
+from tests.db_cleanup import safe_unlink
 
 # 路由器env基线（重试参数走显式传参，不依赖env）
 ROUTER_ENV = {
@@ -173,8 +174,7 @@ def temp_db(tmp_path, monkeypatch):
   DatabaseSession.reset()
   # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
   # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_file.unlink(missing_ok=True)
+  safe_unlink(db_file)
 
 
 @allure.feature("通知模块")

@@ -44,7 +44,6 @@ TestMatrix 阶段C-1: 基础设施层未覆盖分支的补齐测试
   - 全程 loguru，无 print
 """
 
-import contextlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -55,6 +54,8 @@ import requests
 from sqlalchemy.engine.url import make_url
 from src.common.http_client import HttpClient, HttpClientError
 from src.db.db_session import DatabaseSession
+
+from tests.db_cleanup import safe_unlink
 
 # 不参与网络访问的占位域名：所有用例都在真正发起请求前就短路返回
 DUMMY_BASE_URL = "http://unit.test"
@@ -94,8 +95,7 @@ def temp_db(
   DatabaseSession.reset()
   # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
   # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_path.unlink(missing_ok=True)
+  safe_unlink(db_path)
 
 
 # ===========================================================================

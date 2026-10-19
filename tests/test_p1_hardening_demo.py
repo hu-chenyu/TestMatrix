@@ -30,7 +30,6 @@ TestMatrix 阶段B-1: P1止血修复的回归测试
   - 全程 loguru，无 print
 """
 
-import contextlib
 import json
 import time
 from collections.abc import Iterator
@@ -50,6 +49,8 @@ from src.core.task_queue import (
 from src.db import models
 from src.db.db_session import DatabaseSession
 from src.web import create_app
+
+from tests.db_cleanup import safe_unlink
 
 # 轮询参数: 模拟执行约0.01s/条，worker 最迟一个BRPOP超时周期取到任务，
 # 预算远超实际耗时防flaky（口径同 test_task_queue_demo.py）
@@ -121,10 +122,9 @@ def db_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator:
   event_bus.reset_channels()
   cache_client.reset_backend()
   task_queue_client.reset_backend()
-  # Windows 下 worker 线程可能仍持有 SQLite 句柄：删除失败不应把用例
-  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_path.unlink(missing_ok=True)
+  # Windows 下 worker 线程可能仍持有 SQLite 句柄：删除失败降级为警告，
+  # 不把用例升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  safe_unlink(db_path)
 
 
 @pytest.fixture
@@ -173,10 +173,9 @@ def worker_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator:
   cache_client.reset_backend()
   DatabaseSession.reset()
   event_bus.reset_channels()
-  # Windows 下 worker 线程可能仍持有 SQLite 句柄：删除失败不应把用例
-  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_path.unlink(missing_ok=True)
+  # Windows 下 worker 线程可能仍持有 SQLite 句柄：删除失败降级为警告，
+  # 不把用例升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  safe_unlink(db_path)
 
 
 def _seed_cases() -> None:

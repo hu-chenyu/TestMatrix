@@ -33,7 +33,6 @@ TestMatrix 大扫除 v5 · Commit C：健壮性修复回归套件
 - 事件通道注册表为模块级全局单例，用 autouse fixture 前后复位。
 """
 
-import contextlib
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -48,6 +47,8 @@ from src.core.event_bus import ExecutionEvent, get_channel
 from src.db.db_session import DatabaseSession, _bracket_ipv6_host
 from src.web import create_app
 from src.web.config import get_config
+
+from tests.db_cleanup import safe_unlink
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 JS_DIR = PROJECT_ROOT / "src" / "web" / "static" / "js"
@@ -101,8 +102,7 @@ def exec_db(
   DatabaseSession.reset()
   # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
   # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_path.unlink(missing_ok=True)
+  safe_unlink(db_path)
 
 
 @pytest.fixture

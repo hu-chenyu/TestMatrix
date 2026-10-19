@@ -32,7 +32,6 @@ TestMatrix 阶段B-3: P2 竞态/串口/通知/状态机修复的回归测试
   - 全程 loguru，无 print
 """
 
-import contextlib
 import threading
 import time
 from datetime import datetime
@@ -61,6 +60,8 @@ from src.db.db_session import DatabaseSession
 from src.web import create_app
 from src.web.routes import executions as executions_mod
 
+from tests.db_cleanup import safe_unlink
+
 
 # ===========================================================================
 # 夹具
@@ -87,8 +88,7 @@ def db_path_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
   event_bus.reset_channels()
   # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
   # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_file.unlink(missing_ok=True)
+  safe_unlink(db_file)
 
 
 # ===========================================================================

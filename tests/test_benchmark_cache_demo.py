@@ -34,7 +34,6 @@ TestMatrix Day33: Redis缓存层量化基准组件测试
   - loguru，无print
 """
 
-import contextlib
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -55,9 +54,15 @@ from src.core.cache import cache_client, cases_list_key, reports_summary_key
 from src.db.db_session import DatabaseSession
 from src.web import create_app
 
+from tests.db_cleanup import safe_unlink
+
 # 小规模造量参数（单元测试用，真实基准为1000用例/100批次）
-SMALL_CASE_COUNT = 50
-SMALL_BATCH_COUNT = 5
+# 20/2 是"够用且最省"的下界: 列表场景按 page_size=20 取一页，20 条即可
+# 覆盖分页上限内的完整读取；reports_summary 只要存在批次即可。造量本身
+# 是逐条 create_case 提交（50 条=50 次 commit），这是 4 个 setup 各 3-5s
+# 的主因，降到 20 条可省约六成。
+SMALL_CASE_COUNT = 20
+SMALL_BATCH_COUNT = 2
 
 
 # ===========================================================================
@@ -104,8 +109,7 @@ def benchmark_app(
   event_bus.reset_channels()
   # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
   # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_path.unlink(missing_ok=True)
+  safe_unlink(db_path)
 
 
 @pytest.fixture
@@ -230,8 +234,8 @@ class TestBenchmarkComponents:
 
       seeder = BenchmarkDataSeeder()
       seeder.seed_cases(count=SMALL_CASE_COUNT)
-      # page_size受MAX_PAGE_SIZE=100约束，50 BM-+1存量共51条
-      # 一页可取全；total为过滤后总数，与分页上限无关
+      # page_size受MAX_PAGE_SIZE=100约束，SMALL_CASE_COUNT 条 BM- 加
+      # 1 条存量仍在一页内；total为过滤后总数，与分页上限无关
       page_data = CaseManager.list_cases_paged(
         status=None, page=1, page_size=100
       )
@@ -239,7 +243,7 @@ class TestBenchmarkComponents:
         item for item in page_data["items"]
         if item["case_id"].startswith("BM-")
       ]
-      assert page_data["total"] >= 50
+      assert page_data["total"] >= SMALL_CASE_COUNT
       assert len(bm_cases) == SMALL_CASE_COUNT
       assert all(
         item["case_id"].startswith("BM-MOD") for item in bm_cases
@@ -261,8 +265,7 @@ class TestBenchmarkComponents:
       DatabaseSession.reset()
       # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
       # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-      with contextlib.suppress(PermissionError):
-        db_path.unlink(missing_ok=True)
+      safe_unlink(db_path)
 
 
 # ===========================================================================
@@ -401,11 +404,14 @@ class TestPenetrationProtection:
     monkeypatch: pytest.MonkeyPatch,
   ) -> None:
     """
-    TTL到期兜底（唯一允许固定sleep的测试）: TM_CACHE_TTL=1
-    时回写的列表缓存1.5秒后自动过期，get_json返回None。
-    1.5s>1s TTL是确定性等待，非时序赌运气，不会flaky。
+    TTL到期兜底（唯一允许固定sleep的测试）: TM_CACHE_TTL=3
+    时回写的列表缓存3.5秒后自动过期，get_json返回None。
+
+    为什么从 TTL=1 放宽到 3: "写入后立即存在" 与 "3.5s 后过期" 之间需要
+    留出请求本身的耗时预算。-n 8 下单次 GET 偶发超过 1s（实测 loadfile
+    调度下已红过一次），TTL=1 会让写入与断言之间自然过期，属假红。
     """
-    monkeypatch.setenv("TM_CACHE_TTL", "1")
+    monkeypatch.setenv("TM_CACHE_TTL", "3")
     runner = CacheBenchmarkRunner(
       benchmark_app.application, "fake://0"
     )
@@ -426,5 +432,5 @@ class TestPenetrationProtection:
     )
     assert cache_client.get_json(key) is not None, "写入后应立即存在"
 
-    time.sleep(1.5)  # 等待超过1秒TTL，验证SETEX兜底过期
+    time.sleep(3.5)  # 等待超过3秒TTL，验证SETEX兜底过期
     assert cache_client.get_json(key) is None, "TTL到期后缓存应自动失效"

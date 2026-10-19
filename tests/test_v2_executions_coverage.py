@@ -35,7 +35,6 @@ TestMatrix 大扫除 v2 · 任务一：executions SSE 与入参边缘路径覆�
 - 通道注册表 autouse 清洁
 """
 
-import contextlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -49,6 +48,8 @@ from src.core.event_bus import ExecutionEvent, get_channel
 from src.db.db_session import DatabaseSession
 from src.web import create_app
 from src.web.routes import executions as executions_mod
+
+from tests.db_cleanup import safe_unlink
 
 # 帧读取上限：终态分支是有限帧，设上限只为兜住"被测代码退化成实时
 # 订阅"时的挂死（7.13 双保护口径）
@@ -99,8 +100,7 @@ def exec_db(
   DatabaseSession.reset()
   # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
   # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_path.unlink(missing_ok=True)
+  safe_unlink(db_path)
 
 
 @pytest.fixture

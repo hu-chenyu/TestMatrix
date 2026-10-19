@@ -36,7 +36,6 @@ TestMatrix Day32: Redis任务队列测试
   - 全程loguru，无print
 """
 
-import contextlib
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -58,6 +57,8 @@ from src.db import models
 from src.db.db_session import DatabaseSession
 from src.web import create_app
 
+from tests.db_cleanup import safe_unlink
+
 # 轮询参数: 模拟执行约0.01s/条，worker重启后最迟一个BRPOP超时
 # 周期（1s）取到任务。
 # 预算改用**时间 deadline** 而非固定次数：固定 20×0.3s=6s 在 -n 4/-n 8
@@ -66,6 +67,10 @@ from src.web import create_app
 # 不增加任何耗时。
 POLL_DEADLINE_SECONDS = 30.0
 POLL_INTERVAL = 0.3
+
+# 批次终态与调度层任务hash的收尾时差预算（秒）。正常 <0.1s，给足余量
+# 只为覆盖 worker 线程在高并发/覆盖率插桩下被抢占的情况。
+TASK_HASH_DEADLINE_SECONDS = 10.0
 
 
 # ===========================================================================
@@ -166,8 +171,7 @@ def queue_env(
   event_bus.reset_channels()
   # Windows 下 worker 线程可能仍持有 SQLite 句柄：删除失败不应把用例
   # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_path.unlink(missing_ok=True)
+  safe_unlink(db_path)
 
 
 def _wait_batch_terminal(
@@ -421,10 +425,17 @@ class TestQueueModeIntegration:
     assert detail_response.status_code == 200
     items = detail_response.get_json()["data"]["items"]
     assert len(items) == 4, "worker执行应落全部4条明细"
-    # 调度层hash也应记录finished终态
-    task_status = task_queue_client.get_status(execution_id)
-    assert task_status is not None
-    assert task_status["status"] == "finished", (
+    # 调度层hash也应记录finished终态。
+    # 为什么必须等: 批次状态落库(DB)与worker写任务hash(Redis)不是同一时刻，
+    # 原实现轮询到批次 finished 后立即读 hash，-n 8 下会随机拿到 running。
+    deadline = time.monotonic() + TASK_HASH_DEADLINE_SECONDS
+    task_status: dict = {}
+    while time.monotonic() < deadline:
+      task_status = task_queue_client.get_status(execution_id) or {}
+      if task_status.get("status") == "finished":
+        break
+      time.sleep(0.05)
+    assert task_status.get("status") == "finished", (
       "worker收尾应把任务hash置为finished"
     )
 

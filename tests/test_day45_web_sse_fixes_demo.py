@@ -72,10 +72,12 @@ def exec_client(tmp_path, monkeypatch):
   resp = client.post("/api/executions/trigger", json={"executor": "simulated"})
   execution_id = resp.get_json()["data"]["execution_id"]
   # 轮询至终态（禁固定 sleep 赌时序）。
-  # 只容忍**瞬时**非 JSON 响应：SQLite 写锁下 /status 可能先返回 500 HTML，
-  # 原实现直接 status["data"] 会 TypeError 把 setup 打死。此处仍受 30s
-  # deadline 约束，超时即 fail，不会静默放过真正的接口故障。
-  deadline = time.monotonic() + 30.0
+  # 只容忍**瞬时**故障：SQLite 写锁下 /status 可能先返回 500 HTML。
+  # 4xx（除 429）是确定性结论，必须立刻失败并把状态码亮出来，否则真实
+  # 接口故障会被拖满 deadline 且丢失现场。deadline 取 15s——实测锁等待
+  # 上限约 7s，30s 只会让真失败多等一倍。
+  deadline = time.monotonic() + 15.0
+  last_response = "无响应"
   while time.monotonic() < deadline:
     response = client.get(f"/api/executions/{execution_id}/status")
     payload = response.get_json() if response.status_code == 200 else None
@@ -84,9 +86,19 @@ def exec_client(tmp_path, monkeypatch):
       "failed",
     ):
       break
+    # 只对确定性 4xx 快速失败；200 但批次未终态（running/pending）
+    # 与 5xx/429 一样属于"继续等"的路径。
+    if 400 <= response.status_code < 500 and response.status_code != 429:
+      pytest.fail(
+        f"/status 返回 {response.status_code}（非瞬时故障，快速失败）: "
+        f"{response.get_data(as_text=True)[:200]}"
+      )
+    last_response = f"HTTP {response.status_code}"
     time.sleep(0.05)
   else:
-    pytest.fail(f"批次 {execution_id} 未在 30s 内到达终态")
+    pytest.fail(
+      f"批次 {execution_id} 未在 15s 内到达终态（最后响应: {last_response}）"
+    )
   yield client, execution_id
   DatabaseSession.reset()
 

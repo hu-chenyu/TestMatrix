@@ -34,7 +34,6 @@ TestMatrix Day34: Web后端+Redis阶段缓冲消化补测
   - 全程loguru，无print
 """
 
-import contextlib
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -50,6 +49,8 @@ from src.db.db_session import DatabaseSession
 from src.web import create_app
 from src.web.exceptions import ValidationError
 from src.web.routes import reports as reports_routes
+
+from tests.db_cleanup import safe_unlink
 
 # 轮询预算: 模拟执行约0.01s/条，20次×0.3s远超实际耗时防flaky
 POLL_MAX_ATTEMPTS = 20
@@ -151,8 +152,7 @@ def review_env(
   event_bus.reset_channels()
   # Windows 下 worker 线程可能仍持有 SQLite 句柄：删除失败不应把用例
   # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_path.unlink(missing_ok=True)
+  safe_unlink(db_path)
 
 
 def _wait_batch_terminal(

@@ -32,7 +32,6 @@ TestMatrix Day29: API打磨回归测试
   标准做法，sink以format="{message}"只取消息文本。
 """
 
-import contextlib
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -46,6 +45,8 @@ from src.core import event_bus
 from src.db import models
 from src.db.db_session import DatabaseSession
 from src.web import create_app
+
+from tests.db_cleanup import safe_unlink
 
 # 模块级logger: 与应用内日志同一个loguru全局实例（临时sink挂在此处）
 logger = LogManager.get_logger()
@@ -186,8 +187,7 @@ def polish_client(
   event_bus.reset_channels()
   # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
   # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_file.unlink(missing_ok=True)
+  safe_unlink(db_file)
 
 
 def trigger_full_batch(client: FlaskClient) -> dict:

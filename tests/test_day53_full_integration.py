@@ -18,7 +18,6 @@ Day53 全链路联调测试（Web 触发 → 真实执行 → 入库 → 看板�
 真实子进程用例只用 `assert True` 级别的小文件，绝不触发全量嵌套回归。
 """
 
-import contextlib
 import math
 import os
 import re
@@ -53,6 +52,8 @@ from src.db.db_session import DatabaseSession
 from src.web import create_app
 from src.web.routes import executions as executions_mod
 from src.web.routes.executions import EXECUTOR_MODE_ENV_KEY
+
+from tests.db_cleanup import safe_unlink
 
 # 项目根（本文件位于 tests/ 下，向上一级为项目根）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -162,8 +163,7 @@ def day53_client(
     os.environ[EXECUTOR_MODE_ENV_KEY] = original_executor
   # Windows 下后台执行线程可能仍持有 SQLite 句柄：删除失败不应把用例
   # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
-  with contextlib.suppress(PermissionError):
-    db_path.unlink(missing_ok=True)
+  safe_unlink(db_path)
 
 
 @pytest.fixture
