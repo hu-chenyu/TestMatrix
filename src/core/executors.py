@@ -54,6 +54,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import count
 from pathlib import Path
+from typing import Any
 
 from src.common.env_manager import PROJECT_ROOT, env_manager
 from src.common.logger import LogManager
@@ -1038,7 +1039,7 @@ class BaseExecutor(ABC):
   """
 
   @abstractmethod
-  def run_one(self, case: dict) -> ExecutionResult:
+  def run_one(self, case: dict[str, Any]) -> ExecutionResult:
     """
     执行单条用例（抽象方法）
 
@@ -1067,7 +1068,7 @@ class SimulatedExecutor(BaseExecutor):
       （failed时error_message为固定模拟文案，无数字视为偶数）
   """
 
-  def run_one(self, case: dict) -> ExecutionResult:
+  def run_one(self, case: dict[str, Any]) -> ExecutionResult:
     """
     模拟执行单条用例
 
@@ -1420,7 +1421,7 @@ class PytestRunner(BaseExecutor):
       raise ValueError(f"pytest执行超时阈值必须是正整数秒数，实际值: {resolved!r}")
     return resolved
 
-  def build_command(self, case: dict) -> list:
+  def build_command(self, case: dict[str, Any]) -> list[str]:
     """
     拼装单用例的pytest执行命令（Day49 增加选择器透传）
 
@@ -1733,7 +1734,7 @@ class PytestRunner(BaseExecutor):
         thread.join(OUTPUT_READER_JOIN_TIMEOUT_SECONDS)
     return "".join(capture.stdout), "".join(capture.stderr)
 
-  def run_one(self, case: dict) -> ExecutionResult:
+  def run_one(self, case: dict[str, Any]) -> ExecutionResult:
     """
     同步执行单条用例的pytest子进程（Day49：Popen + 进程树清理 + 退出码细化）
 
