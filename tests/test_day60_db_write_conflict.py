@@ -23,6 +23,7 @@
 
 import sqlite3
 import threading
+import warnings
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -487,6 +488,33 @@ class TestSqlitePragmas:
     with DatabaseSession.get_engine().connect() as conn:
       assert conn.execute(text("PRAGMA journal_mode")).scalar().lower() == "wal"
 
+  def test_journal_mode_risky_values_emit_warning(self, monkeypatch):
+    """
+    OFF / MEMORY 触发 UserWarning，安全取值（DELETE/WAL）不触发
+
+    为什么这两个值必须告警: 白名单保留它们是为了能建临时测试库，但二者
+    都放弃崩溃安全——OFF 不留回滚日志（进程崩溃库可能损坏），MEMORY 把
+    日志放内存（进程退出即丢）。"能配"不等于"配了没后果"，故命中即告警，
+    且返回值不变（调用方行为不受影响）。
+
+    参数:
+      monkeypatch (pytest.MonkeyPatch): 环境变量覆写工具
+
+    返回:
+      无
+    """
+    for risky in ("OFF", "memory"):
+      monkeypatch.setenv("TM_SQLITE_JOURNAL_MODE", risky)
+      with pytest.warns(UserWarning, match="崩溃即损坏"):
+        assert sqlite_journal_mode() == risky.upper()
+
+    # 安全取值不得产生任何告警（simplefilter("error") 把告警升级为失败）
+    for safe in ("DELETE", "WAL"):
+      monkeypatch.setenv("TM_SQLITE_JOURNAL_MODE", safe)
+      with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert sqlite_journal_mode() == safe
+
   def test_pragma_failure_does_not_break_connection(self):
     """
     PRAGMA 下发失败时只记 warning，不让连接建立失败
@@ -803,6 +831,142 @@ class TestUniqueKeyMigration:
     """
     with pytest.raises(migration.MigrationError):
       migration.build_execution_unique_key_ddl("postgresql")
+
+  def test_mysql_duplicate_key_name_1061_treated_as_existing(
+    self, monkeypatch
+  ):
+    """
+    MySQL 侧建键撞 1061（键名已存在）收敛为"键已生效"，不抛异常
+
+    为什么必须收敛: MySQL 的 ALTER TABLE ADD UNIQUE KEY 没有 IF NOT EXISTS，
+    多进程同时 init_db 时后到的进程必然撞 1061；不收敛就等于"并发启动的
+    第二个进程起不来"。SQLite 侧靠 IF NOT EXISTS 天然幂等，无此问题。
+
+    同时反向守住"不吞其他错误"：1062（重复数据）必须原样上抛。
+
+    参数:
+      monkeypatch (pytest.MonkeyPatch): 补丁工具
+
+    返回:
+      无
+    """
+
+    class _FakeInspector:
+      """替身 Inspector：表存在、无唯一键"""
+
+      def get_table_names(self):
+        """返回仅含明细表的表清单"""
+        return ["test_executions"]
+
+    dedupe_calls: list[int] = []
+
+    def _fake_dedupe(engine):
+      """替身去重：并发场景下先到者已清过，故返回 0"""
+      dedupe_calls.append(1)
+      return 0
+
+    def _make_engine(code: int, message: str):
+      """构造一个 begin() 即抛指定 MySQL 错误码的替身引擎"""
+
+      class _Engine:
+        """替身引擎：DDL 阶段抛 DBAPI 异常"""
+
+        def begin(self):
+          """恒抛包装后的 MySQL 驱动异常"""
+          raise OperationalError(
+            "ALTER TABLE test_executions ADD UNIQUE KEY ...",
+            {},
+            Exception(code, message),
+          )
+
+      return _Engine()
+
+    monkeypatch.setattr(migration, "_current_backend", lambda engine: "mysql")
+    monkeypatch.setattr(migration, "inspect", lambda engine: _FakeInspector())
+    monkeypatch.setattr(migration, "has_execution_unique_key", lambda inspector: False)
+    monkeypatch.setattr(migration, "dedupe_duplicate_executions", _fake_dedupe)
+
+    outcome = migration.ensure_execution_unique_key(
+      _make_engine(1061, "Duplicate key name 'ux_test_executions_exec_case'")
+    )
+
+    assert outcome["created"] is False, "1061 应视为键已存在，不计为本次新建"
+    assert outcome["db_type"] == "mysql"
+    assert outcome["key_name"] == EXECUTION_UNIQUE_KEY_NAME
+    assert outcome["deduped_rows"] == 0
+    assert dedupe_calls == [1], "返回前仍应执行过去重（先清数据后建键的顺序不变）"
+
+    with pytest.raises(OperationalError):
+      migration.ensure_execution_unique_key(
+        _make_engine(1062, "Duplicate entry 'RUN-1-TM-1' for key 'uq_exec_case'")
+      )
+
+    # 错误码提取自身的两条边界：SQLite 的 args[0] 是字符串、驱动未带参数，
+    # 都不能被误当成"1061 已存在"（否则 SQLite 上的真实失败会被静默吞掉）。
+    assert (
+      migration._mysql_error_code(
+        OperationalError("stmt", {}, Exception("UNIQUE constraint failed: t.c"))
+      )
+      is None
+    )
+    assert migration._mysql_error_code(OperationalError("stmt", {}, Exception())) is None
+
+
+@allure.feature("数据库写库冲突")
+@allure.story("迁移备份兼容性")
+@pytest.mark.api
+@pytest.mark.regression
+class TestBackupCompatibility:
+  """WAL 库拒绝单文件备份（fail-fast），非 WAL 库照常备份"""
+
+  def test_wal_database_backup_rejected(self, tmp_path):
+    """
+    WAL 库备份必须抛 RuntimeError 且**不留下任何备份文件**；非 WAL 库正常备份
+
+    之前的实现是"照拷不误"：shutil.copy2 只拷 .db，未 checkpoint 的页在
+    .db-wal 里，备份看起来成功、恢复时才少行。这种静默缺数据比直接报错
+    危险得多，所以改成拒绝——宁可在迁移开始前报错，也不要产出一个
+    事后才发现不完整的备份。
+
+    参数:
+      tmp_path (Path): pytest 临时目录
+
+    返回:
+      无
+    """
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+
+    wal_file = tmp_path / "wal_source.db"
+    conn = sqlite3.connect(str(wal_file))
+    try:
+      assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+      conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+      conn.execute("INSERT INTO t (id) VALUES (1)")
+      conn.commit()
+    finally:
+      conn.close()
+    # 连接全关后 SQLite 会 checkpoint 并删掉 -wal，但库头里记录的仍是 wal，
+    # 正是"看起来正常、实际单文件拷贝不完整"的那种库。
+    assert not (tmp_path / "wal_source.db-wal").exists()
+
+    with pytest.raises(RuntimeError, match="WAL 模式下数据库备份不兼容"):
+      migration._backup_database(wal_file, backup_dir)
+    assert list(backup_dir.iterdir()) == [], "拒绝备份时不得留下半成品文件"
+
+    plain_file = tmp_path / "plain_source.db"
+    conn = sqlite3.connect(str(plain_file))
+    try:
+      assert conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0].lower() == "delete"
+      conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+      conn.execute("INSERT INTO t (id) VALUES (1)")
+      conn.commit()
+    finally:
+      conn.close()
+
+    target = migration._backup_database(plain_file, backup_dir)
+    assert target.exists()
+    assert target.stat().st_size == plain_file.stat().st_size, "备份应为逐字节副本"
 
 
 @allure.feature("数据库写库冲突")

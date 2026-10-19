@@ -39,6 +39,7 @@ from typing import Any
 
 from sqlalchemy import Engine, Table, inspect, text
 from sqlalchemy.engine import Inspector
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from src.common.logger import LogManager
 from src.db.db_session import PROJECT_ROOT, DatabaseSession
@@ -57,6 +58,10 @@ BACKUP_RECENT_WINDOW_SECONDS = 3600
 # 迁移结果 status 取值
 STATUS_MIGRATED = "migrated"
 STATUS_UNSUPPORTED = "unsupported_backend"
+
+# MySQL ER_DUP_KEYNAME：建键时"键名已存在"。多进程同时 init_db 时必现，
+# 语义上等价于"键已建好"，须收敛而非上抛。
+MYSQL_ERR_DUP_KEYNAME = 1061
 
 # 执行明细表与唯一键的定位常量（Day60）
 EXECUTION_TABLE_NAME = "test_executions"
@@ -158,6 +163,28 @@ def _current_backend(engine: Engine) -> str:
   if drivername.startswith("mysql"):
     return "mysql"
   return drivername
+
+
+def _mysql_error_code(exc: SQLAlchemyError) -> int | None:
+  """
+  提取 MySQL 驱动错误码（从 SQLAlchemy 包装异常里取 DBAPI 原始码）
+
+  SQLAlchemy 把驱动的 Error 挂在 `exc.orig` 上，pymysql 的 `args[0]` 才是
+  数字错误码；SQLite 侧同一个 `args[0]` 是字符串，故必须判类型而不是
+  直接比较——否则 sqlite 的 "UNIQUE constraint failed..." 会被误当错误码。
+
+  参数:
+    exc (SQLAlchemyError): 捕获到的 SQLAlchemy 异常
+
+  返回:
+    int | None: 数字错误码；非 MySQL 驱动异常或格式不符时返回 None
+  """
+  orig = getattr(exc, "orig", None)
+  args = getattr(orig, "args", ())
+  if not args:
+    return None
+  code = args[0]
+  return code if isinstance(code, int) else None
 
 
 def _resolve_db_file(engine: Engine) -> Path | None:
@@ -286,9 +313,36 @@ def _find_latest_backup(backup_dir: Path) -> Path | None:
   return None
 
 
+def _sqlite_file_journal_mode(db_file: Path) -> str:
+  """
+  读取 SQLite 库文件自身记录的 journal 模式（裸连接，不经过 ORM）
+
+  参数:
+    db_file (Path): 数据库文件路径（须已存在）
+
+  返回:
+    str: 小写模式名（delete / wal / truncate / ...）；查询无结果时返回空串
+  """
+  conn = sqlite3.connect(str(db_file))
+  try:
+    row = conn.execute("PRAGMA journal_mode").fetchone()
+  finally:
+    conn.close()
+  return str(row[0]).lower() if row else ""
+
+
 def _backup_database(db_file: Path, directory: Path) -> Path:
   """
   备份 SQLite 数据库文件到备份目录
+
+  **WAL 库拒绝备份（Day60-P2，fail-fast）**:
+  本函数用 shutil.copy2 只拷 .db 单个文件，而 WAL 模式下未 checkpoint 的
+  数据在 .db-wal 里——拷出来的备份是"缺数据的旧快照"，且事后从它恢复
+  会静默丢行。这类"备份看起来成功、恢复才发现少了数据"的失败比直接报错
+  危险得多，所以检测到 wal 就拒绝，不在这里顺手做 checkpoint（checkpoint
+  会改动迁移备份主路径的时序语义，须独立排期）。
+
+  本函数只服务 SQLite 迁移路径，MySQL 不走这里，故无需按后端分支。
 
   参数:
     db_file (Path): 待备份的数据库文件
@@ -298,8 +352,16 @@ def _backup_database(db_file: Path, directory: Path) -> Path:
     Path: 备份文件路径
 
   异常:
+    RuntimeError: 库处于 WAL 模式，单文件拷贝不兼容
     OSError: 复制失败（磁盘满/文件被占用）时抛出
   """
+  # 文件不存在时交给 copy2 按原样抛 OSError：此处若先连库，sqlite3 会
+  # 顺手创建一个空库文件，把"文件缺失"变成"备份了一个空库"。
+  if db_file.exists() and _sqlite_file_journal_mode(db_file) == "wal":
+    raise RuntimeError(
+      "WAL 模式下数据库备份不兼容（未 checkpoint 的 .db-wal 数据会丢失），"
+      "请先关闭 WAL 或改用 backup API"
+    )
   stamp = datetime.now().strftime(BACKUP_TIMESTAMP_FORMAT)
   target = directory / f"{BACKUP_FILE_PREFIX}{stamp}{BACKUP_SUFFIX}"
   # copy2 保留 mtime/权限，便于事后判断备份来源
@@ -735,8 +797,24 @@ def ensure_execution_unique_key(engine: Engine) -> dict[str, Any]:
     return outcome
 
   outcome["deduped_rows"] = dedupe_duplicate_executions(engine)
-  with engine.begin() as conn:
-    conn.execute(text(build_execution_unique_key_ddl(backend)))
+  try:
+    with engine.begin() as conn:
+      conn.execute(text(build_execution_unique_key_ddl(backend)))
+  except (IntegrityError, OperationalError) as exc:
+    # MySQL 的 ALTER TABLE ADD UNIQUE KEY 没有 IF NOT EXISTS：
+    # 多进程同时 init_db 时，第二个进程的 ALTER 会撞 "Duplicate key name"
+    # （错误码 1061）而抛错，让它整个 init_db 失败。这里把 1061 收敛成
+    # "键已存在"——与上面 has_execution_unique_key 命中时的语义一致。
+    # 其他错误码/其他后端一律上抛，不吞。
+    if backend == "mysql" and _mysql_error_code(exc) == MYSQL_ERR_DUP_KEYNAME:
+      # deduped_rows 保留真实删除数而不清零：并发场景下此时通常已是 0
+      # （先到的进程已经清过），但清零会把"确实删过行"这个事实抹掉。
+      logger.info(
+        f"执行明细唯一键已由其它进程建好（MySQL 1061），本次跳过 | "
+        f"{EXECUTION_UNIQUE_KEY_NAME} | 本次清理重复行: {outcome['deduped_rows']}"
+      )
+      return outcome
+    raise
   outcome["created"] = True
   logger.info(
     f"执行明细唯一键已补建 | 后端: {backend} | 键: {EXECUTION_UNIQUE_KEY_NAME} | "

@@ -28,6 +28,7 @@
 
 import sqlite3
 import threading
+import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -55,6 +56,10 @@ SQLITE_BUSY_TIMEOUT_MS_DEFAULT = 5000
 # SQLite journal 模式允许的取值（白名单：该值会被拼进 PRAGMA 语句，
 # 不做白名单就等于把环境变量当 SQL 片段执行）。
 SQLITE_VALID_JOURNAL_MODES = ("DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF")
+
+# 合法但会放弃崩溃安全的取值（Day60-P2）：白名单保留它们以支持临时测试库，
+# 但命中时必须显式告警——"能配"不等于"配了没后果"。
+SQLITE_RISKY_JOURNAL_MODES = ("OFF", "MEMORY")
 
 
 def sqlite_busy_timeout_ms() -> int:
@@ -89,7 +94,14 @@ def sqlite_journal_mode() -> str | None:
   连跑 3 次全部失败（恢复后行数与迁移前不一致）。要启用 WAL 必须先把
   备份改为"先 PRAGMA wal_checkpoint(TRUNCATE) 再拷 .db / 或改用
   sqlite3 的 backup API"，那是独立一天的工作量。本开关保留只为后续
-  改造留有验证入口，不作为默认值。
+  改造留有验证入口，不作为默认值。备份侧自 Day60-P2 起改为**检测到 wal
+  即 fail-fast 抛 RuntimeError**，不再静默产出缺数据的备份。
+
+  **OFF / MEMORY 属于"危险但合法"的取值**（Day60-P2）：两者都放弃
+  崩溃安全——OFF 不留回滚日志（进程崩溃时库可能损坏），MEMORY 把日志
+  放内存（进程退出即丢）。白名单里保留它们是为了能建临时测试库，但
+  用户真设上去时必须被明确告知，故解析命中这两个值时发 UserWarning。
+  警告不改变返回值，调用方的行为不变。
 
   参数:
     无
@@ -110,6 +122,16 @@ def sqlite_journal_mode() -> str | None:
       f"合法取值: {list(SQLITE_VALID_JOURNAL_MODES)}"
     )
     return None
+  if normalized in SQLITE_RISKY_JOURNAL_MODES:
+    # stacklevel=2 指向真正配置它的人（.env 加载后的首个调用方），
+    # 而不是指到本函数内部的 warn 行——否则告警在日志里溯不到来源。
+    warnings.warn(
+      f"TM_SQLITE_JOURNAL_MODE={normalized} 意味着无持久化/崩溃即损坏"
+      f"（OFF 无回滚日志、MEMORY 日志只在内存），仅可用于临时测试库；"
+      f"需要崩溃安全请用 DELETE 或 TRUNCATE，需要读写并发请用 WAL",
+      UserWarning,
+      stacklevel=2,
+    )
   return normalized
 
 
