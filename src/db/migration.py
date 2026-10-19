@@ -354,6 +354,8 @@ def _backup_database(db_file: Path, directory: Path) -> Path:
   异常:
     RuntimeError: 库处于 WAL 模式，单文件拷贝不兼容
     OSError: 复制失败（磁盘满/文件被占用）时抛出
+    sqlite3.Error: 库文件损坏或非 SQLite 文件时，读取 journal_mode 失败抛出
+      （正常迁移流程中 _read_snapshot 会先失败故不可达，仅直调本函数时受影响）
   """
   # 文件不存在时交给 copy2 按原样抛 OSError：此处若先连库，sqlite3 会
   # 顺手创建一个空库文件，把"文件缺失"变成"备份了一个空库"。
@@ -848,6 +850,8 @@ def migrate_add_source_ref() -> dict[str, Any]:
       （本次备份 / 最近历史备份 / 无可用备份需人工恢复），
       不保证一定已回滚——无任何可用备份时库已被重建为空
     SQLAlchemyError: 数据库不可达等底层异常（同样先走恢复流程）
+    RuntimeError: SQLite 库处于 WAL 模式时 _backup_database 拒绝备份（Day60-P2），
+      在破坏性 try 之外逃逸、不走恢复流程，调用方需知晓——此时未做任何改动
   """
   started_at = perf_counter()
   engine = DatabaseSession.get_engine()
