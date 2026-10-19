@@ -333,6 +333,12 @@ def _isolate_default_database_session(tmp_path_factory):
   session_db_dir = tmp_path_factory.mktemp("tm_session_db")
   os.environ["TM_DB_TYPE"] = "sqlite"
   os.environ["TM_DB_SQLITE_PATH"] = str(session_db_dir / "session_default.db")
+  # SQLite 写锁等待上限抬到 30s（Day60）：-n N 并发下多个 worker 进程
+  # 各持一条连接写同一个文件库，pysqlite 内建默认只有 5s，读侧等锁超时
+  # 会直接抛 "database is locked"（表现为接口 500 / 偶发用例红）。
+  # 与 src/db/db_session.py 的默认值 5000ms 不同，这里显式抬升只作用于
+  # 测试进程；生产默认值不受影响。
+  os.environ["TM_SQLITE_BUSY_TIMEOUT_MS"] = "30000"
   # 关键：先清掉可能已按 .env 真实路径建好的引擎（conftest 导入期或
   # 早期用例可能已触发），否则第一次访问会命中旧引擎写进真实库
   DatabaseSession.reset()

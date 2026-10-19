@@ -406,18 +406,27 @@ class TestPriorityDistribution:
     assert ReportRepository.get_priority_distribution() == []
 
   def test_p0_to_p3_grouping_and_order(self, temp_db: Path) -> None:
-    """P0-P3 各结果计数正确，返回顺序固定 P0→P1→P2→P3。"""
+    """P0-P3 各结果计数正确，返回顺序固定 P0→P1→P2→P3。
+
+    造数口径调整（Day60，断言语义不变）: P1 需要"2 条明细、1 passed
+    1 failed"来验证通过率 0.5，原先用**同一 case_id 的两行**造。Day60
+    给 test_executions 加了 (execution_id, case_id) 唯一约束后，同批次
+    同用例两行在数据模型上已不合法（一条用例在一次执行里只有一个结果），
+    故改为两条不同 P1 用例各一行。total/passed/failed/pass_rate 的期望值
+    逐字未变。
+    """
     self._seed(
       cases=[
         ("TM-P0-0001", "P0"),
         ("TM-P1-0001", "P1"),
+        ("TM-P1-0002", "P1"),
         ("TM-P2-0001", "P2"),
         ("TM-P3-0001", "P3"),
       ],
       executions=[
         ("TM-P0-0001", "passed"),
         ("TM-P1-0001", "passed"),
-        ("TM-P1-0001", "failed"),
+        ("TM-P1-0002", "failed"),
         ("TM-P2-0001", "error"),
         ("TM-P3-0001", "skipped"),
       ],

@@ -38,10 +38,11 @@ from time import perf_counter
 from typing import Any
 
 from sqlalchemy import Engine, Table, inspect, text
+from sqlalchemy.engine import Inspector
 
 from src.common.logger import LogManager
 from src.db.db_session import PROJECT_ROOT, DatabaseSession
-from src.db.models import Base
+from src.db.models import EXECUTION_UNIQUE_KEY_NAME, Base
 
 logger = LogManager.get_logger()
 
@@ -56,6 +57,10 @@ BACKUP_RECENT_WINDOW_SECONDS = 3600
 # 迁移结果 status 取值
 STATUS_MIGRATED = "migrated"
 STATUS_UNSUPPORTED = "unsupported_backend"
+
+# 执行明细表与唯一键的定位常量（Day60）
+EXECUTION_TABLE_NAME = "test_executions"
+EXECUTION_UNIQUE_KEY_COLUMNS = ("execution_id", "case_id")
 
 
 class MigrationError(RuntimeError):
@@ -542,6 +547,204 @@ def _recover_after_failure(
   )
 
 
+def build_execution_unique_key_ddl(backend: str) -> str:
+  """
+  构造 (execution_id, case_id) 唯一键的建键语句（双方言）
+
+  **为什么不是 ALTER TABLE ADD CONSTRAINT**：SQLite 不支持给已存在的表
+  追加约束（只能重建表），而重建表是 migrate_add_source_ref 那条重路径。
+  唯一索引与唯一约束在"拒绝重复行"这件事上语义等价，故存量库走索引，
+  新建库由模型里的 UniqueConstraint 直接建出——两条路径的判据统一由
+  `has_execution_unique_key` 回答，不靠"哪种 DDL 建出来的"来区分。
+
+  参数:
+    backend (str): 后端类型，仅接受 "sqlite" / "mysql"
+
+  返回:
+    str: 可直接执行的 DDL 语句
+
+  异常:
+    MigrationError: backend 不是 sqlite/mysql 时抛出（调用方须先判后端）
+  """
+  if backend == "sqlite":
+    # SQLite 支持 IF NOT EXISTS：重复执行直接命中已存在分支，天然可重入
+    return (
+      f"CREATE UNIQUE INDEX IF NOT EXISTS {EXECUTION_UNIQUE_KEY_NAME} "
+      f"ON {EXECUTION_TABLE_NAME} "
+      f"({', '.join(EXECUTION_UNIQUE_KEY_COLUMNS)})"
+    )
+  if backend == "mysql":
+    # MySQL 的 ADD UNIQUE KEY 没有 IF NOT EXISTS，重入由
+    # ensure_execution_unique_key 的前置存在性检查保证
+    return (
+      f"ALTER TABLE {EXECUTION_TABLE_NAME} ADD UNIQUE KEY "
+      f"{EXECUTION_UNIQUE_KEY_NAME} "
+      f"({', '.join(EXECUTION_UNIQUE_KEY_COLUMNS)})"
+    )
+  raise MigrationError(
+    f"不支持的数据库后端: {backend}，唯一键补建仅支持 sqlite / mysql"
+  )
+
+
+def has_execution_unique_key(inspector: Inspector) -> bool:
+  """
+  判定 (execution_id, case_id) 唯一性是否已经生效
+
+  两个来源都要查，缺一不可:
+    - 唯一约束：新建库走 models.py 的 UniqueConstraint 建出的那条；
+    - 唯一索引：存量库由 build_execution_unique_key_ddl 补建的那条。
+  只查其中一个会让另一条路径反复"以为没建、再建一次"（SQLite 报索引
+  已存在，MySQL 报 Duplicate key name 1061）——这正是重入判据要统一的
+  原因。
+
+  参数:
+    inspector (inspect): 已完成绑定引擎的 Inspector
+
+  返回:
+    bool: 已存在唯一约束或唯一索引返回 True；表不存在也返回 False
+
+  异常:
+    无（表/索引读不到按"不存在"处理，由调用方的建表守卫兜住）
+  """
+  table_names = set(inspector.get_table_names())
+  if EXECUTION_TABLE_NAME not in table_names:
+    return False
+  for constraint in inspector.get_unique_constraints(EXECUTION_TABLE_NAME):
+    if tuple(constraint["column_names"]) == EXECUTION_UNIQUE_KEY_COLUMNS:
+      return True
+  for index in inspector.get_indexes(EXECUTION_TABLE_NAME):
+    if index.get("unique") and tuple(index["column_names"]) == EXECUTION_UNIQUE_KEY_COLUMNS:
+      return True
+  return False
+
+
+def dedupe_duplicate_executions(engine: Engine) -> int:
+  """
+  清理 test_executions 中的 (execution_id, case_id) 重复行
+
+  保留判据是 **MAX(id)**：同键多行来自并发双写，先落库的那行是"先到"
+  的真实执行记录，后落库的是竞态产物；但 ROWID 自增保证后写者 id 更大，
+  而真正的业务事实是"这条用例这个结果"。两者在绝大多数场景下等价
+  （重复行是同一次执行的两个副本，内容相同），取 MAX(id) 与表述约定的
+  "保留最新"一致，且判据单一、可复现，不做"按内容择优"这种引入主观
+  判断的处理。
+
+  逐组删除而不是一条大 DELETE，是为了**如实统计清理行数**并避免
+  `DELETE ... WHERE id NOT IN (SELECT ... FROM 同表)` 在 MySQL 上的
+  "不能在子查询里引用目标表"限制。
+
+  参数:
+    engine (Engine): SQLAlchemy 引擎
+
+  返回:
+    int: 实际删除的重复行数（无重复或表不存在时为 0）
+
+  异常:
+    SQLAlchemyError: 查询或删除失败时抛出（由调用方决定是否终止建键）
+  """
+  if EXECUTION_TABLE_NAME not in set(inspect(engine).get_table_names()):
+    # 空库/未建表的场景是正常态（全新 clone 首次 init_db、空库跑迁移），
+    # 不查表直接 DELETE 会抛 no such table，把"无数据可去重"变成一次失败。
+    logger.debug(f"表 {EXECUTION_TABLE_NAME} 不存在，无需去重")
+    return 0
+  deleted = 0
+  with engine.begin() as conn:
+    duplicate_groups = (
+      conn.execute(
+        text(
+          f"SELECT execution_id, case_id, MAX(id) AS keep_id, COUNT(*) AS row_count "
+          f"FROM {EXECUTION_TABLE_NAME} "
+          f"GROUP BY execution_id, case_id HAVING COUNT(*) > 1"
+        )
+      )
+      .mappings()
+      .all()
+    )
+    for group in duplicate_groups:
+      result = conn.execute(
+        text(
+          f"DELETE FROM {EXECUTION_TABLE_NAME} "
+          f"WHERE execution_id = :execution_id AND case_id = :case_id "
+          f"AND id <> :keep_id"
+        ),
+        {
+          "execution_id": group["execution_id"],
+          "case_id": group["case_id"],
+          "keep_id": group["keep_id"],
+        },
+      )
+      removed = result.rowcount or 0
+      deleted += removed
+      logger.warning(
+        f"清理执行明细重复行 | 批次: {group['execution_id']} | "
+        f"用例: {group['case_id']} | 原有: {group['row_count']} 行 | "
+        f"保留 id: {group['keep_id']} | 删除: {removed} 行"
+      )
+  return deleted
+
+
+def ensure_execution_unique_key(engine: Engine) -> dict[str, Any]:
+  """
+  确保 (execution_id, case_id) 唯一性已生效（可重入迁移）
+
+  执行顺序刻意是"先清数据、后建键"：存量库若已有重复行，直接建唯一索引
+  会失败（SQLite: UNIQUE constraint failed；MySQL: Duplicate entry），
+  而失败时库已经被改了一半。反过来先删重复行再建键，任何一步失败都停在
+  "数据已去重、约束未生效"这个安全态上——此时应用层仍能靠
+  `record_execution` 的写前查重兜住，重跑一次本函数即可补齐。
+
+  可重入性来自两处: 已生效时直接返回（不看数据）、SQLite 的 DDL 自带
+  IF NOT EXISTS。连续执行两次，第二次必然 created=False、deduped=0。
+
+  参数:
+    engine (Engine): SQLAlchemy 引擎
+
+  返回:
+    dict[str, Any]: {"key_name", "db_type", "created", "deduped_rows"}
+      created=True 表示本次真的建了键（首次迁移）；False 表示已生效或跳过
+
+  异常:
+    MigrationError: 后端不在 sqlite/mysql 之外（DDL 构造失败）
+    SQLAlchemyError: 去重或建键失败时抛出
+  """
+  backend = _current_backend(engine)
+  outcome: dict[str, Any] = {
+    "key_name": EXECUTION_UNIQUE_KEY_NAME,
+    "db_type": backend,
+    "created": False,
+    "deduped_rows": 0,
+  }
+  if backend not in ("sqlite", "mysql"):
+    logger.warning(
+      f"当前为 {backend} 模式，执行明细唯一键暂不补建"
+      f"（仅 sqlite / mysql 有对应 DDL）"
+    )
+    return outcome
+
+  inspector = inspect(engine)
+  if EXECUTION_TABLE_NAME not in set(inspector.get_table_names()):
+    logger.warning(
+      f"表 {EXECUTION_TABLE_NAME} 不存在，跳过唯一键补建"
+      f"（建表由 init_db 的 create_all 负责）"
+    )
+    return outcome
+  if has_execution_unique_key(inspector):
+    logger.debug(
+      f"执行明细唯一键已生效，跳过补建 | {EXECUTION_UNIQUE_KEY_NAME}"
+    )
+    return outcome
+
+  outcome["deduped_rows"] = dedupe_duplicate_executions(engine)
+  with engine.begin() as conn:
+    conn.execute(text(build_execution_unique_key_ddl(backend)))
+  outcome["created"] = True
+  logger.info(
+    f"执行明细唯一键已补建 | 后端: {backend} | 键: {EXECUTION_UNIQUE_KEY_NAME} | "
+    f"清理重复行: {outcome['deduped_rows']}"
+  )
+  return outcome
+
+
 def migrate_add_source_ref() -> dict[str, Any]:
   """
   执行 source_ref 字段迁移（重建库方案）
@@ -560,7 +763,7 @@ def migrate_add_source_ref() -> dict[str, Any]:
   返回:
     dict[str, Any]: 迁移结果，含 status / db_type / backup_path /
             backup_created / tables / rows_before / rows_after /
-            added_columns / elapsed_seconds
+            added_columns / deduped_rows / elapsed_seconds
 
   异常:
     MigrationError: 迁移或完整性校验失败。异常消息**如实描述**恢复结果
@@ -588,10 +791,18 @@ def migrate_add_source_ref() -> dict[str, Any]:
       "rows_before": 0,
       "rows_after": 0,
       "added_columns": {},
+      "deduped_rows": 0,
       "elapsed_seconds": round(perf_counter() - started_at, 4),
     }
 
   db_file = _resolve_db_file(engine)
+  # 建唯一键之前必须先清存量重复行（Day60）：重建库后写回走的是裸 INSERT，
+  # 而新表带 (execution_id, case_id) 唯一约束——快照里若留着重复行，
+  # 写回阶段会撞约束并触发回滚，把"迁移加列"变成"整库迁移失败"。
+  # 放在读快照之前，before/after 的口径也就天然一致（都比的是去重后的行数）。
+  deduped_rows = dedupe_duplicate_executions(engine)
+  if deduped_rows:
+    logger.warning(f"source_ref 迁移前清理执行明细重复行 | 删除: {deduped_rows} 行")
   snapshots = _read_snapshot(engine)
   before = {snapshot.name: len(snapshot.rows) for snapshot in snapshots}
   total_rows = sum(before.values())
@@ -647,5 +858,6 @@ def migrate_add_source_ref() -> dict[str, Any]:
     "rows_before": total_rows,
     "rows_after": sum(after.values()),
     "added_columns": added_columns,
+    "deduped_rows": deduped_rows,
     "elapsed_seconds": elapsed,
   }

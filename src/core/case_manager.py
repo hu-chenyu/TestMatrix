@@ -1412,6 +1412,46 @@ class CaseManager:
     return normalized
 
   @classmethod
+  def _execution_detail_exists(cls, execution_id: str, case_id: str) -> bool:
+    """
+    回查某批次某用例的明细行是否已存在（内部方法，Day60）
+
+    用途: `record_execution` 捕获 IntegrityError 后判断"这是不是重复键
+    违例"。唯一约束无法告诉我们是哪条约束被撞的（异常文案各方言不同），
+    但业务上要回答的问题很具体——"这一对键现在库里有行吗"。
+
+    与 `_is_unique_case_id_violation` 的区别: 那里匹配异常消息里的列名，
+    因为 test_cases 只有一条唯一约束、且违例必须翻译成 409 给客户端；
+    这里则用**回查事实**代替文案匹配，因为明细表的完整性违例不只有重复
+    一种，误吸收会把真正的数据缺陷变成"跳过写入"。
+
+    参数:
+      execution_id (str): 已归一化的执行批次号
+      case_id (str): 已归一化的业务用例编号
+
+    返回:
+      bool: 库中已有该 (execution_id, case_id) 明细返回 True；
+        查询自身失败返回 False（让调用方按真实错误上抛，不吸收）
+
+    异常:
+      无（查询异常内部消化为 False）
+    """
+    try:
+      with DatabaseSession.session_scope() as session:
+        return (
+          session.query(TestExecution.id)
+          .filter_by(execution_id=execution_id, case_id=case_id)
+          .first()
+          is not None
+        )
+    except SQLAlchemyError as exc:
+      logger.error(
+        f"重复键回查失败，按非重复处理 | 批次: {execution_id} | "
+        f"用例: {case_id} | {exc}"
+      )
+      return False
+
+  @classmethod
   def record_execution(
     cls,
     execution_id: str,
@@ -1460,6 +1500,9 @@ class CaseManager:
         无从区分"写入了"与"被跳过"，批次进度就会按执行次数
         而不是按明细条数累加——重跑过的批次进度虚高。Day52 的
         kill -9 恢复门禁正是这条路径，故此返回值是该门禁的前置条件。
+
+        重复的判据有两条路径，返回值语义一致: 写前查重命中（串行/重投）
+        与写时撞唯一约束（并发双写，Day60）。调用方无需区分。
 
     异常:
       CaseManagerError: result非法 / 批次号或用例编号为空 /
@@ -1559,6 +1602,34 @@ class CaseManager:
         if resolved_executor is not None:
           row_kwargs["executor"] = resolved_executor
         session.add(TestExecution(**row_kwargs))
+    except IntegrityError as exc:
+      # 第三道防线（Day60）：库表上 (execution_id, case_id) 的唯一约束拦下了
+      # 并发双写。上面的"先 SELECT 再 INSERT"是 check-then-act，两个写入方
+      # 同时通过查重后，后提交的一方在这里撞约束——这正是唯一约束存在的
+      # 理由，不是异常场景。
+      #
+      # 判据必须回查库表而不是匹配异常文案：IntegrityError 覆盖全部完整性
+      # 违例（NOT NULL / CHECK / 将来的新约束），文案又各方言不同。回查
+      # "这一对键现在到底有没有行"才能把"重复被吸收"与"其它完整性错误"
+      # 分开——后者必须原样上抛，否则它会伪装成"已存在，跳过"被静默吞掉。
+      if cls._execution_detail_exists(execution_id, case_id):
+        logger.warning(
+          f"并发写库撞唯一约束，按重复写入吸收 | 批次: {execution_id} | "
+          f"用例: {case_id} | 结果: {result}"
+        )
+        return False
+      logger.error(
+        f"执行结果入库完整性异常（非重复键）| 批次: {execution_id} | "
+        f"用例: {case_id} | {exc}"
+      )
+      raise CaseManagerError(
+        f"执行结果入库数据库异常: {exc}",
+        context={
+          "operation": "record_execution",
+          "execution_id": execution_id,
+          "case_id": case_id,
+        },
+      ) from exc
     except SQLAlchemyError as exc:
       logger.error(
         f"执行结果入库数据库异常 | 批次: {execution_id} | "

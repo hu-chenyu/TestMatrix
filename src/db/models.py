@@ -14,11 +14,26 @@ SQLAlchemy数据模型模块
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Index, Integer, String, Text, func
+from sqlalchemy import (
+  DateTime,
+  Float,
+  Index,
+  Integer,
+  String,
+  Text,
+  UniqueConstraint,
+  func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # TestCase.__repr__ 中 source_ref 的展示截断长度（日志可读性用，非入库约束）
 SOURCE_REF_REPR_MAX_CHARS = 40
+
+
+# (execution_id, case_id) 唯一键名。存量库无法 ALTER 加约束，迁移侧
+# 用同名唯一索引补建（见 migration.ensure_execution_unique_key），
+# 两处必须同名，否则"约束是否已存在"的判据会各说各话。
+EXECUTION_UNIQUE_KEY_NAME = "uq_test_executions_exec_case"
 
 
 class Base(DeclarativeBase):
@@ -139,6 +154,10 @@ class TestExecution(Base):
     environment  执行环境: dev / test / prod
     executor   执行人（人工姓名或CI标识，如 jenkins）
     created_at  记录落库时间
+
+  唯一性: (execution_id, case_id) 唯一（Day60）。重复写入由
+  `record_execution` 捕获 IntegrityError 后返回 False 吸收，
+  调用方无需自己判重。
   """
 
   __tablename__ = "test_executions"
@@ -161,8 +180,20 @@ class TestExecution(Base):
   )
 
   # 复合索引: 按批次号聚合统计、按结果筛选失败记录为高频查询
+  #
+  # 唯一约束 (execution_id, case_id)（Day60）:
+  # 明细表的业务粒度是"某批次里的某条用例"，同一对键出现两行就意味着
+  # `finish_execution` 按 execution_id 聚合时计数翻倍、通过率被污染，且
+  # 这种污染在库表里不可逆。修复前唯一屏障是 `record_execution` 里的
+  # "先 SELECT 再 INSERT"——两步之间有 TOCTOU 窗口，同一批次被两个
+  # 进程/worker 同时执行时两个写入方都能通过 SELECT 检查，MySQL 侧更
+  # 是连 IntegrityError 都不会抛。约束必须落在库表上，应用层判断只能
+  # 是"少一次异常"的优化，不能是唯一防线。
   __table_args__ = (
     Index("idx_execution_result", "execution_id", "result"),
+    UniqueConstraint(
+      "execution_id", "case_id", name=EXECUTION_UNIQUE_KEY_NAME
+    ),
     {"comment": "测试执行明细记录表"},
   )
 

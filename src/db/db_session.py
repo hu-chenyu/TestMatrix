@@ -26,13 +26,14 @@
     session.close()
 """
 
+import sqlite3
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -44,6 +45,109 @@ logger = LogManager.get_logger()
 
 # 项目根目录: 本模块位于 src/db/ 下，向上两级即为项目根
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# SQLite 写锁等待上限（毫秒）。默认值刻意等于 pysqlite 的内建默认 5s——
+# 本项是为"高并发下读请求等锁 5s 超时抛 database is locked"提供的**可调项**，
+# 不是把默认行为抬高一档：生产环境若未显式配置，等待上限与修复前完全一致。
+# 测试/开发环境通过 TM_SQLITE_BUSY_TIMEOUT_MS=30000 抬到 30s。
+SQLITE_BUSY_TIMEOUT_MS_DEFAULT = 5000
+
+# SQLite journal 模式允许的取值（白名单：该值会被拼进 PRAGMA 语句，
+# 不做白名单就等于把环境变量当 SQL 片段执行）。
+SQLITE_VALID_JOURNAL_MODES = ("DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF")
+
+
+def sqlite_busy_timeout_ms() -> int:
+  """
+  读取 SQLite busy_timeout 配置（毫秒）
+
+  参数:
+    无
+
+  返回:
+    int: 等待上限毫秒数；未配置或配置非法时取 SQLITE_BUSY_TIMEOUT_MS_DEFAULT
+
+  异常:
+    无
+  """
+  return env_manager.get_int(
+    "TM_SQLITE_BUSY_TIMEOUT_MS", SQLITE_BUSY_TIMEOUT_MS_DEFAULT
+  )
+
+
+def sqlite_journal_mode() -> str | None:
+  """
+  读取 SQLite journal 模式配置（未配置返回 None，表示不干预）
+
+  **默认不设置**：默认 rollback journal 下读写互斥，行为与修复前一致；
+  WAL 目前是可选实验项，由 TM_SQLITE_JOURNAL_MODE=WAL 显式开启。
+
+  **WAL 与现有迁移备份不兼容（Day60 实测，勿默认开启）**：
+  `migration._backup_database` 用 `shutil.copy2` 只拷 .db 单个文件，
+  而 WAL 模式下未 checkpoint 的数据在 .db-wal 里——拷出来的"备份"是个
+  缺数据的旧快照，`test_migration_failure_restores_from_backup` 在 WAL 下
+  连跑 3 次全部失败（恢复后行数与迁移前不一致）。要启用 WAL 必须先把
+  备份改为"先 PRAGMA wal_checkpoint(TRUNCATE) 再拷 .db / 或改用
+  sqlite3 的 backup API"，那是独立一天的工作量。本开关保留只为后续
+  改造留有验证入口，不作为默认值。
+
+  参数:
+    无
+
+  返回:
+    str | None: 已归一为大写的合法模式名；未配置或非法返回 None
+
+  异常:
+    无（非法值记 warning 后按"不干预"处理）
+  """
+  raw = env_manager.get("TM_SQLITE_JOURNAL_MODE")
+  if raw is None:
+    return None
+  normalized = str(raw).strip().upper()
+  if normalized not in SQLITE_VALID_JOURNAL_MODES:
+    logger.warning(
+      f"TM_SQLITE_JOURNAL_MODE 取值非法，按不干预处理 | 实际值: {raw!r} | "
+      f"合法取值: {list(SQLITE_VALID_JOURNAL_MODES)}"
+    )
+    return None
+  return normalized
+
+
+def _apply_sqlite_pragmas(
+  dbapi_connection: sqlite3.Connection, _connection_record: object
+) -> None:
+  """
+  每个新连接建立时下发 SQLite PRAGMA（connect 事件监听器）
+
+  为什么挂在 connect 事件而不是 connect_args：
+    `timeout=` 只能表达 busy_timeout，表达不了 journal_mode；两者放同一处
+    才能保证"新开的每一条连接"拿到同一套设置。SQLAlchemy 连接池复用连接，
+    事件只在**真正新建连接**时触发，正是需要设置的时机。
+
+  参数:
+    dbapi_connection (sqlite3.Connection): DBAPI 层连接
+    _connection_record (object): SQLAlchemy 连接池记录（不使用）
+
+  返回:
+    无
+
+  异常:
+    无（PRAGMA 执行失败仅记 warning：连设置都下不去时，让后续真实报错
+      暴露问题，比在连接建立阶段把整个引擎搞挂更可控）
+  """
+  busy_timeout = sqlite_busy_timeout_ms()
+  journal_mode = sqlite_journal_mode()
+  try:
+    cursor = dbapi_connection.cursor()
+    try:
+      # PRAGMA 不支持参数绑定，值来自上面两个白名单/整型读取函数
+      cursor.execute(f"PRAGMA busy_timeout={int(busy_timeout)}")
+      if journal_mode is not None:
+        cursor.execute(f"PRAGMA journal_mode={journal_mode}")
+    finally:
+      cursor.close()
+  except (sqlite3.Error, SQLAlchemyError) as exc:
+    logger.warning(f"SQLite PRAGMA 下发失败（不影响连接建立）| {exc}")
 
 
 def _bracket_ipv6_host(host: str) -> str:
@@ -214,6 +318,15 @@ class DatabaseSession:
               "check_same_thread": False
             }
           cls._engine = create_engine(url, **engine_kwargs)
+          if url.startswith("sqlite"):
+            # busy_timeout / journal_mode 走 connect 事件而非 connect_args：
+            # 前者能表达 PRAGMA，后者只能表达 sqlite3.connect 的关键字参数，
+            # 且连接池每次真正新建连接时都会触发，语义就是"每条连接都设"。
+            event.listen(cls._engine, "connect", _apply_sqlite_pragmas)
+            logger.debug(
+              f"SQLite PRAGMA 已注册 | busy_timeout={sqlite_busy_timeout_ms()}ms | "
+              f"journal_mode={sqlite_journal_mode() or '默认(不干预)'}"
+            )
           cls._session_factory = sessionmaker(
             bind=cls._engine, expire_on_commit=False, future=True
           )
@@ -306,6 +419,11 @@ class DatabaseSession:
     初始化数据库表结构（开发/部署环境快速建表）
 
     幂等操作: 已存在的表不会重复创建，仅新增缺失的表。
+    create_all 之后**顺带补齐 (execution_id, case_id) 唯一键**
+    （Day60）——create_all 对已存在的表不做任何改动，存量库拿不到
+    模型里新声明的约束；把补建放在这里，才让"升级代码即生效"成立，
+    不依赖用户记得手动跑一次迁移脚本。
+
     生产环境表结构变更请使用迁移工具（如Alembic，第三阶段接入）。
 
     参数:
@@ -318,10 +436,17 @@ class DatabaseSession:
       OperationalError: 数据库不可达时抛出
     """
     # 延迟导入避免db包初始化时的循环依赖
+    from src.db.migration import ensure_execution_unique_key
     from src.db.models import Base
 
     engine = cls.get_engine()
     Base.metadata.create_all(engine)
+    outcome = ensure_execution_unique_key(engine)
+    if outcome["created"]:
+      logger.info(
+        f"执行明细唯一键已补建 | {outcome['key_name']} | "
+        f"清理存量重复行: {outcome['deduped_rows']}"
+      )
     table_names = ", ".join(Base.metadata.tables.keys())
     logger.info(f"数据库表结构初始化完成 | 表: {table_names}")
 
