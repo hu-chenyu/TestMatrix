@@ -34,6 +34,7 @@ TestMatrix Day33: Redis缓存层量化基准组件测试
   - loguru，无print
 """
 
+import contextlib
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -101,7 +102,10 @@ def benchmark_app(
   seeder.cleanup()
   DatabaseSession.reset()
   event_bus.reset_channels()
-  db_path.unlink(missing_ok=True)
+  # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_path.unlink(missing_ok=True)
 
 
 @pytest.fixture
@@ -255,7 +259,10 @@ class TestBenchmarkComponents:
       assert "TM-KEEP-0001" in remaining_ids, "非BM-用例不应被误删"
     finally:
       DatabaseSession.reset()
-      db_path.unlink(missing_ok=True)
+      # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+      # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+      with contextlib.suppress(PermissionError):
+        db_path.unlink(missing_ok=True)
 
 
 # ===========================================================================

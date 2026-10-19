@@ -22,6 +22,7 @@ TestExecuteBatchAsyncNotification）——Web触发执行完成后finished/faile
   通知渠道（TM_EMAIL_ENABLED/TM_WECHAT_ENABLED=false）兜底。
 """
 
+import contextlib
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -65,8 +66,10 @@ def temp_db(tmp_path, monkeypatch):
   DatabaseSession.init_db()
   yield db_file
   DatabaseSession.reset()
-  if db_file.exists():
-    db_file.unlink()
+  # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_file.unlink(missing_ok=True)
 
 
 class FakeRouter:

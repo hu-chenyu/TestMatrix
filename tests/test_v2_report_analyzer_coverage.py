@@ -39,6 +39,7 @@ TestMatrix 大扫除 v2 · 任务一：report_analyzer 边缘路径覆盖补齐
 - 无 time.sleep 固定等待，无 print
 """
 
+import contextlib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -86,7 +87,10 @@ def empty_db(
   DatabaseSession.init_db()
   yield db_path
   DatabaseSession.reset()
-  db_path.unlink(missing_ok=True)
+  # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_path.unlink(missing_ok=True)
 
 
 class _RaisingQuerySession:
@@ -533,7 +537,10 @@ class TestFailedTopAndPriorityOrder:
       )
     finally:
       DatabaseSession.reset()
-      db_path.unlink(missing_ok=True)
+      # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+      # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+      with contextlib.suppress(PermissionError):
+        db_path.unlink(missing_ok=True)
 
 
 # ===========================================================================
@@ -607,4 +614,7 @@ class TestQualityMetricsP95:
       )
     finally:
       DatabaseSession.reset()
-      db_path.unlink(missing_ok=True)
+      # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+      # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+      with contextlib.suppress(PermissionError):
+        db_path.unlink(missing_ok=True)

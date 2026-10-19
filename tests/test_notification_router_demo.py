@@ -388,8 +388,14 @@ class TestNotifyDispatch:
 
     get_patch, bool_patch = patch_env(ROUTER_ENV)
     with get_patch, bool_patch:
+      # wechat 恒失败会走满 4 次尝试（退避 1+2+4s）。本用例只验证"渠道
+      # 隔离"，不需要真实等待，故注入记录型 sleeper（项目既有用例同款）。
+      # 注: base_delay 传 0.0 会被构造器的 >0 校验判非法并回落默认 1.0，
+      # 只会多一条 warning；传极小正数才能在语义上真正"零退避"。
       router = NotificationRouter(
-        notifiers=[email_notifier, wechat_notifier]
+        notifiers=[email_notifier, wechat_notifier],
+        base_delay=0.01,
+        sleeper=lambda _delay: None,
       )
       results = router.notify(make_stat(), "RUN-ISO-001")
 

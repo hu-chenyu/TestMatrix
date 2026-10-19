@@ -588,7 +588,14 @@ class TestQueueAckRobustness:
       "批次未达终态时不得判为 finished，否则调度层与业务侧结论相反"
     )
     assert "未达终态" in stuck_status["error"]
-    assert len(_processing_items(fake_queue)) == 1, (
+    # 断言**本条**在途记录仍在，而不是断言在途 list 总数。
+    # 原因: worker 空闲轮次会调 requeue_stale()，可能把第一段那条
+    # 无心跳的 RUN-DAY51-NO-ACK 重投回队列并移出在途 list——那样总数
+    # 就从 2 变 1。原断言 `len == 1` 实际是在赌"requeue 恰好已经发生"，
+    # 在 -n 4/--cov 的调度抖动下会随机变红（实测 n4+cov 5 连验 1 次、
+    # n8+cov 1 次）。被测契约是"终态未确认的在途任务不得被 ack 掉"，
+    # 与另一条记录的补偿时机无关。
+    assert stuck_id in "".join(_processing_items(fake_queue)), (
       "终态未确认时在途条目必须保留，等待崩溃补偿重投"
     )
 

@@ -56,6 +56,7 @@ TestMatrix Day28: 跨API端到端集成测试
   末位奇偶各半，模拟执行必有通过有失败便于交叉核对）。
 """
 
+import contextlib
 import time
 from collections.abc import Iterator
 from io import BytesIO
@@ -148,7 +149,10 @@ def e2e_client(
   yield create_app("test").test_client()
   DatabaseSession.reset()
   event_bus.reset_channels()
-  db_path.unlink(missing_ok=True)
+  # Windows 下后台执行线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_path.unlink(missing_ok=True)
 
 
 def _wait_batch_terminal(

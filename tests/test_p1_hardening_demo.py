@@ -30,6 +30,7 @@ TestMatrix 阶段B-1: P1止血修复的回归测试
   - 全程 loguru，无 print
 """
 
+import contextlib
 import json
 import time
 from collections.abc import Iterator
@@ -120,7 +121,10 @@ def db_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator:
   event_bus.reset_channels()
   cache_client.reset_backend()
   task_queue_client.reset_backend()
-  db_path.unlink(missing_ok=True)
+  # Windows 下 worker 线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_path.unlink(missing_ok=True)
 
 
 @pytest.fixture
@@ -169,7 +173,10 @@ def worker_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator:
   cache_client.reset_backend()
   DatabaseSession.reset()
   event_bus.reset_channels()
-  db_path.unlink(missing_ok=True)
+  # Windows 下 worker 线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_path.unlink(missing_ok=True)
 
 
 def _seed_cases() -> None:

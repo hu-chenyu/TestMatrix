@@ -38,6 +38,7 @@ TestMatrix Day31: Redis缓存层测试
   - 全程loguru日志，无print
 """
 
+import contextlib
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -143,7 +144,10 @@ def cache_env(
   cache_client.reset_backend()
   DatabaseSession.reset()
   event_bus.reset_channels()
-  db_path.unlink(missing_ok=True)
+  # Windows 下后台执行线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_path.unlink(missing_ok=True)
 
 
 def _wait_batch_terminal(

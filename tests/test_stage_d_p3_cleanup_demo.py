@@ -26,6 +26,7 @@ TestMatrix 阶段D: P3 清理项的回归测试
   - 全程 loguru，无 print
 """
 
+import contextlib
 from collections.abc import Iterator
 from pathlib import Path
 from types import TracebackType
@@ -135,7 +136,10 @@ def seeded_db(
     )
   yield db_path
   DatabaseSession.reset()
-  db_path.unlink(missing_ok=True)
+  # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_path.unlink(missing_ok=True)
 
 
 # ===========================================================================

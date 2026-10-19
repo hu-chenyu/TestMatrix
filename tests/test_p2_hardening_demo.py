@@ -41,6 +41,7 @@ TestMatrix 阶段B-2: P2 安全与健壮性修复的回归测试
   - 全程 loguru，无 print
 """
 
+import contextlib
 import json
 import tempfile
 import threading
@@ -88,7 +89,10 @@ def db_path_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
   yield db_file
   DatabaseSession.reset()
   event_bus.reset_channels()
-  db_file.unlink(missing_ok=True)
+  # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_file.unlink(missing_ok=True)
 
 
 # ===========================================================================

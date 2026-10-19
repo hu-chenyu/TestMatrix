@@ -35,6 +35,7 @@ TestMatrix 大扫除 v2 · 任务一：executions SSE 与入参边缘路径覆�
 - 通道注册表 autouse 清洁
 """
 
+import contextlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -96,7 +97,10 @@ def exec_db(
   DatabaseSession.init_db()
   yield db_path
   DatabaseSession.reset()
-  db_path.unlink(missing_ok=True)
+  # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_path.unlink(missing_ok=True)
 
 
 @pytest.fixture

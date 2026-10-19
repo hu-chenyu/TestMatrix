@@ -10,6 +10,7 @@
 测试基建: 临时SQLite + env双方法mock（对齐既有通知测试模式）。
 """
 
+import contextlib
 from unittest.mock import patch
 
 import allure
@@ -87,8 +88,10 @@ def temp_db(tmp_path, monkeypatch):
   DatabaseSession.init_db()
   yield db_file
   DatabaseSession.reset()
-  if db_file.exists():
-    db_file.unlink()
+  # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_file.unlink(missing_ok=True)
 
 
 @allure.feature("通知模块")

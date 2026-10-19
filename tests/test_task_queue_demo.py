@@ -36,6 +36,7 @@ TestMatrix Day32: Redis任务队列测试
   - 全程loguru，无print
 """
 
+import contextlib
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -58,8 +59,12 @@ from src.db.db_session import DatabaseSession
 from src.web import create_app
 
 # 轮询参数: 模拟执行约0.01s/条，worker重启后最迟一个BRPOP超时
-# 周期（1s）取到任务，预算远超实际耗时防flaky
-POLL_MAX_ATTEMPTS = 20
+# 周期（1s）取到任务。
+# 预算改用**时间 deadline** 而非固定次数：固定 20×0.3s=6s 在 -n 4/-n 8
+# 且开启覆盖率时，worker 线程被抢占后会随机不够（实测 -n 4 曾 1 failed、
+# -n 8 复现）。30s 只在失败路径才走满，正常路径仍是首个终态即返回，
+# 不增加任何耗时。
+POLL_DEADLINE_SECONDS = 30.0
 POLL_INTERVAL = 0.3
 
 
@@ -159,7 +164,10 @@ def queue_env(
   cache_client.reset_backend()
   DatabaseSession.reset()
   event_bus.reset_channels()
-  db_path.unlink(missing_ok=True)
+  # Windows 下 worker 线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_path.unlink(missing_ok=True)
 
 
 def _wait_batch_terminal(
@@ -179,7 +187,8 @@ def _wait_batch_terminal(
     AssertionError: 轮询预算内未达终态时pytest.fail
   """
   status_data: dict | None = None
-  for _ in range(POLL_MAX_ATTEMPTS):
+  deadline = time.monotonic() + POLL_DEADLINE_SECONDS
+  while time.monotonic() < deadline:
     response = client.get(f"/api/executions/{execution_id}/status")
     assert response.status_code == 200, "轮询期间状态查询应始终200"
     status_data = response.get_json()["data"]
@@ -187,7 +196,7 @@ def _wait_batch_terminal(
       return status_data
     time.sleep(POLL_INTERVAL)
   pytest.fail(
-    f"批次在轮询预算内未达终态: {execution_id}, "
+    f"批次在轮询预算 {POLL_DEADLINE_SECONDS}s 内未达终态: {execution_id}, "
     f"最后状态: {status_data['status'] if status_data else '无响应'}"
   )
   raise AssertionError("不可达: pytest.fail后代码不会执行到此处")

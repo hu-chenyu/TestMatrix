@@ -31,6 +31,7 @@ G组 缓存失效统一兜底（V2-P3-8）
 - 无 time.sleep 固定等待，无 print
 """
 
+import contextlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -75,7 +76,10 @@ def seed_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
   DatabaseSession.init_db()
   yield db_path
   DatabaseSession.reset()
-  db_path.unlink(missing_ok=True)
+  # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+  # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+  with contextlib.suppress(PermissionError):
+    db_path.unlink(missing_ok=True)
 
 
 # ===========================================================================
@@ -459,7 +463,10 @@ class TestDescriptionTagsCoexist:
       assert matched[0]["case_id"] == "TM-TAGS-0001"
     finally:
       DatabaseSession.reset()
-      db_path.unlink(missing_ok=True)
+      # Windows 下后台线程可能仍持有 SQLite 句柄：删除失败不应把用例
+      # 升级成 teardown ERROR；tmp_path 由 pytest 会话级清理兜底。
+      with contextlib.suppress(PermissionError):
+        db_path.unlink(missing_ok=True)
 
   @pytest.mark.parametrize(
     ("case", "expected_desc", "expected_tags"),

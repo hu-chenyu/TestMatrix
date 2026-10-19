@@ -71,12 +71,22 @@ def exec_client(tmp_path, monkeypatch):
   client = create_app("test").test_client()
   resp = client.post("/api/executions/trigger", json={"executor": "simulated"})
   execution_id = resp.get_json()["data"]["execution_id"]
-  # 轮询至终态（禁固定 sleep 赌时序）
-  for _ in range(200):
-    status = client.get(f"/api/executions/{execution_id}/status").get_json()
-    if status["data"]["status"] in ("finished", "failed"):
+  # 轮询至终态（禁固定 sleep 赌时序）。
+  # 只容忍**瞬时**非 JSON 响应：SQLite 写锁下 /status 可能先返回 500 HTML，
+  # 原实现直接 status["data"] 会 TypeError 把 setup 打死。此处仍受 30s
+  # deadline 约束，超时即 fail，不会静默放过真正的接口故障。
+  deadline = time.monotonic() + 30.0
+  while time.monotonic() < deadline:
+    response = client.get(f"/api/executions/{execution_id}/status")
+    payload = response.get_json() if response.status_code == 200 else None
+    if payload and (payload.get("data") or {}).get("status") in (
+      "finished",
+      "failed",
+    ):
       break
     time.sleep(0.05)
+  else:
+    pytest.fail(f"批次 {execution_id} 未在 30s 内到达终态")
   yield client, execution_id
   DatabaseSession.reset()
 
