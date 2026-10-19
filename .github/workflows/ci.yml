@@ -171,16 +171,18 @@ jobs:
           echo "::warning::TestMatrix mypy 全量存量错误 ${baseline_count} 个（趋势基线，只减不增；增量步骤已硬阻断变更文件自身新增错误）"
           echo "全量基线错误数=${baseline_count}（豁免不阻断），mypy 退出码=${baseline_code}"
 
-      - name: pytest 全量回归 + 覆盖率门禁（-n 2 并发，--cov-fail-under=85，测试数下限断言）
+      - name: pytest 全量回归 + 覆盖率门禁（-n 4 并发，--cov-fail-under=85，测试数下限断言）
         id: pytest-run
         # 覆盖率不足/测试失败退出码 1 判红；退出码 5（无测试被收集）同样判红——
         # testpaths 固定为 tests/，0 收集只可能是配置/路径损坏，不设容忍以防静默通过。
-        # -n 2（Day58）：固定并发度，保证 CI 耗时可复现；刻意不用 -n auto——runner 核数
-        # 不确定（公开/私有仓库规格不同，探测位亦然），auto 会让并发度随机器漂移。
+        # -n 4（Day60）：CI runner 为 4 vCPU，并发度等于物理核数，经本地 -n 8 五连验
+        # 与 -n 4 --cov 三连验稳定性验证后从 -n 2 升级；刻意不用 -n auto——runner 核数
+        # 不确定（公开/私有仓库规格不同，探测位亦然），auto 会让并发度随机器漂移；
+        # -n 8 在 4 vCPU 上会重演本机 n10/n16 的过载回退（抢核+内存换页）。
         # pytest-cov 原生支持 xdist（worker 各自采集、master 合并），allure-pytest 的
         # --alluredir 由根 conftest 改写成 per-run 目录、各进程互不冲突，均无需额外参数。
         run: |
-          python -m pytest -q -n 2 --cov=src --cov-report=term-missing --cov-fail-under=85
+          python -m pytest -q -n 4 --cov=src --cov-report=term-missing --cov-fail-under=85
 
       - name: 测试总数下限断言（防止"删测试换绿"）
         # Day44 P2-15。此前 CI 对"测试数以实际运行为准"、不做任何下限校验，
