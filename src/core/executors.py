@@ -31,6 +31,19 @@
               边读边投递到输出通道（实时 SSE 用），
               输出本身仍按原口径汇总进 ExecutionResult
 
+功能（真实执行器Phase-2 Day61交付·执行稳定性）:
+  - 超时/启动失败自动重试  PytestRunner 新增 max_retries / retry_delay
+              两个构造参数（默认 0 / 1.0，即**默认不重试**，行为与
+              Day60 完全一致）；只有 exit_reason 落在
+              RETRYABLE_EXIT_REASONS（timeout / spawn_failed）且
+              重试预算未耗尽时才重试，断言失败与配置问题一律不重试
+  - 重试记账      ExecutionResult 新增 retries_used 字段（带默认值），
+              记录本次执行实际重试了几次；duration 只计**最后一次**
+              尝试的耗时，不累计
+  - 中断恢复      run_one 的执行体（_execute_once）用 try-finally 包住
+              子进程句柄：Ctrl-C 让 KeyboardInterrupt 穿透时，
+              finally 仍会把仍存活的整棵进程树清掉，不留孤儿
+
 设计说明:
   - 策略模式: 编排代码（CaseManager._execute_batch_async）只依赖
    BaseExecutor抽象契约，不感知具体执行器实现
@@ -40,6 +53,7 @@
   - 不引入新外部依赖: subprocess为标准库
 """
 
+import math
 import os
 import shutil
 import signal
@@ -157,6 +171,31 @@ EXIT_CODE_ADVICE_MAP: dict[int, str] = {
   EXIT_CODE_USAGE_ERROR: "命令行用法错误（路径不存在/选项非法），核对 source_ref 与 -m/-k 参数",
   EXIT_CODE_NO_TESTS_COLLECTED: "选择器过滤后未收集到任何用例，核对 -m/-k 与执行目标路径",
 }
+
+# ---------------------------------------------------------------------------
+# 超时/启动失败重试（Day61 任务一）
+# ---------------------------------------------------------------------------
+# 只有这两类"这次执行根本没跑成"的失败才值得重试：
+#  timeout        子进程超时被杀——多为机器瞬时负载/冷启动慢，重试有意义
+#  spawn_failed   命令不存在/权限不足/工作目录不存在——可能是杀软扫描、
+#                 句柄瞬时占用等环境抖动，重试有意义
+# 刻意**不含**其余取值，逐一说明理由：
+#  passed / tests_failed   业务结论已出，重试只会把同一结论再跑一遍
+#  invalid_case / invalid_arguments  用例配置/启动参数问题，重试必然同错
+#  interrupted             被中断的执行不该由执行器自作主张再来一次
+#  internal_error / usage_error / no_tests_collected / unknown_exit_code
+#              属于"代码或命令本身错了"，重试是掩盖而不是修复
+RETRYABLE_EXIT_REASONS: frozenset[str] = frozenset(
+  {EXIT_REASON_TIMEOUT, EXIT_REASON_SPAWN_FAILED}
+)
+
+# 重试间隔默认值（秒）
+DEFAULT_RETRY_DELAY_SECONDS = 1.0
+
+# 重试间隔上限（秒）。retry_delay 是构造期可配项，一个手误的 3600 会把单条
+# 用例的墙钟时间拖成一小时，而日志里只看到"重试中"；与其静默挂住，不如在
+# 构造期就把明显不合理的值拒掉。
+MAX_RETRY_DELAY_SECONDS = 300.0
 
 # ---------------------------------------------------------------------------
 # 进程树清理（Day49）
@@ -1016,6 +1055,12 @@ class ExecutionResult:
            失败原因；空串表示桥接成功或**无需桥接**（目录不存在
            / 无结果文件 / 子进程未真正跑完）。桥接失败是旁路
            故障，绝不影响 result 与 error_message
+    retries_used (int): Day61 新增。本次执行实际重试的次数
+           （0 = 首次即成功或失败，未触发重试）。字段在 ExecutionResult
+           里而非日志里，是因为"这条用例是第 2 次才成的"恰恰是排障与
+           稳定性统计的第一手信息，只进日志等于不可查询；带默认值故
+           对既有构造方式完全向后兼容，也不触及数据库 schema
+           （编排层只按名取 result/duration/error_message 落库）
   """
 
   result: str
@@ -1027,6 +1072,7 @@ class ExecutionResult:
   parsed_result: ParsedResult | None = None
   allure_dir: str = ""
   bridge_error: str = ""
+  retries_used: int = 0
 
 
 class BaseExecutor(ABC):
@@ -1247,6 +1293,16 @@ class PytestRunner(BaseExecutor):
     在 Windows 上与共享目录的 WinError 145 竞态（详见
     `build_allure_results_dir`）。执行完成后由
     `bridge_allure_results` 自动解析并入库 defect_statistics。
+
+  执行稳定性（Day61）:
+    - 两项重试配置: max_retries（重试次数上限，默认 0 = 不重试）与
+      retry_delay（重试间隔秒数，默认 1.0）。两者都是**构造期**配置，
+      编排层（case_manager）无需感知——重试完全在执行器层的 run_one
+      内闭环，批次看到的仍是"一条用例一次结果"。
+    - 只有 RETRYABLE_EXIT_REASONS（timeout / spawn_failed）触发重试，
+      断言失败与配置问题绝不重试，理由见该常量的注释。
+    - 中断保护: 子进程句柄由 try-finally 兜住，Ctrl-C 让
+      KeyboardInterrupt 穿透时仍会清掉整棵进程树。
   """
 
   def __init__(
@@ -1254,38 +1310,51 @@ class PytestRunner(BaseExecutor):
     timeout: int | None = None,
     cwd: str | Path | None = None,
     env: dict[str, str] | None = None,
+    max_retries: int = 0,
+    retry_delay: float = DEFAULT_RETRY_DELAY_SECONDS,
   ) -> None:
     """
-    构造PytestRunner并归一化三项可配置项
+    构造PytestRunner并归一化五项可配置项
 
     参数:
       timeout (int | None): 单条用例执行超时秒数；None表示按
-                 "环境变量TM_PYTEST_TIMEOUT → 模块常量"
-                 顺序回落。非法值（≤0 / 非整数 /
-                 环境变量值非数字）一律抛 ValueError
-                 而不是静默回落——静默回落会让"我明明
-                 把预算调到5秒"却仍按30秒跑，排查时
-                 完全看不出配置没生效。环境变量值为空串
-                 或纯空白时视为"未配置"，回落为模块
-                 常量（与"未设置"同义），不抛错。
+                "环境变量TM_PYTEST_TIMEOUT → 模块常量"
+                顺序回落。非法值（≤0 / 非整数 /
+                环境变量值非数字）一律抛 ValueError
+                而不是静默回落——静默回落会让"我明明
+                把预算调到5秒"却仍按30秒跑，排查时
+                完全看不出配置没生效。环境变量值为空串
+                或纯空白时视为"未配置"，回落为模块
+                常量（与"未设置"同义），不抛错。
       cwd (str | Path | None): 子进程工作目录；None时取项目根
-                   PROJECT_ROOT。
+                  PROJECT_ROOT。
       env (dict[str, str] | None): 额外环境变量（叠加在当前进程
-                     环境变量之上）；None表示不注入。
-                     **每个键和值都必须是 str**；键
-                     不能为空串、不能含 "="。
-                     非法时构造期即抛 TypeError /
-                     ValueError，绝不自动 str()
-                     转换——见函数体注释。
+                    环境变量之上）；None表示不注入。
+                    **每个键和值都必须是 str**；键
+                    不能为空串、不能含 "="。
+                    非法时构造期即抛 TypeError /
+                    ValueError，绝不自动 str()
+                    转换——见函数体注释。
+      max_retries (int): Day61 新增。超时/启动失败时的重试次数上限，
+               0（默认）= 不重试，即最多执行 max_retries+1 次。
+               只接受非负整数；bool 与其他类型抛 TypeError、
+               负数抛 ValueError（理由见 _validate_retry_options）。
+      retry_delay (float): Day61 新增。两次尝试之间的间隔秒数，
+               默认 DEFAULT_RETRY_DELAY_SECONDS。接受 int / float，
+               取值范围 [0, MAX_RETRY_DELAY_SECONDS]；
+               负数与 NaN/inf 抛 ValueError，bool 与其他类型抛 TypeError。
 
     返回:
       无
 
     异常:
-      ValueError: timeout 非法，或 env 的键为空串 / 含 "="（详见参数说明）
-      TypeError: cwd 不是 str/Path，env 不是 dict，或 env 的键/值不是 str
+      ValueError: timeout 非法，或 env 的键为空串 / 含 "="（详见参数说明）；
+            max_retries 为负、retry_delay 为负或超出上限
+      TypeError: cwd 不是 str/Path，env 不是 dict，env 的键/值不是 str，
+           max_retries / retry_delay 类型不符
     """
     self.timeout = self._resolve_timeout(timeout)
+
 
     # cwd / env 的显式类型校验（Day48-fix P3-6）
     #
@@ -1307,9 +1376,79 @@ class PytestRunner(BaseExecutor):
       )
 
     self._validate_env_content(env)
+    self._validate_retry_options(max_retries, retry_delay)
 
     self.cwd = Path(cwd) if cwd is not None else PROJECT_ROOT
     self.env = dict(env) if env is not None else None
+    self.max_retries = max_retries
+    self.retry_delay = float(retry_delay)
+
+  @staticmethod
+  def _validate_retry_options(max_retries: int, retry_delay: float) -> None:
+    """
+    校验两项重试配置（Day61 任务一）
+
+    为什么非法值要在构造期就拒而不是"用时再说":
+      这两个参数直接决定一条用例会被执行几次、每次之间等多久。放行一个
+      负数 max_retries，重试循环的 `attempt < self.max_retries` 恒假，
+      看起来"没配"实为"配错了"，稳定性报告里一条异常都看不到；放行一个
+      NaN retry_delay，`time.sleep(nan)` 直接抛 ValueError，而那是在
+      **重试路径上**抛的——一条已经失败的用例会因此把异常上抛穿透
+      run_one，把单条问题升级成整批 failed。构造期拒错才符合本项目
+      "非法配置显式抛错"的既定原则（同 _resolve_timeout / env 内容校验）。
+
+    为什么 bool 要单独拒:
+      `isinstance(True, int)` 为真，`max_retries=True` 会被当作"重试 1 次"
+      静默放行。配置层把开关误写成 True/False 是常见笔误，语义却不是 1/0，
+      与 _resolve_timeout 拒 timeout=True 的口径一致。
+
+    为什么 retry_delay 要有上限 MAX_RETRY_DELAY_SECONDS:
+      该值是运维可调项，手误的 3600 会让单条用例的墙钟时间拖成一小时，
+      而期间日志只写"重试中"。上限定在 300s 已足够覆盖任何合理的
+      "等环境抖动过去"，同时把明显笔误挡在构造期。
+
+    参数:
+      max_retries (int): 重试次数上限，须为非负整数
+      retry_delay (float): 重试间隔秒数，须为 [0, MAX_RETRY_DELAY_SECONDS]
+                 内的有限实数
+
+    返回:
+      无
+
+    异常:
+      TypeError: max_retries / retry_delay 不是数字，或是 bool
+      ValueError: max_retries 为负，retry_delay 为负、非有限值或超出上限
+    """
+    if isinstance(max_retries, bool) or not isinstance(max_retries, int):
+      raise TypeError(
+        f"pytest执行器重试次数上限必须是非负整数，"
+        f"实际类型: {type(max_retries).__name__}，实际值: {max_retries!r}"
+      )
+    if max_retries < 0:
+      raise ValueError(
+        f"pytest执行器重试次数上限不能为负数，实际值: {max_retries!r}"
+        f"（0 表示不重试）"
+      )
+    if isinstance(retry_delay, bool) or not isinstance(retry_delay, (int, float)):
+      raise TypeError(
+        f"pytest执行器重试间隔必须是数字（秒），"
+        f"实际类型: {type(retry_delay).__name__}，实际值: {retry_delay!r}"
+      )
+    # NaN 与 ±inf 都不满足"有限实数"：NaN 会让 sleep 抛 ValueError，
+    # inf 会让线程永久挂住，两者都必须在构造期拦下
+    if not math.isfinite(retry_delay):
+      raise ValueError(
+        f"pytest执行器重试间隔必须是有限数字，实际值: {retry_delay!r}"
+      )
+    if retry_delay < 0:
+      raise ValueError(
+        f"pytest执行器重试间隔不能为负数，实际值: {retry_delay!r}"
+      )
+    if retry_delay > MAX_RETRY_DELAY_SECONDS:
+      raise ValueError(
+        f"pytest执行器重试间隔不能超过 {MAX_RETRY_DELAY_SECONDS} 秒，"
+        f"实际值: {retry_delay!r}（过大的间隔会把单条用例的墙钟时间拖垮）"
+      )
 
   @staticmethod
   def _validate_env_content(env: dict[str, str] | None) -> None:
@@ -1736,7 +1875,74 @@ class PytestRunner(BaseExecutor):
 
   def run_one(self, case: dict[str, Any]) -> ExecutionResult:
     """
-    同步执行单条用例的pytest子进程（Day49：Popen + 进程树清理 + 退出码细化）
+    执行单条用例（Day61：超时/启动失败自动重试的外层循环）
+
+    重试契约（本日任务一、三）:
+      - 触发条件**仅限** exit_reason ∈ RETRYABLE_EXIT_REASONS
+        （timeout / spawn_failed）。passed / tests_failed 是已出的业务
+        结论，invalid_case / invalid_arguments 是用例配置错，interrupted
+        是被中断，其余异常退出码是代码或命令本身的问题——重试都不会
+        改变结论，只会把同一份噪声再跑一遍，故一律不重试。
+      - 重试上限 max_retries 次，即最多执行 max_retries+1 次；耗尽后
+        返回**最后一次**的结果，不回退到更早的某一次。
+      - 每次重试之间 sleep(retry_delay) 秒；单测用 monkeypatch 替换
+        time.sleep，不真等。
+      - 状态一致性: 每次尝试都重新走 _execute_once，命令重新拼装、
+        Allure 目录重新分配（build_allure_results_dir 带序号 + pid +
+        微秒时间戳，天然唯一）、start_time 重新计时。故 duration 只计
+        **最后一次**尝试的耗时，不累计——累计会让单条用例耗时虚高，
+        排障时误判"这条用例本身变慢了"。重试次数由 retries_used 单独
+        承载，信息不丢。
+      - Allure 目录**不覆盖**而是每次新建: 覆盖需要复用同一路径，而那
+        正是 --clean-alluredir 在 Windows 上与并发执行抢目录的 WinError
+        145 竞态来源；新建路径零风险，且历次尝试的现场都能留证。最终
+        只有最后一次的目录会被 bridge 入库，更早的由
+        prune_stale_allure_dirs 按保留数清理。
+
+    参数:
+      case (dict): 待执行用例字典
+
+    返回:
+      ExecutionResult: 最后一次尝试的结果；retries_used 为实际重试次数
+              （0 表示首次即出结论，未触发重试）
+
+    异常:
+      KeyboardInterrupt: 中断不被捕获，照常向上传播（由编排层决定整批
+               如何收场）；传播前 _execute_once 的 finally 已清理
+               整棵进程树
+      其余异常与 _execute_once 的契约一致（均转为 error 结果返回）
+    """
+    attempt = 0
+    while True:
+      result = self._execute_once(case)
+      if (
+        result.exit_reason not in RETRYABLE_EXIT_REASONS
+        or attempt >= self.max_retries
+      ):
+        # 记账在返回前完成：调用方只看 ExecutionResult，不回读日志
+        result.retries_used = attempt
+        return result
+
+      attempt += 1
+      # 上一次的子进程此刻已收场：timeout / spawn_failed 两条路径都在
+      # _execute_once 里杀过树或压根没起进程，且那里的 finally 还会对
+      # "仍存活"的句柄补一刀。故这里不再清一次——重复清理反而会在 pid
+      # 已被系统复用的极端场景下误杀无关进程。
+      logger.warning(
+        f"pytest执行未跑成，准备第 {attempt}/{self.max_retries} 次重试 | "
+        f"用例: {case.get('case_id')} | 分类: {result.exit_reason} | "
+        f"间隔: {self.retry_delay}s"
+      )
+      time.sleep(self.retry_delay)
+
+  def _execute_once(self, case: dict[str, Any]) -> ExecutionResult:
+    """
+    执行一次单条用例的pytest子进程（Day49：Popen + 进程树清理 + 退出码细化）
+
+    本方法只负责**一次**尝试，重试循环在 run_one。这样拆分而不是把循环
+    套在既有函数体外面，是为了让"单次执行"的全部既有行为与历史断言逐字节
+    保留：重试判断本就该建立在"完整的成功/失败结论"之上，而不是嵌进
+    异常分支里。
 
     执行流程:
       1. build_command拼装命令（执行目标缺失/非法时抛 ValueError，
@@ -1756,6 +1962,8 @@ class PytestRunner(BaseExecutor):
       5. 正常收场 → 按退出码映射 result/exit_code/exit_reason，
         解析终端输出为结构化 parsed_result，并把本次独立目录的
         Allure 结果桥接入库（Day50 任务一、二）
+      6. 退出路径（含异常与 Ctrl-C）→ finally 兜底清理仍存活的进程树
+        （Day61 任务二）
 
     为什么改用 Popen 而不是 subprocess.run（Day49 核心变更）:
       `subprocess.run` 内部超时只做 `process.kill()`，杀的是**直接
@@ -1778,11 +1986,14 @@ class PytestRunner(BaseExecutor):
                failed/error 时 error_message 非空；
                exit_code 记录原始退出码（未正常收场为 None）；
                exit_reason 记录细分分类；
-               output 保留子进程输出（已截断）
+               output 保留子进程输出（已截断）；
+               retries_used 保持默认 0（重试次数由 run_one 记账）
 
     异常:
       无（命令拼装失败与子进程异常均转为error结果返回，不向上抛，
-      保持"单条用例的失败不升级为整批failed"的既有契约）
+      保持"单条用例的失败不升级为整批failed"的既有契约）；
+      KeyboardInterrupt 是唯一例外——中断刻意不捕获，照常向上传播，
+      但 finally 保证进程树被清理
 
       被本方法兜住并降级为 error 的全部异常类型：
         - ValueError: build_command 侧的执行目标缺失/格式非法
@@ -1978,6 +2189,32 @@ class PytestRunner(BaseExecutor):
         exit_code=None,
         exit_reason=EXIT_REASON_INVALID_ARGUMENTS,
       )
+    finally:
+      # Day61 任务二：中断恢复（Ctrl-C 时不留孤儿进程）。
+      #
+      # 为什么必须是 finally 而不是再加一个 except: 用户在
+      # communicate/逐行读等待期间按 Ctrl-C 时抛的是 KeyboardInterrupt，
+      # 属于 BaseException——上面**任何一条 except 都接不住**，它会直接
+      # 穿透 _execute_once。穿透本身是设计要求的（中断要照常上抛，由
+      # 编排层决定整批怎么收场），但穿透的同时子进程与它 spawn 的
+      # xdist worker / 被测代码的后代树会继续跑：中断恰恰最常发生在
+      # "这条用例已经跑太久"的时刻，正是残留最不可接受的场景。
+      #
+      # 幂等性（为什么不会重复 kill）: 正常收场时 communicate 已经等到
+      # 进程结束，poll() 返回退出码、分支不进入；超时分支里已杀过一次
+      # 且确已退出时同样跳过；只有"退出路径上进程仍活着"（Ctrl-C、
+      # _consume_stream 之后的异常、树杀未杀净）才补一刀。清理开销在正常
+      # 路径上是一次 poll()，无系统调用、无副作用。
+      #
+      # 不捕获 KeyboardInterrupt 的原因: 执行器无权替调用方决定"中断后
+      # 是否继续跑剩余用例"。把中断吞成一条 error 结果会让编排层以为
+      # 批次正常跑完，用户按了 Ctrl-C 却看到"全部执行完毕"。
+      if process is not None and process.poll() is None:
+        cleanup_note = self.kill_process_tree(process)
+        logger.warning(
+          f"pytest子进程在退出路径上仍存活，已补清进程树 | "
+          f"用例: {case.get('case_id')} | {cleanup_note}"
+        )
     duration = time.perf_counter() - start_time
     exit_reason = EXIT_CODE_REASON_MAP.get(returncode, EXIT_REASON_UNKNOWN_EXIT_CODE)
     result_value = EXIT_CODE_RESULT_MAP.get(returncode, "error")

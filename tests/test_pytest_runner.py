@@ -1,7 +1,7 @@
 """
-PytestRunner 真实执行器测试（Day48 建立，Day49 扩充）
+PytestRunner 真实执行器测试（Day48 建立，Day49 扩充，Day61 扩充）
 
-覆盖范围（21 条）:
+覆盖范围（29 条）:
   1. build_command 拼装（1 条）: source_ref 唯一执行目标、命令形状、
     终止符位置、case_id 不进命令
   2. build_command 收口（1 条）: source_ref 为空一律抛 ValueError
@@ -16,6 +16,11 @@ PytestRunner 真实执行器测试（Day48 建立，Day49 扩充）
     POSIX killpg 的 SIGTERM 与 SIGKILL 分支 / 直接子进程补杀兜底
   7. 进程树清理真实端到端（1 条，Day49）: 真实拉起 pytest，其 spawn 出的
     孙进程在超时后确认已被清理，无僵尸残留
+  8. 执行稳定性（8 条，Day61）: 默认不重试与两项重试配置的构造期校验 /
+    timeout 重试后通过 / spawn_failed 重试耗尽返回最后一次 /
+    非重试退出码矩阵 / 每次重试新建独立 Allure 目录 /
+    duration 只计最后一次尝试 / Ctrl-C 穿透且清理进程树 /
+    finally 清理的幂等性
 
 测试策略:
   - 绝大多数用例用 monkeypatch 替换 `subprocess.Popen`，不真启动子进程。
@@ -39,6 +44,9 @@ run_one 内部走的是 subprocess.Popen 属性查找，副本不会被替换到
 import os
 import subprocess
 import sys
+import time
+from collections.abc import Callable, Iterator
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +55,7 @@ import pytest
 from src.common.env_manager import PROJECT_ROOT
 from src.core import executors as executors_mod
 from src.core.executors import (
+  DEFAULT_RETRY_DELAY_SECONDS,
   EXIT_REASON_INTERNAL_ERROR,
   EXIT_REASON_INTERRUPTED,
   EXIT_REASON_INVALID_ARGUMENTS,
@@ -57,10 +66,12 @@ from src.core.executors import (
   EXIT_REASON_TIMEOUT,
   EXIT_REASON_UNKNOWN_EXIT_CODE,
   EXIT_REASON_USAGE_ERROR,
+  MAX_RETRY_DELAY_SECONDS,
   OUTPUT_TRUNCATE_LENGTH,
   PROCESS_TREE_KILL_GRACE_SECONDS,
   PROCESS_TREE_POLL_INTERVAL_SECONDS,
   PYTEST_TIMEOUT_SECONDS,
+  RETRYABLE_EXIT_REASONS,
   PytestRunner,
   decode_subprocess_stream,
   truncate_output_tail,
@@ -1279,3 +1290,507 @@ class TestProcessTreeCleanup:
           capture_output=True,
           check=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# Day61 执行稳定性：重试 / 中断恢复
+# ---------------------------------------------------------------------------
+# perf_counter 替身的步长（秒）。取 10 而非 1，是为了让"最后一次尝试的耗时"
+# 与"累计耗时"在数值上不可能撞上：前者恒定等于步长，后者至少是它的两倍。
+FAKE_CLOCK_STEP_SECONDS = 10.0
+
+
+class FakeTimeModule:
+  """
+  executors 模块内 time 的替身（Day61）
+
+  为什么要替换**模块级名字**（`executors_mod.time`）而不是直接
+  monkeypatch `time.sleep`:
+    直接改 `time.sleep` 动的是进程内共享的 time 模块，pytest 自身与
+    allure 插件都在用它；而重试用例只需要让 executors 里的等待与计时
+    可控。替换模块级名字把影响面收在本模块内，其余模块仍用真实时钟。
+
+  未显式实现的属性一律透传给真实 time 模块（如 strftime），避免替身
+  缺方法时把失败原因伪装成"被测代码有 bug"。
+  """
+
+  def __init__(self, ticks: Iterator[float] | None = None) -> None:
+    """
+    构造替身
+
+    参数:
+      ticks (Iterator[float] | None): perf_counter 的取值序列；None 时按
+                     FAKE_CLOCK_STEP_SECONDS 步长无限递增
+
+    返回:
+      无
+    """
+    self._ticks: Iterator[float] = (
+      ticks if ticks is not None else count(0.0, FAKE_CLOCK_STEP_SECONDS)
+    )
+    self.sleeps: list[float] = []
+
+  def perf_counter(self) -> float:
+    """返回下一个预置时钟读数（步长固定，便于断言"只计最后一次"）"""
+    return next(self._ticks)
+
+  def sleep(self, seconds: float) -> None:
+    """记录等待秒数后立即返回（**不真等**，重试用例据此断言间隔）"""
+    self.sleeps.append(seconds)
+
+  def __getattr__(self, name: str) -> Any:
+    """其余属性透传给真实 time 模块"""
+    if name.startswith("_"):
+      # 内部属性缺失时直接报错，避免 __getattr__ 自递归
+      raise AttributeError(name)
+    return getattr(time, name)
+
+
+class SequencedSpawner:
+  """
+  按尝试序号返回不同结局的 subprocess.Popen 替身（Day61）
+
+  重试场景要表达"第一次超时、第二次通过"这类**序列**，而既有 FakeSpawner
+  刻意保持"单实例 + 单结局"的语义不动（21 条既有用例依赖它），故新增本类。
+  序列用尽后重复最后一次结局：重试耗尽类用例因此不必把同一结局复制 N 份。
+  """
+
+  def __init__(self, outcomes: list[FakePopen | BaseException]) -> None:
+    """
+    构造替身
+
+    参数:
+      outcomes (list[FakePopen | BaseException]): 每次起进程的结局；元素是
+                     异常实例时在该次调用上抛出
+
+    返回:
+      无
+    """
+    self.outcomes = outcomes
+    self.calls: list[tuple[list[str], dict[str, Any]]] = []
+
+  def __call__(self, command: list[str], **kwargs: Any) -> FakePopen:
+    """记录本次调用并按序号返回结局（用尽后重复最后一个）"""
+    self.calls.append((command, kwargs))
+    outcome = self.outcomes[min(len(self.calls) - 1, len(self.outcomes) - 1)]
+    if isinstance(outcome, BaseException):
+      raise outcome
+    return outcome
+
+
+def _timeout_exc(seconds: int = 5) -> subprocess.TimeoutExpired:
+  """
+  构造超时异常（重试用例反复使用，避免重复字面量）
+
+  参数:
+    seconds (int): 异常的 timeout 字段值（仅用于消息可读性）
+
+  返回:
+    subprocess.TimeoutExpired: 带 cmd 与 timeout 的异常实例
+  """
+  return subprocess.TimeoutExpired(cmd="pytest", timeout=seconds)
+
+
+def _allure_dir_arg(command: list[str]) -> str:
+  """
+  从命令行中取出本次执行的 --alluredir 取值
+
+  参数:
+    command (list[str]): Popen 收到的完整命令行
+
+  返回:
+    str: 目录路径（不含 "--alluredir=" 前缀）
+  """
+  marker = next(arg for arg in command if arg.startswith("--alluredir="))
+  return marker.split("=", 1)[1]
+
+
+@pytest.fixture
+def fake_time(monkeypatch: pytest.MonkeyPatch) -> FakeTimeModule:
+  """
+  把 executors 模块内的 time 换成可控替身并自动还原
+
+  参数:
+    monkeypatch (pytest.MonkeyPatch): pytest 自动还原补丁的夹具
+
+  返回:
+    FakeTimeModule: 记录了 sleep 调用、perf_counter 按步长递增的替身
+  """
+  fake = FakeTimeModule()
+  monkeypatch.setattr(executors_mod, "time", fake)
+  return fake
+
+
+@pytest.fixture
+def install_spawner(
+  monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[list[FakePopen | BaseException]], SequencedSpawner]:
+  """
+  返回一个"按结局序列安装 Popen 替身"的工厂
+
+  做成工厂夹具而不是固定替身，是因为单条用例里常需要**换一套结局**再跑
+  第二轮（如"先证正常路径不清理、再证异常路径清理"）。
+
+  参数:
+    monkeypatch (pytest.MonkeyPatch): pytest 自动还原补丁的夹具
+
+  返回:
+    Callable: 传入结局序列即安装并返回 SequencedSpawner
+  """
+
+  def _install(outcomes: list[FakePopen | BaseException]) -> SequencedSpawner:
+    """安装替身并返回它（同一用例内可反复调用以换序列）"""
+    spawner = SequencedSpawner(outcomes)
+    monkeypatch.setattr(executors_mod.subprocess, "Popen", spawner)
+    return spawner
+
+  return _install
+
+
+@pytest.fixture
+def cleanup_calls(monkeypatch: pytest.MonkeyPatch) -> list[FakePopen]:
+  """
+  拦掉真实的进程树清理并记录被清理的句柄
+
+  单测里绝不能让替身句柄触发系统级 taskkill（会误杀同号真实进程），
+  同时"有没有清理、清理了几次"本身就是要断言的契约。
+
+  参数:
+    monkeypatch (pytest.MonkeyPatch): pytest 自动还原补丁的夹具
+
+  返回:
+    list[FakePopen]: 每次清理按序追加的句柄
+  """
+  calls: list[FakePopen] = []
+
+  def _fake_kill(self: PytestRunner, process: FakePopen) -> str:
+    """记录清理调用并返回可读描述"""
+    calls.append(process)
+    return "mocked"
+
+  monkeypatch.setattr(PytestRunner, "kill_process_tree", _fake_kill)
+  return calls
+
+
+@allure.feature("Day61 执行稳定性")
+class TestPytestRunnerRetry:
+  """超时/启动失败重试、重试记账与构造期校验"""
+
+  @allure.story("默认 max_retries=0 即不重试，两项重试配置显式校验")
+  def test_retry_defaults_and_validation(
+    self,
+    install_spawner: Callable[[list[FakePopen | BaseException]], SequencedSpawner],
+    fake_time: FakeTimeModule,
+    cleanup_calls: list[FakePopen],
+  ) -> None:
+    """
+    默认配置必须完全等价于 Day60 行为：一条超时用例只执行一次。
+
+    这是本日最重要的一条回归护栏——重试是**新增能力**，默认必须关闭，
+    否则所有既有批次的墙钟时间都会被悄悄放大，而调用方完全不知情。
+
+    同时覆盖两项参数的构造期校验：非法值必须在构造期响亮失败，因为放行
+    负数 max_retries 会让重试循环恒不触发（"配了等于没配"却无任何告警），
+    而放行 NaN retry_delay 会让 time.sleep 在**重试路径上**抛 ValueError，
+    把一条已经失败的用例升级成整批 failed。
+    """
+    timeout_process = FakePopen(pid=0)
+    timeout_process._exc = _timeout_exc()
+    spawner = install_spawner([timeout_process])
+
+    default_runner = PytestRunner()
+    assert default_runner.max_retries == 0, "默认必须是 0（不重试）"
+    assert default_runner.retry_delay == DEFAULT_RETRY_DELAY_SECONDS
+    # 可重试分类的单一事实来源
+    assert RETRYABLE_EXIT_REASONS == {
+      EXIT_REASON_TIMEOUT,
+      EXIT_REASON_SPAWN_FAILED,
+    }, "只有超时与启动失败允许重试"
+
+    result = default_runner.run_one(
+      {"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF}
+    )
+
+    assert result.exit_reason == EXIT_REASON_TIMEOUT
+    assert result.retries_used == 0, "未触发重试时 retries_used 必须是 0"
+    assert len(spawner.calls) == 1, "默认配置下不得出现第二次起进程"
+    assert fake_time.sleeps == [], "未触发重试就不该有任何等待"
+
+    # max_retries：负数 / 类型不符
+    for bad_retries in (-1, -100):
+      with pytest.raises(ValueError, match="不能为负数"):
+        PytestRunner(max_retries=bad_retries)
+    for bad_retries_type in (True, 1.5, "2", None):
+      with pytest.raises(TypeError, match="非负整数"):
+        PytestRunner(max_retries=bad_retries_type)  # type: ignore[arg-type]
+
+    # retry_delay：负数 / 非有限值 / 超上限 / 类型不符
+    with pytest.raises(ValueError, match="不能为负数"):
+      PytestRunner(retry_delay=-0.1)
+    for bad_delay in (float("nan"), float("inf")):
+      with pytest.raises(ValueError, match="有限数字"):
+        PytestRunner(retry_delay=bad_delay)
+    with pytest.raises(ValueError, match="不能超过"):
+      PytestRunner(retry_delay=MAX_RETRY_DELAY_SECONDS + 1)
+    for bad_delay_type in (True, "1", None):
+      with pytest.raises(TypeError, match="必须是数字"):
+        PytestRunner(retry_delay=bad_delay_type)  # type: ignore[arg-type]
+
+    # 合法边界照常放行（0 表示"连续重试、不等待"）
+    assert PytestRunner(max_retries=3, retry_delay=0).retry_delay == 0.0
+    assert PytestRunner(retry_delay=MAX_RETRY_DELAY_SECONDS).retry_delay == (
+      MAX_RETRY_DELAY_SECONDS
+    )
+
+  @allure.story("timeout 重试后通过：retries_used 记账 + 间隔生效 + 目标不变")
+  def test_retry_after_timeout_then_passed(
+    self,
+    install_spawner: Callable[[list[FakePopen | BaseException]], SequencedSpawner],
+    fake_time: FakeTimeModule,
+    cleanup_calls: list[FakePopen],
+  ) -> None:
+    """
+    第一次超时、第二次通过：结果取**第二次**的 passed，重试次数计 1。
+
+    三个细节都必须断言：
+      1. 重试间隔真的生效（sleep 收到 retry_delay），否则配置成摆饰；
+      2. 重试的执行目标与首次完全一致（同一条用例重试不该换目标）；
+      3. 超时那一次已把进程树清掉，不能靠"下一次执行顺手覆盖"。
+    """
+    timed_out = FakePopen(pid=0)
+    timed_out._exc = _timeout_exc()
+    passed = FakePopen(pid=0, stdout="1 passed in 0.10s", returncode=0)
+    spawner = install_spawner([timed_out, passed])
+
+    runner = PytestRunner(timeout=5, max_retries=2, retry_delay=0.5)
+    result = runner.run_one({"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF})
+
+    assert result.result == "passed", "最后一次尝试通过即整体 passed"
+    assert result.exit_reason == "passed"
+    assert result.retries_used == 1, "只重试了一次"
+    assert len(spawner.calls) == 2, "max_retries=2 但第二次就成功，不该有第三次"
+    assert fake_time.sleeps == [0.5], "重试间隔必须取 retry_delay"
+    assert [_allure_dir_arg(cmd) for cmd, _ in spawner.calls][0] != "", (
+      "两次尝试都应带 --alluredir"
+    )
+    assert [cmd[-1] for cmd, _ in spawner.calls] == [VALID_SOURCE_REF] * 2, (
+      "重试必须打同一个目标（换目标等于执行了另一条用例）"
+    )
+    assert cleanup_calls == [timed_out], "超时那一次的子进程必须已被清理"
+
+  @allure.story("spawn_failed 重试耗尽：执行 max_retries+1 次并返回最后一次")
+  def test_retry_exhausted_returns_last_spawn_failure(
+    self,
+    install_spawner: Callable[[list[FakePopen | BaseException]], SequencedSpawner],
+    fake_time: FakeTimeModule,
+    cleanup_calls: list[FakePopen],
+  ) -> None:
+    """
+    重试耗尽后返回**最后一次**的失败，不回退到更早的结果。
+
+    为什么"最后一次"要钉死: 排障要看的是最后那次的环境快照（错误码、
+    输出、耗时）；混入更早的失败信息会让人误判根因已经变化。
+    次数断言 max_retries+1 则是对"重试次数上限"这条契约的直接验收。
+    """
+    spawner = install_spawner(
+      [OSError(2, "first attempt missing"), OSError(13, "permission denied")]
+    )
+
+    runner = PytestRunner(max_retries=2, retry_delay=0.2)
+    result = runner.run_one({"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF})
+
+    assert result.result == "error"
+    assert result.exit_reason == EXIT_REASON_SPAWN_FAILED
+    assert result.retries_used == 2, "重试耗尽时 retries_used 必须等于上限"
+    assert len(spawner.calls) == 3, "最多执行 max_retries+1 次"
+    assert fake_time.sleeps == [0.2, 0.2], "两次重试各等一次间隔"
+    assert "permission denied" in (result.error_message or ""), (
+      "必须返回最后一次的失败原因"
+    )
+    assert "first attempt missing" not in (result.error_message or "")
+    assert cleanup_calls == [], "启动失败时压根没有子进程句柄，不该有清理"
+
+  @allure.story("非重试退出码矩阵：断言失败与配置问题一律不重试")
+  def test_non_retryable_reasons_never_retry(
+    self,
+    install_spawner: Callable[[list[FakePopen | BaseException]], SequencedSpawner],
+    fake_time: FakeTimeModule,
+    cleanup_calls: list[FakePopen],
+  ) -> None:
+    """
+    即使 max_retries=3，下列结局也只执行一次。
+
+    分组理由（重试会不会改变结论）:
+      passed / tests_failed   业务结论已出，重跑只会得到同一结论
+      interrupted             被中断的执行不该由执行器自作主张再来一次
+      internal_error / usage_error / no_tests_collected
+                              代码或命令本身错了，重试是掩盖不是修复
+      invalid_case / invalid_arguments
+                              用例配置错，重试必然同错
+    """
+    matrix = (
+      (0, "passed"),
+      (1, "failed"),
+      (2, "error"),
+      (3, "error"),
+      (4, "error"),
+      (5, "error"),
+    )
+    for returncode, expected_result in matrix:
+      process = FakePopen(pid=0, returncode=returncode, stdout=f"exit {returncode}")
+      spawner = install_spawner([process])
+      result = PytestRunner(max_retries=3, retry_delay=0).run_one(
+        {"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF}
+      )
+      assert result.result == expected_result, f"退出码 {returncode} 的 result 不符"
+      assert result.retries_used == 0, f"退出码 {returncode} 不该触发重试"
+      assert len(spawner.calls) == 1, f"退出码 {returncode} 被重复执行了"
+
+    # 启动参数非法（invalid_arguments）
+    spawner = install_spawner([TypeError("environment can only contain strings")])
+    result = PytestRunner(max_retries=3, retry_delay=0).run_one(
+      {"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF}
+    )
+    assert result.exit_reason == EXIT_REASON_INVALID_ARGUMENTS
+    assert result.retries_used == 0
+    assert len(spawner.calls) == 1
+
+    # 用例配置错（invalid_case）：连子进程都不该起
+    spawner = install_spawner([FakePopen(pid=0)])
+    result = PytestRunner(max_retries=3, retry_delay=0).run_one(
+      {"case_id": CASE_ID, "source_ref": None}
+    )
+    assert result.exit_reason == EXIT_REASON_INVALID_CASE
+    assert result.retries_used == 0
+    assert spawner.calls == [], "执行目标缺失时不得起子进程，更不得重试"
+
+    assert fake_time.sleeps == [], "整张矩阵都不该出现任何等待"
+
+  @allure.story("每次重试分配新的独立 Allure 目录，不覆盖上一次")
+  def test_retry_uses_fresh_allure_dir_per_attempt(
+    self,
+    install_spawner: Callable[[list[FakePopen | BaseException]], SequencedSpawner],
+    fake_time: FakeTimeModule,
+    cleanup_calls: list[FakePopen],
+  ) -> None:
+    """
+    三次尝试必须落在三个不同目录，且返回值指向最后一次。
+
+    为什么不做"覆盖上一次目录"（任务书给了两个选项，这里选新建）:
+      覆盖要求复用同一路径，而命令行里同时带着 --clean-alluredir——那正是
+      Windows 上"先删后写"与并发执行抢目录的 WinError 145 竞态来源；
+      新建路径零风险，且历次尝试的现场都能留证（更早的目录由
+      prune_stale_allure_dirs 按保留数清理，不会无限增长）。
+    """
+    first = FakePopen(pid=0)
+    first._exc = _timeout_exc()
+    second = FakePopen(pid=0)
+    second._exc = _timeout_exc()
+    passed = FakePopen(pid=0, stdout="1 passed in 0.05s", returncode=0)
+    spawner = install_spawner([first, second, passed])
+
+    runner = PytestRunner(timeout=5, max_retries=2, retry_delay=0)
+    result = runner.run_one({"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF})
+
+    dirs = [_allure_dir_arg(cmd) for cmd, _ in spawner.calls]
+    assert len(dirs) == 3, "三次尝试各起一次子进程"
+    assert len(set(dirs)) == 3, f"三次尝试必须落在不同目录，实际: {dirs}"
+    assert all(CASE_ID in path for path in dirs), "目录名仍须含用例编号便于排障"
+    assert result.allure_dir == dirs[-1], "返回值必须指向最后一次尝试的目录"
+    assert result.retries_used == 2
+
+  @allure.story("duration 只计最后一次尝试，不累计")
+  def test_duration_counts_only_last_attempt(
+    self,
+    install_spawner: Callable[[list[FakePopen | BaseException]], SequencedSpawner],
+    fake_time: FakeTimeModule,
+    cleanup_calls: list[FakePopen],
+  ) -> None:
+    """
+    duration 只计最后一次尝试的耗时（决策见 run_one docstring）。
+
+    累计会让单条用例耗时虚高（一次 1s 的用例重试 3 次变成 4s），排障时
+    误判"这条用例本身变慢了"；重试次数已由 retries_used 单独承载，信息不丢。
+
+    用固定步长时钟把"最后一次"与"累计"区隔开：每次尝试的耗时恒等于
+    FAKE_CLOCK_STEP_SECONDS，累计值必然是其倍数。
+    """
+    timed_out = FakePopen(pid=0)
+    timed_out._exc = _timeout_exc()
+    passed = FakePopen(pid=0, stdout="1 passed in 0.10s", returncode=0)
+    install_spawner([timed_out, passed])
+
+    result = PytestRunner(timeout=5, max_retries=1, retry_delay=0).run_one(
+      {"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF}
+    )
+
+    assert result.result == "passed"
+    assert result.retries_used == 1
+    assert result.duration == FAKE_CLOCK_STEP_SECONDS, (
+      f"duration 只计最后一次尝试（累计会得到 "
+      f"{2 * FAKE_CLOCK_STEP_SECONDS}）"
+    )
+
+  @allure.story("Ctrl-C 穿透 run_one，但进程树必须被清理且不重试")
+  def test_keyboard_interrupt_propagates_and_cleans_tree(
+    self,
+    install_spawner: Callable[[list[FakePopen | BaseException]], SequencedSpawner],
+    fake_time: FakeTimeModule,
+    cleanup_calls: list[FakePopen],
+  ) -> None:
+    """
+    等待期间按 Ctrl-C：KeyboardInterrupt 上抛，finally 仍清掉进程树。
+
+    三条断言各有明确目的:
+      1. 异常**必须**穿透——吞成一条 error 结果会让编排层以为批次正常
+         跑完，用户按了 Ctrl-C 却看到"执行完毕"；
+      2. 即使 max_retries=2 也不重试——中断是调用方的意图，不是可重试
+         的故障，自动重试等于"用户越按 Ctrl-C 越多进程"；
+      3. finally 必须清理仍存活的句柄——否则中断留下的 pytest + xdist
+         worker 会继续占端口与 CPU，且 Windows 上不会随父进程退出。
+    """
+    alive = FakePopen(pid=0, poll_return=None)
+    alive._exc = KeyboardInterrupt()
+    spawner = install_spawner([alive])
+
+    runner = PytestRunner(max_retries=2, retry_delay=0)
+    with pytest.raises(KeyboardInterrupt):
+      runner.run_one({"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF})
+
+    assert len(spawner.calls) == 1, "中断不得触发重试"
+    assert cleanup_calls == [alive], "finally 必须清理仍存活的进程树"
+    assert fake_time.sleeps == []
+
+  @allure.story("finally 清理的幂等性：正常不重复杀，未杀净时补一刀")
+  def test_finally_cleanup_is_idempotent(
+    self,
+    install_spawner: Callable[[list[FakePopen | BaseException]], SequencedSpawner],
+    fake_time: FakeTimeModule,
+    cleanup_calls: list[FakePopen],
+  ) -> None:
+    """
+    正常收场时 finally 不得做任何清理；树杀后进程仍存活时补杀一次。
+
+    幂等性是这条 finally 能被放在最外层的唯一前提：若它在正常路径上也
+    无条件 taskkill，每条用例都会多一次系统调用，且 pid 被系统复用的
+    极端场景下会误杀无关进程。
+    """
+    passed = FakePopen(pid=0, stdout="1 passed in 0.10s", returncode=0)
+    install_spawner([passed])
+    normal = PytestRunner().run_one(
+      {"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF}
+    )
+    assert normal.result == "passed"
+    assert cleanup_calls == [], "正常收场时 finally 不得重复清理"
+
+    # 超时分支已杀过一次，但进程仍未退出（树杀未杀净）→ finally 补一刀
+    alive = FakePopen(pid=0, poll_return=None)
+    alive._exc = _timeout_exc()
+    install_spawner([alive])
+    timed_out = PytestRunner(timeout=3).run_one(
+      {"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF}
+    )
+    assert timed_out.exit_reason == EXIT_REASON_TIMEOUT
+    assert cleanup_calls == [alive, alive], (
+      "超时已杀一次后进程仍存活，finally 必须补杀且只补一次"
+    )
