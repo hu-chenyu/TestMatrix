@@ -1353,6 +1353,11 @@ class SequencedSpawner:
   重试场景要表达"第一次超时、第二次通过"这类**序列**，而既有 FakeSpawner
   刻意保持"单实例 + 单结局"的语义不动（21 条既有用例依赖它），故新增本类。
   序列用尽后重复最后一次结局：重试耗尽类用例因此不必把同一结局复制 N 份。
+
+  **`calls` 是"补丁窗口内的全进程记录"，不是"本用例的执行记录"**：
+  补丁打在 `executors_mod.subprocess.Popen` 上，而那正是进程内共享的
+  subprocess 模块对象，旁路线程/钩子的 Popen 调用也会进来。凡是要断言
+  "本用例起了几次子进程"，必须经 `_own_popen_calls` 过滤后再计数。
   """
 
   def __init__(self, outcomes: list[FakePopen | BaseException]) -> None:
@@ -1431,6 +1436,10 @@ def install_spawner(
   做成工厂夹具而不是固定替身，是因为单条用例里常需要**换一套结局**再跑
   第二轮（如"先证正常路径不清理、再证异常路径清理"）。
 
+  **补丁是模块级（进而全进程级）的**：断言"本用例起了几次子进程"时必须用
+  `_own_popen_calls(spawner)` 过滤，直接读 `spawner.calls` 会把旁路调用
+  算进来（Day61 热修，详见该函数 docstring）。
+
   参数:
     monkeypatch (pytest.MonkeyPatch): pytest 自动还原补丁的夹具
 
@@ -1445,6 +1454,43 @@ def install_spawner(
     return spawner
 
   return _install
+
+
+def _own_popen_calls(spawner: SequencedSpawner) -> list[tuple[list[str], dict[str, Any]]]:
+  """
+  从 spawner 的全局调用记录中过滤出本用例自身的 Popen 调用
+
+  为什么不能直接用 `len(spawner.calls)`:
+    `install_spawner` 把 `executors_mod.subprocess.Popen` 换成了替身，而
+    `executors_mod.subprocess` 就是**进程内共享的 subprocess 模块对象**，
+    补丁窗口内同一 worker 进程里任何代码路径的 Popen 调用都会被记录——
+    包括 conftest/插件钩子、同 worker 内其他测试遗留的守护线程
+    （`subprocess.run` 内部同样按模块全局名查找 Popen）、xdist 自身调用。
+    在 `-n 8` 高并发下这些"外来调用"会让全局计数虚高，`len(...) == N`
+    断言因此间歇失败（复核实测 实测约 8% 触发率，属 pytest.ini 禁 flaky 铁律
+    的范围）。断言该断的是"**本用例**起过几次子进程"，不是"补丁窗口内
+    全进程起过几次子进程"。
+
+  过滤依据:
+    本类用例的命令最后一个位置参数恒为 `VALID_SOURCE_REF`
+    （`build_command` 的契约，同文件既有的命令形状断言已钉死）；外来调用的
+    命令里不含该路径，据此即可精确隔离本用例自身的执行记录。用 `" ".join`
+    而非只比 `cmd[-1]`，是为了连"路径出现在 `-k`/`-m` 参数里"这类形态也能
+    归到本用例（宁可多留，不可误杀本用例记录）。
+
+  参数:
+    spawner (SequencedSpawner): install_spawner 返回的替身，其 calls 属性
+      记录补丁窗口内全部 Popen 调用，每项为 (命令列表, kwargs 字典)
+
+  返回:
+    list[tuple[list[str], dict[str, Any]]]: 只保留命令中含
+      VALID_SOURCE_REF 的调用记录，按发生顺序
+  """
+  return [
+    (command, kwargs)
+    for command, kwargs in spawner.calls
+    if VALID_SOURCE_REF in " ".join(command)
+  ]
 
 
 @pytest.fixture
@@ -1513,7 +1559,7 @@ class TestPytestRunnerRetry:
 
     assert result.exit_reason == EXIT_REASON_TIMEOUT
     assert result.retries_used == 0, "未触发重试时 retries_used 必须是 0"
-    assert len(spawner.calls) == 1, "默认配置下不得出现第二次起进程"
+    assert len(_own_popen_calls(spawner)) == 1, "默认配置下不得出现第二次起进程"
     assert fake_time.sleeps == [], "未触发重试就不该有任何等待"
 
     # max_retries：负数 / 类型不符
@@ -1568,12 +1614,12 @@ class TestPytestRunnerRetry:
     assert result.result == "passed", "最后一次尝试通过即整体 passed"
     assert result.exit_reason == "passed"
     assert result.retries_used == 1, "只重试了一次"
-    assert len(spawner.calls) == 2, "max_retries=2 但第二次就成功，不该有第三次"
+    assert len(_own_popen_calls(spawner)) == 2, "max_retries=2 但第二次就成功，不该有第三次"
     assert fake_time.sleeps == [0.5], "重试间隔必须取 retry_delay"
-    assert [_allure_dir_arg(cmd) for cmd, _ in spawner.calls][0] != "", (
+    assert [_allure_dir_arg(cmd) for cmd, _ in _own_popen_calls(spawner)][0] != "", (
       "两次尝试都应带 --alluredir"
     )
-    assert [cmd[-1] for cmd, _ in spawner.calls] == [VALID_SOURCE_REF] * 2, (
+    assert [cmd[-1] for cmd, _ in _own_popen_calls(spawner)] == [VALID_SOURCE_REF] * 2, (
       "重试必须打同一个目标（换目标等于执行了另一条用例）"
     )
     assert cleanup_calls == [timed_out], "超时那一次的子进程必须已被清理"
@@ -1602,7 +1648,7 @@ class TestPytestRunnerRetry:
     assert result.result == "error"
     assert result.exit_reason == EXIT_REASON_SPAWN_FAILED
     assert result.retries_used == 2, "重试耗尽时 retries_used 必须等于上限"
-    assert len(spawner.calls) == 3, "最多执行 max_retries+1 次"
+    assert len(_own_popen_calls(spawner)) == 3, "最多执行 max_retries+1 次"
     assert fake_time.sleeps == [0.2, 0.2], "两次重试各等一次间隔"
     assert "permission denied" in (result.error_message or ""), (
       "必须返回最后一次的失败原因"
@@ -1644,7 +1690,7 @@ class TestPytestRunnerRetry:
       )
       assert result.result == expected_result, f"退出码 {returncode} 的 result 不符"
       assert result.retries_used == 0, f"退出码 {returncode} 不该触发重试"
-      assert len(spawner.calls) == 1, f"退出码 {returncode} 被重复执行了"
+      assert len(_own_popen_calls(spawner)) == 1, f"退出码 {returncode} 被重复执行了"
 
     # 启动参数非法（invalid_arguments）
     spawner = install_spawner([TypeError("environment can only contain strings")])
@@ -1653,7 +1699,7 @@ class TestPytestRunnerRetry:
     )
     assert result.exit_reason == EXIT_REASON_INVALID_ARGUMENTS
     assert result.retries_used == 0
-    assert len(spawner.calls) == 1
+    assert len(_own_popen_calls(spawner)) == 1
 
     # 用例配置错（invalid_case）：连子进程都不该起
     spawner = install_spawner([FakePopen(pid=0)])
@@ -1692,7 +1738,7 @@ class TestPytestRunnerRetry:
     runner = PytestRunner(timeout=5, max_retries=2, retry_delay=0)
     result = runner.run_one({"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF})
 
-    dirs = [_allure_dir_arg(cmd) for cmd, _ in spawner.calls]
+    dirs = [_allure_dir_arg(cmd) for cmd, _ in _own_popen_calls(spawner)]
     assert len(dirs) == 3, "三次尝试各起一次子进程"
     assert len(set(dirs)) == 3, f"三次尝试必须落在不同目录，实际: {dirs}"
     assert all(CASE_ID in path for path in dirs), "目录名仍须含用例编号便于排障"
@@ -1757,7 +1803,7 @@ class TestPytestRunnerRetry:
     with pytest.raises(KeyboardInterrupt):
       runner.run_one({"case_id": CASE_ID, "source_ref": VALID_SOURCE_REF})
 
-    assert len(spawner.calls) == 1, "中断不得触发重试"
+    assert len(_own_popen_calls(spawner)) == 1, "中断不得触发重试"
     assert cleanup_calls == [alive], "finally 必须清理仍存活的进程树"
     assert fake_time.sleeps == []
 
