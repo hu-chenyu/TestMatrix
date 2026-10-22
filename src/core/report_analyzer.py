@@ -56,10 +56,16 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.common.logger import LogManager
 from src.common.time_utils import to_utc_iso
+
+if TYPE_CHECKING:
+  # 仅用于类型注解：save_statistics 的返回值类型。
+  # 运行期仍在该方法内部延迟导入（core → db 的延迟导入用于规避循环依赖），
+  # 注解不需要运行期引用，故放进 TYPE_CHECKING 块（与 notification.py 同口径）。
+  from src.db.models import DefectStatistic
 
 logger = LogManager.get_logger()
 
@@ -933,8 +939,9 @@ class ReportRepository:
 
   设计说明:
     - db层模型采用函数内延迟导入，规避core与db模块循环依赖
-    - execution_id重复时由数据库unique约束抛IntegrityError，
-     不做静默更新（批次统计唯一性由调用方保证）
+    - execution_id重复时**累加**（upsert语义，Day63-fix 起）：批量执行时
+      执行器每条用例都桥接一次同一批次号，纯 INSERT 会让第 2 条起全部撞
+      唯一约束而丢失统计（详见 save_statistics docstring）
   """
 
   @staticmethod
@@ -942,11 +949,20 @@ class ReportRepository:
     stat: StatisticsResult,
     execution_id: str,
     remark: str = "",
-  ):
+  ) -> "DefectStatistic":
     """
-    将StatisticsResult写入defect_statistics表
+    将StatisticsResult写入defect_statistics表（同批次号累加，即 upsert）
 
-    字段映射规则:
+    为什么从"纯 INSERT"改成"先查后更"（Day63-fix）:
+      批量执行时执行器**每条用例执行完**都会桥接一次 Allure 结果，传入的是
+      **同一个批次号**。纯 INSERT 下第 1 条成功、第 2 条起必撞
+      `UNIQUE constraint failed: defect_statistics.execution_id`：批次级统计
+      只留下第 1 条用例的单条数据，其余全部丢失，且每条用例白付一次失败
+      INSERT + 回滚 + ERROR 日志（Day63 实测 1000 条批次 999 次冲突）。
+      改为"先查后更"后，同批次号的多次桥接**累加**成批次汇总，与
+      finish_execution 的批次级汇总口径一致。
+
+    首次入库的字段映射规则:
       - total_cases = stat.total
       - passed   = stat.passed
       - failed   = stat.failed - stat.broken
@@ -957,19 +973,30 @@ class ReportRepository:
       - pass_rate  = stat.pass_rate
       - remark   = 入参remark（可传入耗时/分组/失败明细JSON扩展数据）
 
+    已存在记录（同 execution_id）时的累加规则:
+      - total_cases / passed / failed / error / skipped 逐次累加
+      - pass_rate 用累加后的 passed / total_cases **重算**（比率不可累加），
+        total_cases 为 0 时取 0.0 避免除零
+      - remark 仅在本次入参非空时覆盖，空串保留已有扩展数据
+      - 表内无耗时列：StatisticsResult 的 total_duration_ms 等耗时口径
+        **不入库**（模型未建该列，本日不改 models.py）
+
+    并发说明:
+      当前平台串行编排（逐条 run_one），不存在并发写同一 execution_id 的
+      场景，"先查后更"在串行下安全；未来接入批次内并发时需改为
+      唯一约束 + 冲突重试或原子 UPDATE。
+
     参数:
       stat (StatisticsResult): 批次级统计结果对象
       execution_id (str): 执行批次号（AllureResult不含批次号，由调用方传入）
       remark (str): 备注信息（如to_dict的JSON扩展数据），默认空串
 
     返回:
-      DefectStatistic: 入库后的ORM对象（含数据库生成的id与created_at）
+      DefectStatistic: 入库后的ORM对象（新建或累加后的那一行，含 id 与 created_at）
 
     异常:
       ValueError: execution_id为空时抛出
-      sqlalchemy.exc.IntegrityError: execution_id重复（unique约束）时
-                      由数据库抛出并记录error日志
-      sqlalchemy.exc.SQLAlchemyError: 其他数据库异常时向上抛出
+      sqlalchemy.exc.SQLAlchemyError: 数据库异常时记录error日志并向上抛出
     """
     # 延迟导入: 规避core与db模块循环依赖
     from src.db.db_session import DatabaseSession
@@ -978,28 +1005,60 @@ class ReportRepository:
     if not execution_id or not str(execution_id).strip():
       raise ValueError("执行批次号不能为空")
 
-    record = DefectStatistic(
-      execution_id=execution_id,
-      total_cases=stat.total,
-      passed=stat.passed,
-      failed=stat.failed - stat.broken,  # 剔除broken得到纯failed
-      error=stat.broken,  # broken映射error（环境/代码异常）
-      skipped=stat.skipped,
-      pass_rate=stat.pass_rate,
-      remark=remark,
-    )
+    # 本次增量（failed 剔除 broken，broken 映射 error，与字段映射口径一致）
+    total_delta = stat.total
+    passed_delta = stat.passed
+    failed_delta = stat.failed - stat.broken
+    error_delta = stat.broken
+    skipped_delta = stat.skipped
+
     try:
       with DatabaseSession.session_scope() as session:
-        session.add(record)
-        session.flush()  # 立即写库以获取自增id与created_at
-        saved_id = record.id
-        logger.info(
-          f"统计结果入库成功 | 批次: {execution_id} | "
-          f"总数: {stat.total} | 通过: {stat.passed} | "
-          f"失败: {record.failed} | 错误: {record.error} | "
-          f"通过率: {stat.pass_rate:.2%} | 记录ID: {saved_id}"
+        # 先查后更：同批次号已存在则累加，不存在才新建（避免撞唯一约束）
+        existing = (
+          session.query(DefectStatistic)
+          .filter_by(execution_id=execution_id)
+          .first()
         )
-        return record
+        if existing is None:
+          existing = DefectStatistic(
+            execution_id=execution_id,
+            total_cases=total_delta,
+            passed=passed_delta,
+            failed=failed_delta,
+            error=error_delta,
+            skipped=skipped_delta,
+            pass_rate=stat.pass_rate,
+            remark=remark,
+          )
+          session.add(existing)
+          action = "新建"
+        else:
+          # 累加：只累加表中真实存在的计数列
+          existing.total_cases = int(existing.total_cases or 0) + total_delta
+          existing.passed = int(existing.passed or 0) + passed_delta
+          existing.failed = int(existing.failed or 0) + failed_delta
+          existing.error = int(existing.error or 0) + error_delta
+          existing.skipped = int(existing.skipped or 0) + skipped_delta
+          # 通过率必须按累加后的分子分母重算，比率本身不可累加
+          existing.pass_rate = (
+            existing.passed / existing.total_cases
+            if existing.total_cases > 0
+            else 0.0
+          )
+          # 备注仅本次非空时覆盖：后到的空备注不得抹掉已有扩展数据
+          if remark:
+            existing.remark = remark
+          action = "累加"
+        session.flush()  # 立即写库以获取自增id与created_at
+        saved_id = existing.id
+        logger.info(
+          f"统计结果入库成功（{action}） | 批次: {execution_id} | "
+          f"总数: {existing.total_cases} | 通过: {existing.passed} | "
+          f"失败: {existing.failed} | 错误: {existing.error} | "
+          f"通过率: {existing.pass_rate:.2%} | 记录ID: {saved_id}"
+        )
+        return existing
     except Exception as exc:
       logger.error(
         f"统计结果入库失败 | 批次: {execution_id} | "
@@ -1780,11 +1839,12 @@ def bridge_results_dir(
     - 解析/聚合/入库任一步异常 → 捕获后写入 `error` 字段并记 error 日志。
      桥接失败绝不能连带让执行结果丢失。
 
-  批次号唯一性说明:
-    `save_statistics` 对 `execution_id` 建有唯一约束且**刻意不做静默更新**
-    （见 ReportRepository 类注释），重复批次号会抛 IntegrityError。
-    本函数不掩盖它——那属于"批次统计唯一性由调用方保证"的既有契约，
-    调用方需要知道自己这次没入库成功，而不是以为写进去了。
+  同批次号累加说明（Day63-fix 起）:
+    `save_statistics` 对 `execution_id` 仍保留唯一键，但写入策略改为
+    **先查后更**：同批次号第二次起**累加**统计，不再抛 IntegrityError。
+    批量执行正是依赖这一语义——执行器每条用例桥接的都是同一批次号，
+    累加结果即批次汇总口径（修复前第 2 条起全部撞唯一约束而丢失统计）。
+    解析/聚合/入库的任何其它异常仍由本函数统一转成 BridgeResult.error。
 
   参数:
     results_dir (str | Path): Allure 结果目录（Day50 起由执行器为每次

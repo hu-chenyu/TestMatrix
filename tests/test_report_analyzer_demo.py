@@ -587,13 +587,14 @@ class TestBridgeResultsDir:
     assert broken_bridge.ok is True
     assert broken_bridge.has_result is False
 
-  def test_bridge_reports_duplicate_execution_id(self, tmp_path, temp_db):
+  def test_bridge_accumulates_same_execution_id(self, tmp_path, temp_db):
     """
-    批次号重复时如实返回失败原因，绝不静默写入第二行
+    同批次号二次桥接累加统计，不再返回 IntegrityError（Day63-fix）
 
-    defect_statistics.execution_id 有唯一约束且 save_statistics 刻意
-    不做静默更新（批次唯一性由调用方保证）。桥接层若把 IntegrityError
-    吞掉假装成功，调用方就会以为统计已入库——那比报错糟得多。
+    批量执行依赖此语义：执行器每条用例执行完都用**同一批次号**桥接，
+    累加结果即批次汇总口径。修复前第二次桥接返回 ok=False 且 error 含
+    IntegrityError，导致批次统计只剩第 1 条用例的数据（1000 条批次实测
+    999 次冲突）；修复后第二次返回 ok=True 且统计累加。
 
     参数:
       tmp_path (Path): 用例级临时目录fixture
@@ -609,9 +610,15 @@ class TestBridgeResultsDir:
     assert first.ok is True and first.has_result is True
 
     second = bridge_results_dir(allure_dir, "RUN-DAY50-DUP")
-    assert second.ok is False, "重复批次号必须报告失败"
-    assert "IntegrityError" in second.error
-    assert second.has_result is False
+    assert second.ok is True, "同批次号二次桥接必须成功（累加语义）"
+    assert second.error == ""
+    assert second.has_result is True
+
+    # 两次桥接各 1 条通过 → 累加为 2 条，通过率重算为 1.0
+    record = ReportRepository.get_by_execution_id("RUN-DAY50-DUP")
+    assert record.total_cases == 2
+    assert record.passed == 2
+    assert record.pass_rate == 1.0
 
   def test_bridge_reports_empty_execution_id(self, tmp_path, temp_db):
     """

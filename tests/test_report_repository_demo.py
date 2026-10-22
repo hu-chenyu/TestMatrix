@@ -3,7 +3,7 @@ report_analyzer统计结果仓储验证用例（第二阶段Day8）
 
 验证目标:
   1. save_statistics字段映射: failed剔除broken、broken映射error
-  2. 唯一约束: 重复execution_id抛IntegrityError
+  2. 同批次号累加: 重复execution_id第二次起累加统计（Day63-fix upsert）
   3. 查询: 按批次号查询/最近N条降序/趋势升序
   4. 趋势数据: get_trend_data字典格式/get_pass_rate_trend浮点列表
   5. remark扩展字段保存
@@ -19,7 +19,6 @@ from pathlib import Path
 
 import allure
 import pytest
-from sqlalchemy.exc import IntegrityError
 from src.core.report_analyzer import (
   AllureResult,
   ReportAnalyzer,
@@ -139,9 +138,12 @@ class TestSaveStatistics:
     assert record.error == 0
     assert record.pass_rate == 1.0
 
-  def test_save_statistics_duplicate_execution_id(self, temp_db):
+  def test_save_statistics_same_execution_id_accumulates(self, temp_db):
     """
-    唯一约束: 相同execution_id二次入库抛IntegrityError
+    同批次号累加: 相同execution_id二次入库不抛异常，累加为批次汇总（Day63-fix）
+
+    批量执行时执行器每条用例都桥接同一批次号，旧契约"重复必抛
+    IntegrityError"会让第 2 条起统计全部丢失，故改为先查后更累加。
 
     参数:
       temp_db (Path): 临时数据库fixture
@@ -151,9 +153,13 @@ class TestSaveStatistics:
     """
     stat = make_stat(total=5, passed=5)
     ReportRepository.save_statistics(stat, "RUN-DUP-0001")
+    record = ReportRepository.save_statistics(stat, "RUN-DUP-0001")
 
-    with pytest.raises(IntegrityError):
-      ReportRepository.save_statistics(stat, "RUN-DUP-0001")
+    assert record.total_cases == 10  # 5 + 5
+    assert record.passed == 10
+    assert record.pass_rate == 1.0
+    # 累加不新增行：唯一键仍只有一行
+    assert ReportRepository.get_by_execution_id("RUN-DUP-0001").id == record.id
 
   def test_remark_field_saved(self, temp_db):
     """
