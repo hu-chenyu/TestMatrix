@@ -192,7 +192,8 @@
    - **用例合并执行**：同一 `source_ref` 的多条用例合并成一次 pytest 调用（一次进程跑多个 nodeid），
      把 1.67s 启动成本摊薄到 N 条；
    - **Allure 桥接幂等**：`save_statistics` 改为 `execution_id` upsert（或批量场景改走"批次级汇总一次写入"），
-     消除每用例一次失败 INSERT + 回滚 + ERROR 日志；
+     消除每用例一次失败 INSERT + 回滚 + ERROR 日志；**（已于 Day63-fix 收口：save_statistics 改 upsert 累加，
+     同 execution_id 第二次起累加 total_cases/passed/failed/error/skipped，pass_rate 重算，remark 条件更新）**
    - **写库已达标**，无需优化（P95 28ms，7 倍余量）。
 
 ## 六、测量期间的回归与口径记录

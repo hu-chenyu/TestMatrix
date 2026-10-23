@@ -585,14 +585,15 @@ def resolve_bridge_execution_id(case: dict[str, object]) -> str:
     2. 回落到 `pytest-{case_id}`
 
   为什么回落值是确定性的而不是"每次生成新批次号":
-    `defect_statistics.execution_id` 有唯一约束，且 `save_statistics`
-    刻意不做静默更新（见 ReportRepository 类注释）。若此处每次生成
-    全新批次号，那么**每条用例每跑一次**就会往 defect_statistics 插
-    一行——而这张表是 Web 报告统计的数据源，插进来的单条用例统计会
-    把"批次数""通过率趋势""模块分布"的全部口径撑坏（一条用例被
-    当成一个批次）。用确定性的 `pytest-{case_id}`，重复执行会命中
-    唯一约束抛 IntegrityError，由桥接层捕获后如实记为桥接失败——
-    **没入库要说没入库，而不是写一行看起来很成功的脏统计**。
+    `defect_statistics.execution_id` 有唯一约束，`save_statistics`
+    对同一 execution_id 采用 upsert 累加（第二次起累加 total_cases/
+    passed/failed/error/skipped，pass_rate 重算，见 ReportRepository
+    类注释）。若此处每次生成全新批次号，那么**每条用例每跑一次**就
+    会往 defect_statistics 插一行——而这张表是 Web 报告统计的数据源，
+    插进来的单条用例统计会把"批次数""通过率趋势""模块分布"的全部
+    口径撑坏（一条用例被当成一个批次）。用确定性的 `pytest-{case_id}`，
+    重复执行会累加统计到同一批次号下，单条用例的多次执行不会撑坏
+    批次数口径。
 
     Day51 起，批次编排层（`CaseManager._execute_batch_async`）在逐条
     执行前把真实 `execution_id` 并进用例字典，因此**批次执行链路上
