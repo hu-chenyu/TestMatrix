@@ -1,10 +1,11 @@
 """
-TestMatrix 全量基线测量与绝对规模北极星测量脚本（Day63）
+TestMatrix 全量基线测量与绝对规模北极星测量脚本（Day63 基线 / Day64 并发曲线）
 
 定位:
   测量日专用只读工具。不修改 src/ 任何一行、不新增测试、不改 CI 配置，
   只把"同机 / 同数据集 / 重复取中位"的测量方法固化为可复现脚本，
-  产出 raw JSON + 控制台摘要，供 docs/baseline_day63.md 引用。
+  产出 raw JSON + 控制台摘要，供 docs/baseline_day63.md 与
+  docs/baseline_day64.md 引用。
 
 =========================== 测量协议（正文，唯一来源） ===========================
 
@@ -79,6 +80,42 @@ TestMatrix 全量基线测量与绝对规模北极星测量脚本（Day63）
    外推结论与逐条实测成本一致。裸 pytest 与写接口 P95 均为全量/定量实测，
    不做外推。
 
+7. Day64 并发曲线（--concurrency-curve，与上面两个实验并列的独立测量模式）
+   目的: 回答"多 worker 下到底是并发不够、还是写锁在挡路"，给出 1/2/4/8
+         四档的耗时、吞吐、加速比与写锁等待，作为 docs/baseline_day64.md 数据源。
+   7.1 xdist 并发档位:
+      .venv\\Scripts\\python.exe -m pytest -q --tb=no -n <N>   N ∈ {1,2,4,8}
+      与实验 A1 同口径（不含 --cov：覆盖率插桩会放大锁竞争并显著拖慢，
+      Day60 已实测 -n 8 --cov 的稳定性问题，测量耗时不混入插桩成本），
+      每档重复 --runs 次取中位；每轮前删除 output/allure_results（同 A1 理由）。
+      说明: -n 1 走的是 xdist 的单 worker 形态，不是"完全串行"，
+      与实验 A1 的 -n 4 同族可比；本模式下不另测纯串行，避免口径混用。
+   7.2 吞吐与加速比:
+      吞吐(用例/分) = 本轮通过条数 / 中位耗时(s) × 60
+      加速比 = 1 档中位耗时 / N 档中位耗时；效率 = 加速比 / N
+      通过条数取实测值（pytest 尾部摘要 "N passed"），不用写死常量，
+      避免用例集增长后吞吐被固定分母拉偏。
+   7.3 写锁等待（间接探针，标注清楚不是业务链路）:
+      pytest 侧各 worker 的会话库按 pytest-xdist 的 basetemp 分片
+      （xdist workermanage 给每个 worker 下发 <basetemp>/popen-gwN），
+      即**跨 worker 不共享同一个 SQLite 文件**，因此并发曲线的差异
+      主要来自进程/CPU 侧，而不是跨 worker 的写锁排队。
+      为了给"如果共享一个文件库会怎样"一个可复现数字，另起一个
+      **合成写锁探针**：N 个线程对同一个临时 SQLite 文件各写 M 条
+      （BEGIN IMMEDIATE + INSERT + COMMIT，busy_timeout=30000，
+      与 Day60 的测试环境取值一致），逐条计时；
+      单轮抖动大（OS 调度/GC 会让个别插入等几十毫秒），故每档重复
+      --runs 轮、p50/p95/p99 取轮间中位；
+      写锁等待(p50) = 该档中位 p50 − 1 档中位 p50（差值口径，不是内核计数）。
+      探针库在每轮结束即删除，不进入业务库、不参与实验 A/B 口径。
+   7.4 结果合并:
+      每次调用只测 --concurrency-levels 指定的档位，并与既有 JSON 合并
+      （便于分段执行：1 档单独跑、2/4/8 一起跑），派生字段在合并后统一重算。
+      口径调整后重测探针用 --lock-probe-only：只刷新写锁探针并合并，
+      不因探针口径变化重跑分钟级的 pytest 耗时。
+   7.5 护栏:
+      吞吐 ≥ 300 用例/分钟（与实验 A 同一条护栏，4 worker 档位为判定锚点）。
+
 运行方式兼容:
   同时支持 `py -m scripts.measure_baseline` 与 `py scripts/measure_baseline.py`；
   后者 sys.path 默认不含项目根，故先把项目根插入 sys.path 再导入 src.*
@@ -95,6 +132,7 @@ import sqlite3
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -166,6 +204,19 @@ P95_ITERATIONS = 100
 
 # 空载状态说明（写进报告，避免"批次执行中"与"空载"混谈）
 WRITE_P95_SYSTEM_STATE = "空载（无任何批次在执行，队列/通知/缓存均关闭）"
+
+# ---------------------------------------------------------------------------
+# 并发曲线（Day64）
+# ---------------------------------------------------------------------------
+CURVE_OUTPUT_DIR_DEFAULT = PROJECT_ROOT / "output" / "baseline_day64"
+CURVE_JSON_NAME = "concurrency_curve.json"
+# 任务书固定的四个并发档位（逗号分隔命令行参数解析后仍按此顺序输出）
+CURVE_LEVELS = (1, 2, 4, 8)
+# 与实验 A1 同口径：静默 + 不带 traceback；-n 由档位拼接
+CURVE_PYTEST_ARGS = ("-q", "--tb=no")
+# 合成写锁探针：每线程写多少条、锁等待上限（与 Day60 测试环境取值一致）
+LOCK_PROBE_WRITES_PER_THREAD = 25
+LOCK_PROBE_BUSY_TIMEOUT_MS = 30000
 
 
 # ---------------------------------------------------------------------------
@@ -1296,6 +1347,454 @@ def _judge_experiment_b(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Day64 并发曲线：xdist worker 档位 × 耗时 / 吞吐 / 加速比 + 合成写锁探针
+# ---------------------------------------------------------------------------
+def _parse_concurrency_levels(raw: str) -> list[int]:
+  """
+  解析逗号分隔的并发档位
+
+  参数:
+    raw (str): 形如 "1,2,4,8" 的文本
+
+  返回:
+    list[int]: 去重并升序排列的正整数档位
+
+  异常:
+    ValueError: 存在非整数或小于 1 的档位（口径错误直接失败，不静默跳过）
+  """
+  levels: list[int] = []
+  for chunk in raw.split(","):
+    text = chunk.strip()
+    if not text:
+      continue
+    try:
+      value = int(text)
+    except ValueError as exc:
+      raise ValueError(f"并发档位必须是整数，收到 {text!r}") from exc
+    if value < 1:
+      raise ValueError(f"并发档位必须 >= 1，收到 {value}")
+    if value not in levels:
+      levels.append(value)
+  if not levels:
+    raise ValueError("并发档位不能为空")
+  return sorted(levels)
+
+
+def _parse_pytest_warnings(stdout: str) -> int:
+  """
+  从 pytest 尾部摘要解析告警条数
+
+  参数:
+    stdout (str): pytest 标准输出
+
+  返回:
+    int: 告警条数；摘要不含告警时返回 0
+  """
+  matches = re.findall(r"(\d+) warnings?", stdout)
+  return int(matches[-1]) if matches else 0
+
+
+def measure_pytest_concurrency(workers: int, runs: int) -> dict[str, Any]:
+  """
+  测量指定 xdist 并发档位下的全量 pytest 耗时
+
+  参数:
+    workers (int): xdist worker 数（-n 参数）
+    runs (int): 重复次数（取中位）
+
+  返回:
+    dict[str, Any]: {"workers", "runs", "median_seconds", "passed", "warnings"}
+
+  异常:
+    无（子进程失败只记录在返回值里，由调用方判定可信度）
+  """
+  command = [sys.executable, "-m", "pytest", *CURVE_PYTEST_ARGS, "-n", str(workers)]
+  runs_data: list[dict[str, Any]] = []
+  for index in range(runs):
+    # 与实验 A1 同因：--clean-alluredir 在 Windows 遇残留目录会 INTERNALERROR
+    shutil.rmtree(PROJECT_ROOT / "output" / "allure_results", ignore_errors=True)
+    with Stopwatch() as sw:
+      completed = subprocess.run(
+        command,
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_bare_pytest_env(),
+        check=False,
+      )
+    passed = _parse_pytest_passed(completed.stdout)
+    warnings = _parse_pytest_warnings(completed.stdout)
+    runs_data.append(
+      {
+        "run": index + 1,
+        "seconds": round(sw.seconds, 3),
+        "returncode": completed.returncode,
+        "passed": passed,
+        "warnings": warnings,
+      }
+    )
+    print(
+      f"  [曲线] n={workers} 第 {index + 1}/{runs} 轮: {sw.seconds:.2f}s | "
+      f"passed={passed} | warnings={warnings} | 退出码={completed.returncode}"
+    )
+  return {
+    "workers": workers,
+    "runs": runs_data,
+    "median_seconds": round(default_median([r["seconds"] for r in runs_data]), 3),
+    "passed": int(default_median([float(r["passed"]) for r in runs_data])),
+    "warnings": max((r["warnings"] for r in runs_data), default=0),
+  }
+
+
+def _prepare_lock_probe_db(db_path: Path) -> None:
+  """
+  创建合成写锁探针库（单表 + (execution_id, case_id) 唯一索引）
+
+  参数:
+    db_path (Path): 探针库路径（存在即先删除，保证每档从零开始）
+
+  返回:
+    无
+
+  异常:
+    OSError: 目录不可写时抛出
+    sqlite3.Error: 建表失败时抛出
+  """
+  if db_path.exists():
+    db_path.unlink()
+  connection = sqlite3.connect(str(db_path))
+  try:
+    connection.execute(f"PRAGMA busy_timeout = {LOCK_PROBE_BUSY_TIMEOUT_MS}")
+    connection.execute(
+      "CREATE TABLE probe ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+      "execution_id TEXT NOT NULL, "
+      "case_id TEXT NOT NULL)"
+    )
+    connection.execute("CREATE UNIQUE INDEX uq_probe ON probe (execution_id, case_id)")
+    connection.commit()
+  finally:
+    connection.close()
+
+
+def _lock_probe_writer(
+  db_path: Path,
+  workers: int,
+  thread_index: int,
+  barrier: threading.Barrier,
+  latencies: list[float],
+  errors: list[str],
+) -> None:
+  """
+  单个探针线程：对齐屏障后连写 N 条，逐条记录"取锁+写入+提交"耗时
+
+  参数:
+    db_path (Path): 探针库路径（各线程各持一条独立连接）
+    workers (int): 档位（用于构造 execution_id，保证同档内唯一键不冲突）
+    thread_index (int): 线程序号（case_id 前缀）
+    barrier (threading.Barrier): 起始对齐屏障（禁止用 sleep 赌同时开跑）
+    latencies (list[float]): 输出——每条写入的毫秒耗时
+    errors (list[str]): 输出——SQLite 错误文本（超时/锁失败）
+
+  返回:
+    无
+  """
+  connection = sqlite3.connect(str(db_path), timeout=30.0, isolation_level=None)
+  connection.execute(f"PRAGMA busy_timeout = {LOCK_PROBE_BUSY_TIMEOUT_MS}")
+  try:
+    barrier.wait()
+    for index in range(LOCK_PROBE_WRITES_PER_THREAD):
+      started = time.perf_counter()
+      try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+          "INSERT INTO probe (execution_id, case_id) VALUES (?, ?)",
+          (f"curve-n{workers}", f"{thread_index}-{index}"),
+        )
+        connection.execute("COMMIT")
+      except sqlite3.Error as exc:
+        # 失败不重试：探针要测的是"锁等待与失败形态"，重试会把结论洗平
+        errors.append(f"{type(exc).__name__}: {exc}")
+        try:
+          connection.execute("ROLLBACK")
+        except sqlite3.Error:
+          pass
+      finally:
+        latencies.append((time.perf_counter() - started) * 1000.0)
+  finally:
+    connection.close()
+
+
+def probe_sqlite_write_lock(workers: int, output_dir: Path) -> dict[str, Any]:
+  """
+  合成写锁探针单轮：N 线程并发写同一个 SQLite 文件，量化锁等待
+
+  参数:
+    workers (int): 线程数（与并发档位同值）
+    output_dir (Path): 探针库所在目录（测完即删除）
+
+  返回:
+    dict[str, Any]: {"threads", "writes_per_thread", "total_writes",
+             "p50_ms", "p95_ms", "p99_ms", "max_ms", "error_count"}
+
+  异常:
+    无（探针失败只体现在 error_count 与空样本上）
+  """
+  db_path = output_dir / f"lock_probe_n{workers}.db"
+  _prepare_lock_probe_db(db_path)
+  latencies: list[float] = []
+  errors: list[str] = []
+  barrier = threading.Barrier(workers)
+  threads = [
+    threading.Thread(
+      target=_lock_probe_writer,
+      args=(db_path, workers, index, barrier, latencies, errors),
+      name=f"lock-probe-{workers}-{index}",
+      daemon=True,
+    )
+    for index in range(workers)
+  ]
+  for thread in threads:
+    thread.start()
+  for thread in threads:
+    thread.join(timeout=120.0)
+  payload = {
+    "threads": workers,
+    "writes_per_thread": LOCK_PROBE_WRITES_PER_THREAD,
+    "total_writes": workers * LOCK_PROBE_WRITES_PER_THREAD,
+    "p50_ms": round(percentile(latencies, 50), 3),
+    "p95_ms": round(percentile(latencies, 95), 3),
+    "p99_ms": round(percentile(latencies, 99), 3),
+    "max_ms": round(max(latencies), 3) if latencies else 0.0,
+    "error_count": len(errors),
+    "errors": errors[:3],
+  }
+  if db_path.exists():
+    db_path.unlink()
+  print(
+    f"  [写锁探针] n={workers}: p50={payload['p50_ms']:.3f}ms | "
+    f"p95={payload['p95_ms']:.3f}ms | 错误={payload['error_count']}"
+  )
+  return payload
+
+
+def probe_sqlite_write_lock_repeated(
+  workers: int,
+  output_dir: Path,
+  repeats: int,
+) -> dict[str, Any]:
+  """
+  合成写锁探针重复测量：单轮抖动大（OS 调度/GC 一次插入等几十毫秒），取中位
+
+  参数:
+    workers (int): 线程数（与并发档位同值）
+    output_dir (Path): 探针库所在目录
+    repeats (int): 重复轮数（>=1，通常取 3）
+
+  返回:
+    dict[str, Any]: 单轮结构 + "repeats": [每轮 p50/p95] + 中位口径的
+             p50_ms / p95_ms / p99_ms / max_ms / error_count
+
+  异常:
+    无
+  """
+  rounds = [
+    probe_sqlite_write_lock(workers, output_dir) for _ in range(max(1, repeats))
+  ]
+  payload: dict[str, Any] = dict(rounds[-1])
+  payload["p50_ms"] = round(default_median([float(row["p50_ms"]) for row in rounds]), 3)
+  payload["p95_ms"] = round(default_median([float(row["p95_ms"]) for row in rounds]), 3)
+  payload["p99_ms"] = round(default_median([float(row["p99_ms"]) for row in rounds]), 3)
+  payload["max_ms"] = round(default_median([float(row["max_ms"]) for row in rounds]), 3)
+  payload["error_count"] = sum(int(row["error_count"]) for row in rounds)
+  payload["repeats"] = [
+    {"p50_ms": row["p50_ms"], "p95_ms": row["p95_ms"], "error_count": row["error_count"]}
+    for row in rounds
+  ]
+  print(
+    f"  [写锁探针·中位] n={workers}（{len(rounds)} 轮）: "
+    f"p50={payload['p50_ms']:.3f}ms | p95={payload['p95_ms']:.3f}ms"
+  )
+  return payload
+
+
+def _load_curve_payload(path: Path) -> dict[str, Any]:
+  """
+  读取既有并发曲线 JSON（分段测量时用于合并）
+
+  参数:
+    path (Path): JSON 路径
+
+  返回:
+    dict[str, Any]: 既有数据；文件不存在或不可解析时返回空字典
+  """
+  if not path.exists():
+    return {}
+  try:
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError):
+    return {}
+  return loaded if isinstance(loaded, dict) else {}
+
+
+def _finalize_curve(payload: dict[str, Any]) -> dict[str, Any]:
+  """
+  重算派生字段：吞吐、加速比、效率、扣护栏、锁等待增量
+
+  参数:
+    payload (dict[str, Any]): 含 "levels" 的曲线数据（就地更新）
+
+  返回:
+    dict[str, Any]: 同一个 payload（便于链式调用）
+  """
+  levels: dict[str, Any] = payload.setdefault("levels", {})
+  ordered = sorted(levels.values(), key=lambda item: int(item["workers"]))
+  base = next((item for item in ordered if int(item["workers"]) == 1), None)
+  base_seconds = float(base["median_seconds"]) if base else 0.0
+  base_lock = float((base.get("lock_probe") or {}).get("p50_ms", 0.0)) if base else 0.0
+  for item in ordered:
+    seconds = float(item["median_seconds"])
+    workers = int(item["workers"])
+    throughput = (int(item["passed"]) / seconds * 60.0) if seconds > 0 else 0.0
+    speedup = (base_seconds / seconds) if seconds > 0 and base_seconds > 0 else 0.0
+    lock = item.get("lock_probe") or {}
+    item["throughput_per_min"] = round(throughput, 1)
+    item["speedup_vs_1"] = round(speedup, 3)
+    item["efficiency"] = round(speedup / workers, 3) if workers else 0.0
+    item["throughput_guardrail_per_min"] = THROUGHPUT_GUARDRAIL_PER_MIN
+    item["throughput_passed"] = throughput >= THROUGHPUT_GUARDRAIL_PER_MIN
+    item["lock_wait_p50_ms"] = (
+      round(max(0.0, float(lock.get("p50_ms", 0.0)) - base_lock), 3) if base_lock else 0.0
+    )
+  return payload
+
+
+def run_concurrency_curve(args: argparse.Namespace) -> int:
+  """
+  执行并发曲线测量：逐档跑全量 pytest + 写锁探针，合并后落 JSON 并打印摘要
+
+  参数:
+    args (argparse.Namespace): 含 runs / concurrency_levels / curve_output_dir
+
+  返回:
+    int: 进程退出码（0 正常；1 参数或测量异常）
+  """
+  output_dir: Path = args.curve_output_dir
+  json_path = output_dir / CURVE_JSON_NAME
+  try:
+    levels = _parse_concurrency_levels(args.concurrency_levels)
+  except ValueError as exc:
+    print(f"[失败] {exc}")
+    return 1
+  if args.runs < 1:
+    print("--runs 必须 >= 1")
+    return 1
+
+  output_dir.mkdir(parents=True, exist_ok=True)
+  payload = _load_curve_payload(json_path)
+  payload["mode"] = "concurrency_curve"
+  payload["environment"] = environment_info()
+  payload["protocol"] = {
+    "pytest_command": f"python -m pytest {' '.join(CURVE_PYTEST_ARGS)} -n <N>",
+    "levels_raw": args.concurrency_levels,
+    "runs_per_level": args.runs,
+    "levels": levels,
+    "throughput_guardrail_per_min": THROUGHPUT_GUARDRAIL_PER_MIN,
+    "throughput_formula": "通过条数 / 中位耗时(s) × 60",
+    "lock_probe": (
+      f"{LOCK_PROBE_WRITES_PER_THREAD} 条/线程的 BEGIN IMMEDIATE + INSERT + COMMIT，"
+      f"busy_timeout={LOCK_PROBE_BUSY_TIMEOUT_MS}ms，库为临时文件、测完即删"
+    ),
+    "lock_wait_formula": "该档 p50 − 1 档 p50（差值口径，非内核计数器）",
+    "dataset": "当日全量 pytest 用例集（-q --collect-only 实收条数）",
+    "excluded": "不含 --cov（插桩会放大锁竞争并拖慢耗时，与实验 A1 同口径）",
+  }
+  payload["levels"] = payload.get("levels", {})
+
+  if args.lock_probe_only:
+    # 只重测写锁探针（pytest 耗时是分钟级成本，不因探针口径调整而重跑）
+    for workers in levels:
+      existing = payload["levels"].get(str(workers))
+      if not existing:
+        print(f"[跳过] 档位 n={workers} 尚无 pytest 数据，不单独补探针")
+        continue
+      existing["lock_probe"] = probe_sqlite_write_lock_repeated(
+        workers, output_dir, args.runs
+      )
+    _finalize_curve(payload)
+    payload["updated_at"] = now_iso()
+    dump_json(json_path, payload)
+    _print_concurrency_curve(payload)
+    print(f"\n[JSON] 并发曲线数据（仅刷新写锁探针）: {json_path}")
+    return 0
+
+  for workers in levels:
+    print(f"\n[并发曲线] 档位 n={workers}，共 {args.runs} 轮")
+    measured = measure_pytest_concurrency(workers, args.runs)
+    measured["lock_probe"] = probe_sqlite_write_lock_repeated(workers, output_dir, args.runs)
+    payload["levels"][str(workers)] = measured
+    _finalize_curve(payload)
+    dump_json(json_path, payload)
+    print(f"  [落盘] {json_path}（档位已合并，防中途中断丢数据）")
+
+  _finalize_curve(payload)
+  payload["updated_at"] = now_iso()
+  dump_json(json_path, payload)
+  _print_concurrency_curve(payload)
+  print(f"\n[JSON] 并发曲线数据: {json_path}")
+  return 0
+
+
+def _print_concurrency_curve(payload: dict[str, Any]) -> None:
+  """
+  打印并发曲线摘要（曲线表 + 吞吐护栏判定）
+
+  参数:
+    payload (dict[str, Any]): run_concurrency_curve 的产物
+
+  返回:
+    无
+  """
+  levels = payload.get("levels", {})
+  if not levels:
+    print("\n[并发曲线] 无数据")
+    return
+  ordered = sorted(levels.values(), key=lambda item: int(item["workers"]))
+  print("\n===== 并发曲线（xdist worker 档位） =====")
+  header = ("并发数", "中位耗时(s)", "吞吐(用例/分)", "加速比", "效率", "锁等待p50(ms)")
+  rows = [
+    (
+      str(int(item["workers"])),
+      f"{float(item['median_seconds']):.2f}",
+      f"{float(item['throughput_per_min']):.1f}",
+      f"{float(item['speedup_vs_1']):.2f}",
+      f"{float(item['efficiency']):.2f}",
+      f"{float(item['lock_wait_p50_ms']):.3f}",
+    )
+    for item in ordered
+  ]
+  widths = [max(len(header[i]), *(len(row[i]) for row in rows)) for i in range(len(header))]
+  line = " | ".join(header[i].ljust(widths[i]) for i in range(len(header)))
+  print(line)
+  print("-" * len(line))
+  for row in rows:
+    print(" | ".join(row[i].ljust(widths[i]) for i in range(len(header))))
+
+  guard_rows = [
+    (
+      f"n={int(item['workers'])} 吞吐(用例/分)",
+      f"≥{THROUGHPUT_GUARDRAIL_PER_MIN:.0f}",
+      f"{float(item['throughput_per_min']):.1f}",
+      verdict(bool(item["throughput_passed"])),
+    )
+    for item in ordered
+  ]
+  print_table("并发曲线吞吐护栏", guard_rows)
+
+
+# ---------------------------------------------------------------------------
 # 环境信息与命令行入口
 # ---------------------------------------------------------------------------
 def environment_info() -> dict[str, Any]:
@@ -1369,6 +1868,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     default=1000,
     help="实验 B 实测样本条数，0 表示跑全量（全量约 80 分钟/轮）",
   )
+  parser.add_argument(
+    "--concurrency-curve",
+    action="store_true",
+    help="只跑 Day64 并发曲线（1/2/4/8 档 + 合成写锁探针），不跑实验 A/B",
+  )
+  parser.add_argument(
+    "--concurrency-levels",
+    default="1,2,4,8",
+    help="并发档位，逗号分隔（默认 1,2,4,8；可分段执行后合并 JSON）",
+  )
+  parser.add_argument(
+    "--curve-output-dir",
+    type=Path,
+    default=CURVE_OUTPUT_DIR_DEFAULT,
+    help="并发曲线 JSON 输出目录（默认 output/baseline_day64）",
+  )
+  parser.add_argument(
+    "--lock-probe-only",
+    action="store_true",
+    help="只重测写锁探针并合并进既有 JSON（不重跑分钟级 pytest 耗时）",
+  )
   return parser.parse_args(argv)
 
 
@@ -1403,6 +1923,9 @@ def main(argv: list[str] | None = None) -> int:
   """
   _configure_console()
   args = parse_args(argv)
+  if args.concurrency_curve:
+    # 曲线模式不碰数据库副本：它只跑裸 pytest 与临时库写锁探针
+    return run_concurrency_curve(args)
   if args.runs < 1:
     print("--runs 必须 >= 1")
     return 1

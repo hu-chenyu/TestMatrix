@@ -152,10 +152,34 @@ docker compose -f docker/docker-compose.yml --profile mysql up -d
 - **报告分析引擎**：Allure 结果解析、通过率/耗时 P95/失败明细统计、模块与优先级分布、趋势数据入库；质量度量（覆盖率趋势/缺陷密度/执行效率）
 - **Web 可视化平台（三页面已交付）**：Dashboard（统计卡片/趋势折线/模块环图/优先级柱图/失败 Top）、用例管理（列表/筛选/CRUD/批量导入）、执行记录（批次列表/详情/触发/SSE 实时日志）
 - **多渠道通知推送**：邮件 HTML 报告（内联 CSS）+ 企微 markdown 摘要、失败@负责人、分级通知策略、失败重试（指数退避）+ 死信记录
-- **真实 pytest 执行（已交付）**：subprocess 同步执行——超时控制 / cwd·env 隔离 / 进程树清理 / 退出码映射 / cp936 解码 / source_ref 追踪 / 终端输出解析 / Allure 结果桥接入库 / 逐行输出 SSE 实时推送 / 真实·模拟双模式切换；pytest 钩子与自定义插件（Day55-56 已交付）、xdist 多进程并发（Day58 已交付，CI -n 4 / 本地 -n 8）、结果按用例归位（Day59 已交付）
+- **真实 pytest 执行（已交付）**：subprocess 同步执行——超时控制 / cwd·env 隔离 / 进程树清理 / 退出码映射 / cp936 解码 / source_ref 追踪 / 终端输出解析 / Allure 结果桥接入库 / 逐行输出 SSE 实时推送 / 真实·模拟双模式切换；pytest 钩子与自定义插件（Day55-56 已交付）、xdist 多进程并发（Day58 已交付，CI -n 4 / 本地 -n 8，用法与并发曲线见 [并发执行用法](#并发执行用法pytest-xdist已交付)）、结果按用例归位（Day59 已交付）
 - **进阶工程能力**：Redis 缓存层+任务队列（已交付）、MySQL 深度优化（EXPLAIN/索引，规划中）、AST 精准回归（脚本级：覆盖映射+import 拓扑+影响面反查，规划中）、k6 性能压测基线（规划中）
 - **全链路日志**：Loguru 三通道输出（控制台/全量/错误独立），按天切割、trace_id 用例级追踪
 - **数据持久化**：SQLAlchemy 2.0 ORM，用例/执行记录/缺陷统计三张核心表，SQLite（本地）与 MySQL 8.0（团队共用）一键切换
+
+## 并发执行用法（pytest-xdist，已交付）
+
+```powershell
+# 本地全量（8 物理核 / 16 逻辑核，实测中位 71.81s / 1645 条）
+.venv\Scripts\python.exe -m pytest -q -n 8
+
+# 覆盖率口径（worker 各自采集、master 合并，与串行结果一致）
+.venv\Scripts\python.exe -m pytest -q -n 4 --cov=src --cov-report=term-missing
+
+# 单文件/单目录同样适用
+.venv\Scripts\python.exe -m pytest tests/test_pytest_runner.py -q -n 4
+```
+
+| 并发档位 | 全量耗时中位(s) | 吞吐(用例/分) | 加速比 |
+|---|---|---|---|
+| `-n 1` | 257.31 | 383.6 | 1.00 |
+| `-n 2` | 140.84 | 700.8 | 1.83 |
+| `-n 4` | 90.74 | 1087.7 | 2.84 |
+| `-n 8` | 71.81 | 1374.5 | 3.58 |
+
+使用约定：CI 固定 `-n 4`（4 vCPU runner，并发度等于物理核数，耗时可比）；本地按物理核数取 `-n 8`；
+**不用 `-n auto`**（runner 核数漂移会让耗时不可比，核数超配还会因抢核与内存换页回退）。
+数据与测量协议见 [docs/baseline_day64.md](docs/baseline_day64.md)。
 
 ## 技术栈
 
