@@ -39,6 +39,7 @@ Day62 真实执行全链路集成测试（触发 → 执行 → 解析 → 入�
   本文件用记录型执行器替换器在进程内取证，见第 3 条用例。
 """
 
+import contextlib
 import os
 import shutil
 import threading
@@ -189,6 +190,47 @@ def make_case_file() -> Iterator[Callable[[str, str], str]]:
   yield _factory
   # 只删本次会话自己创建的唯一目录，并行运行的另一会话不受影响
   shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
+def _make_pass_fail_probe_refs(
+  factory: Callable[[str, str], str],
+  tag: str,
+  fail_msg: str = "day62 probe boom",
+) -> tuple[str, str]:
+  """
+  构造成对的通过/失败探针用例 source_ref（内部方法）
+
+  为什么抽成一处: "一次通过 + 一次失败" 是看板趋势、执行详情、并发隔离
+  三类场景的共同前置，三处各写一遍造文件代码时，任何一处改探针内容
+  （比如统一 failure 文案或改用 `assert 1 == 2`）都要改三遍，漏一处就
+  会出现"同一个测试文件里三条用例的探针语义不一致"。
+
+  与任务书签名的偏差（有意）: 造文件能力来自 `make_case_file` fixture，
+  模块级函数取不到 fixture，故把工厂作为**第一个参数**传入；其余参数
+  （tag / fail_msg）与约定一致。
+
+  参数:
+    factory (Callable[[str, str], str]): 造探针文件的工厂（make_case_file）
+    tag (str): 模块名标记，决定两个探针文件名
+          `test_day62_<tag>_pass.py` / `test_day62_<tag>_fail.py`，
+          保证不同测试的探针互不撞名
+    fail_msg (str): 失败探针的断言消息（默认 "day62 probe boom"），
+            调用方需要断言 error_message 时据它取值
+
+  返回:
+    tuple[str, str]: (通过探针 source_ref, 失败探针 source_ref)
+
+  异常:
+    无（文件写入失败照常上抛 OSError）
+  """
+  pass_ref = factory(
+    f"test_day62_{tag}_pass", f"def test_{tag}_pass():\n  assert True\n"
+  )
+  fail_body = (
+    f"def test_{tag}_fail():\n  assert 1 == 2, '{fail_msg}'\n"
+  )
+  fail_ref = factory(f"test_day62_{tag}_fail", fail_body)
+  return pass_ref, fail_ref
 
 
 def _create_case(
@@ -378,6 +420,136 @@ def _execution_rows(execution_id: str) -> list[dict]:
     ]
 
 
+class _EmptyFirstQuery:
+  """
+  "永远查不到行"的查询替身（模拟写前查重在 TOCTOU 窗口里未命中）
+
+  只实现 `record_execution` 第一道防线用到的那一条链
+  （`query(...).filter_by(...).first()`），其余方法一概不提供——
+  一旦被测代码换了查重写法，这里会以 AttributeError 立即暴露，
+  而不是静默地"恰好也返回 None"。
+  """
+
+  def filter_by(self, *args: Any, **kwargs: Any) -> "_EmptyFirstQuery":
+    """
+    模拟 filter_by 链式调用
+
+    参数:
+      *args (Any): 透传占位（不使用）
+      **kwargs (Any): 透传占位（不使用）
+
+    返回:
+      _EmptyFirstQuery: 自身，保持链式调用
+    """
+    return self
+
+  def first(self) -> None:
+    """
+    模拟 `.first()` 查不到行
+
+    返回:
+      None: 永远"未命中"，把调用推进到写库分支
+    """
+    return None
+
+
+class _MissFirstQuerySession:
+  """
+  首个 query() 返回空查询替身的会话包装（其余能力全部委托真实会话）
+
+  为什么包装会话而不是打补丁到 SQLAlchemy: `record_execution` 的第一道
+  防线是**内联** SELECT（`session.query(TestExecution.id)...`），没有
+  可 monkeypatch 的方法入口；而 `_execution_detail_exists` 属于第三道
+  防线自己的回查，patch 它反而会把"重复键"误判成"其它完整性异常"。
+  只包住本次调用拿到的会话，作用域就是这一条路径。
+  """
+
+  def __init__(self, session: Any, state: dict[str, bool]) -> None:
+    """
+    包装真实会话
+
+    参数:
+      session (Any): DatabaseSession.session_scope 产出的真实 Session
+      state (dict[str, bool]): 共享状态，`state["missed"]` 表示空查询
+                   替身已被消耗（即第一道防线确实被放行）
+
+    返回:
+      无
+    """
+    self._session = session
+    self._state = state
+
+  def query(self, *args: Any, **kwargs: Any) -> Any:
+    """
+    第一次 query 返回空查询替身，之后一律委托真实会话
+
+    参数:
+      *args (Any): 透传给真实会话的 query
+      **kwargs (Any): 透传给真实会话的 query
+
+    返回:
+      Any: 首次为 _EmptyFirstQuery，之后为真实 Query 对象
+    """
+    if not self._state["missed"]:
+      self._state["missed"] = True
+      return _EmptyFirstQuery()
+    return self._session.query(*args, **kwargs)
+
+  def __getattr__(self, name: str) -> Any:
+    """
+    未显式覆盖的属性一律委托真实会话（如 add / commit / close）
+
+    参数:
+      name (str): 属性名
+
+    返回:
+      Any: 真实会话上的同名属性
+
+    异常:
+      AttributeError: 真实会话也没有该属性时照常抛出
+    """
+    return getattr(self._session, name)
+
+
+def _open_toctou_window(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
+  """
+  打开一次"查重未命中"的 TOCTOU 窗口（内部方法，第三道防线取证用）
+
+  效果: monkeypatch `DatabaseSession.session_scope`，本次调用拿到的会话
+  在**第一次** query 时返回空查询替身（等价于"并发写方通过查重的那一刻"），
+  之后恢复真实实现——第三道防线捕获 IntegrityError 后的回查必须拿到
+  真实结果，否则它会把重复键当成其它完整性异常原样上抛。
+
+  参数:
+    monkeypatch (pytest.MonkeyPatch): 补丁工具（用例结束自动还原）
+
+  返回:
+    dict[str, bool]: 共享状态；"missed" 为 True 表示空查询替身确已被
+      消耗（第一道防线被放行），用例据此取证"窗口真的开了"
+
+  异常:
+    无
+  """
+  real_scope = DatabaseSession.session_scope
+  state: dict[str, bool] = {"missed": False}
+
+  @contextlib.contextmanager
+  def _miss_first_query_scope() -> Iterator[Any]:
+    """
+    包装真实会话作用域（内部函数）
+
+    返回:
+      Iterator[Any]: yield 包装后的会话
+    """
+    with real_scope() as session:
+      yield _MissFirstQuerySession(session, state)
+
+  monkeypatch.setattr(
+    DatabaseSession, "session_scope", _miss_first_query_scope
+  )
+  return state
+
+
 class _RecordingPytestRunner(PytestRunner):
   """
   记录型真实执行器（测试替身，行为与 PytestRunner 完全一致）
@@ -551,6 +723,7 @@ class TestSingleBatchChain:
     )
     status_data = _wait_terminal(day62_client, execution_id)
     assert status_data["status"] == "finished"
+    assert status_data["total_cases"] == 1  # 与通过场景同口径: 1 条用例 1 条明细
     assert status_data["failed"] == 1
     assert status_data["error"] == 0
     assert status_data["pass_rate"] == 0.0
@@ -597,6 +770,7 @@ class TestSingleBatchChain:
     )
     status_data = _wait_terminal(day62_client, execution_id)
     assert status_data["status"] == "finished"
+    assert status_data["total_cases"] == 1  # 重试不产生额外明细（1 条用例 1 行）
     assert status_data["passed"] == 1
     assert status_data["failed"] == 0
 
@@ -661,6 +835,96 @@ class TestSingleBatchChain:
     assert status_after["total_cases"] == 1
     assert status_after["passed"] == 1
 
+  @allure.title("写库幂等: 查重未命中的窗口下唯一约束仍吸收重复写")
+  def test_duplicate_record_absorbed_by_unique_constraint(
+    self,
+    day62_client: FlaskClient,
+    make_case_file: Callable[[str, str], str],
+    monkeypatch: pytest.MonkeyPatch,
+  ) -> None:
+    """
+    Day60 第三道防线的独立验证（复核实测 P2-01：原用例只触达第一道防线）:
+
+    背景: `record_execution` 是三层防御——①写前 SELECT 查重（内联
+    `session.query`）→ ②`session.add` + INSERT → ③撞唯一约束后回查、
+    命中即按重复吸收并返回 False。串行重复写在第①层就 return 了，
+    所以"删掉第③层"的变异不会让上一条用例变红（变异存活）。
+
+    本用例故意制造"查重未命中"的 TOCTOU 窗口，把调用推到第③层:
+      ①真实执行完成后记录明细行数（1 行）；
+      ②屏蔽第①层（首次 query 返回空查询替身＝并发写方通过查重那一刻）；
+      ③同键再写一次 ⇒ 返回 False（被唯一约束吸收，不是抛异常）；
+      ④第③层的回查**确实被调用过**（spy 取证），证明走的不是第①层；
+      ⑤明细行数仍为 1，`finish_execution` 聚合 total/passed 仍为 1。
+
+    与任务书的偏差（有意，已按真实代码处置）: 任务书让 monkeypatch
+      `_execution_detail_exists` 来"禁用第一道防线"，但该方法实际是
+      **第三道防线自己的回查**（`record_execution` 的第①层是内联 SELECT，
+      没有独立方法入口）。patch 它会让第③层把重复键误判成"其它完整性
+      异常"并上抛 `CaseManagerError`——验证面从"吸收能力"变成"失败路径"。
+      故改为包装会话作用域、只让首个 query 查不到行，作用域限定本次调用。
+    """
+    source_ref = make_case_file(
+      "test_day62_defense3", "def test_defense3_ok():\n  assert True\n"
+    )
+    _create_case("TM-D62-0032", "全链路-第三道防线", source_ref=source_ref)
+
+    execution_id = _trigger(
+      day62_client, {"executor": "pytest", "module": MODULE_MAIN}
+    )
+    status_data = _wait_terminal(day62_client, execution_id)
+    assert status_data["total_cases"] == 1
+    rows_before = _execution_rows(execution_id)
+    assert len(rows_before) == 1
+    assert rows_before[0]["result"] == "passed"
+
+    # 第③层取证的 spy: 只记录调用并委托真实实现，不改行为
+    recheck_calls: list[tuple[str, str]] = []
+    original_recheck = CaseManager._execution_detail_exists
+
+    def _spy_recheck(execution_id_arg: str, case_id_arg: str) -> bool:
+      """
+      记录第三道防线回查的入参后委托真实实现
+
+      参数:
+        execution_id_arg (str): 批次号
+        case_id_arg (str): 用例编号
+
+      返回:
+        bool: 真实回查结果（库中是否已有该明细行）
+      """
+      recheck_calls.append((execution_id_arg, case_id_arg))
+      return original_recheck(execution_id_arg, case_id_arg)
+
+    monkeypatch.setattr(
+      CaseManager, "_execution_detail_exists", _spy_recheck
+    )
+    window_state = _open_toctou_window(monkeypatch)
+
+    written = CaseManager.record_execution(
+      execution_id=execution_id,
+      case_id="TM-D62-0032",
+      case_name="全链路-第三道防线",
+      result="passed",
+      start_time=datetime.now(),
+      end_time=datetime.now(),
+      duration=0.1,
+      environment="dev",
+      executor="web",
+    )
+    assert written is False  # 撞唯一约束后被吸收，而不是抛异常
+    assert window_state["missed"] is True  # 第①层确实被放行（窗口真的开了）
+    assert recheck_calls == [(execution_id, "TM-D62-0032")]  # 第③层回查发生
+
+    # 吸收之后明细不膨胀、聚合口径不变
+    assert len(_execution_rows(execution_id)) == 1
+    summary = CaseManager.finish_execution(execution_id)
+    assert summary["total"] == 1
+    assert summary["passed"] == 1
+    status_after = _wait_terminal(day62_client, execution_id)
+    assert status_after["total_cases"] == 1
+    assert status_after["passed"] == 1
+
 
 # ===========================================================================
 # 5~6. 批量执行与输出解析口径
@@ -697,7 +961,16 @@ class TestBatchAndParserChain:
     _create_case("TM-D62-0101", "批量-用例A通过", MODULE_BATCH, pass_ref)
     _create_case("TM-D62-0102", "批量-用例B通过", MODULE_BATCH, pass_ref_b)
     _create_case("TM-D62-0103", "批量-用例C失败", MODULE_BATCH, fail_ref)
-    assert CaseManager.select_cases_for_execution(module=MODULE_BATCH) != []
+    # 前置对账: 筛选结果必须"恰好这 3 条"——只校验非空时，筛选条件写错
+    # （比如 module 漏传成全量 4 条）也能通过，后面的"入库 3 条"才会红，
+    # 定位成本高且容易误判成入库侧问题
+    selected = CaseManager.select_cases_for_execution(module=MODULE_BATCH)
+    assert len(selected) == 3
+    assert {case["case_id"] for case in selected} == {
+      "TM-D62-0101",
+      "TM-D62-0102",
+      "TM-D62-0103",
+    }
 
     execution_id = _trigger(
       day62_client, {"executor": "pytest", "module": MODULE_BATCH}
@@ -839,12 +1112,8 @@ class TestDashboardAndDetailChain:
         ③两条 created_at 升序排列，先跑的批次在前（折线图时间轴）；
         ④两次执行的耗时都能从详情接口读到（>0，真实子进程耗时）。
     """
-    pass_ref = make_case_file(
-      "test_day62_trend_pass", "def test_trend_pass():\n  assert True\n"
-    )
-    fail_ref = make_case_file(
-      "test_day62_trend_fail",
-      "def test_trend_fail():\n  assert False, 'day62 trend boom'\n",
+    pass_ref, fail_ref = _make_pass_fail_probe_refs(
+      make_case_file, "trend", "day62 trend boom"
     )
 
     _create_case("TM-D62-0301", "趋势-第一次通过", MODULE_TREND, pass_ref)
@@ -898,12 +1167,8 @@ class TestDashboardAndDetailChain:
       该字段只存在于 ExecutionResult，Day61 明确不改数据库 schema，
       故详情层无从读取。重试次数由第 3 条用例在进程内取证。
     """
-    pass_ref = make_case_file(
-      "test_day62_detail_pass", "def test_detail_pass():\n  assert True\n"
-    )
-    fail_ref = make_case_file(
-      "test_day62_detail_fail",
-      "def test_detail_fail():\n  assert 'x' == 'y', 'day62 detail boom'\n",
+    pass_ref, fail_ref = _make_pass_fail_probe_refs(
+      make_case_file, "detail", "day62 detail boom"
     )
     _create_case("TM-D62-0401", "详情-通过", MODULE_DETAIL, pass_ref)
     _create_case("TM-D62-0402", "详情-失败", MODULE_DETAIL, fail_ref)
@@ -963,12 +1228,8 @@ class TestConcurrencyAndErrorPath:
         ②各自明细只有自己那条用例（没有把对方的用例写进来）；
         ③看板趋势两条独立成行，通过率 1.0 与 0.0 没有互相串味。
     """
-    pass_ref = make_case_file(
-      "test_day62_conc_pass", "def test_conc_pass():\n  assert True\n"
-    )
-    fail_ref = make_case_file(
-      "test_day62_conc_fail",
-      "def test_conc_fail():\n  assert False, 'day62 conc boom'\n",
+    pass_ref, fail_ref = _make_pass_fail_probe_refs(
+      make_case_file, "conc", "day62 conc boom"
     )
     _create_case("TM-D62-0501", "并发-通过", MODULE_CONCURRENT_PASS, pass_ref)
     _create_case("TM-D62-0502", "并发-失败", MODULE_CONCURRENT_FAIL, fail_ref)
