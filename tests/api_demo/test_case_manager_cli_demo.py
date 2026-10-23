@@ -11,10 +11,13 @@ case_manager命令行入口与批量执行验证用例（第二阶段Day3）
   6. _simulate_execute: 偶数case_id返回passed、奇数返回failed
 
 数据隔离设计:
-  复用demo_db fixture模式: monkeypatch独立库 + 测试后reset释放连接并删库。
+  复用demo_db fixture模式: 每条用例在 tmp_path 下建独立库（xdist 下按 worker 分片，
+  避免多进程共用固定路径库的建表竞态）+ 测试后 reset 释放连接并以短退避重试删库。
 """
 
 import re
+import time
+import warnings
 from pathlib import Path
 
 import allure
@@ -29,39 +32,90 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # 演示数据文件（4条用例: TM-API-0201[P0] / 0202[P1] / 0203[P1] / 0204[P2]）
 DATA_FILE = PROJECT_ROOT / "testdata" / "yaml" / "api_user_query_matrix.yaml"
 
-# 演示数据库文件路径（与fixture中环境变量指向的路径一致）
-DEMO_DB = PROJECT_ROOT / "output" / "test_case_manager_cli_demo.db"
+# 演示数据库文件名（实际路径由 fixture 落到每条用例自己的 tmp_path 下）
+DEMO_DB_NAME = "case_manager_cli_demo.db"
 
 # 批次号格式
 EXECUTION_ID_PATTERN = re.compile(r"^RUN-\d{8}-\d{6}-[0-9a-f]{4}$")
 
+# 删库重试参数（Windows 句柄释放慢于 unlink 的惯用法）
+UNLINK_RETRY_ATTEMPTS = 3
+UNLINK_RETRY_DELAY_SECONDS = 0.1
+
+
+def _unlink_with_retry(path: Path) -> bool:
+  """
+  删除演示库文件（被占用时短退避重试，耗尽后降级为 warning）
+
+  参数:
+    path (Path): 待删除的库文件路径
+
+  返回:
+    bool: 文件已不存在或删除成功为 True；重试耗尽仍被占用为 False
+
+  异常:
+    无（PermissionError 转 warning，其余异常照常抛出）
+
+  说明:
+    run_batch 的后台连接与执行线程在 DatabaseSession.reset() 之后仍可能持有句柄，
+    -n 8 高负载下句柄释放慢于 unlink 会抛 WinError 32（PermissionError）。
+    这里的 sleep 只用于"退避后再探一次句柄是否已放"，不参与任何断言，
+    与"用 sleep 赌测试时序"是两件事；耗尽后保留 warning 是为了不丢掉
+    "连接未及时释放"这个信号（与 tests/db_cleanup.py 的 safe_unlink 同口径）。
+  """
+  for attempt in range(UNLINK_RETRY_ATTEMPTS):
+    try:
+      path.unlink()
+      return True
+    except FileNotFoundError:
+      return True
+    except PermissionError as exc:
+      if attempt == UNLINK_RETRY_ATTEMPTS - 1:
+        warnings.warn(
+          f"演示库文件仍被占用，未删除: {path} ({exc})",
+          stacklevel=2,
+        )
+        return False
+      time.sleep(UNLINK_RETRY_DELAY_SECONDS)
+  return False
+
 
 @pytest.fixture()
-def demo_db(monkeypatch):
+def demo_db(monkeypatch, tmp_path):
   """
   独立演示数据库fixture（每个测试独享干净数据库）
 
+  为什么落到 tmp_path 而不是固定路径（Day64-fix2）:
+    原先所有用例共用 output/test_case_manager_cli_demo.db。xdist 把**单文件内的用例**
+    也分发到不同 worker 并行执行，多进程同时 init_db() 时 create_all 的
+    "先查后建"会撞车，实测 -n 8 稳定出现 5 个
+    `sqlite3.OperationalError: table test_cases already exists`（setup 阶段 error，
+    与 teardown 无关）；同时一方 teardown 删库还会打断另一方在途写入。
+    tmp_path 在 xdist 下由 pytest 按 worker + 用例分配独立目录，两个竞态一起消失。
+
   测试前:
-    1. monkeypatch覆写TM_DB_SQLITE_PATH指向独立库文件
+    1. monkeypatch覆写TM_DB_SQLITE_PATH指向本用例独立库文件
     2. DatabaseSession.reset()清除引擎单例（保证新环境变量生效）
     3. DatabaseSession.init_db()在独立库中建表
   测试后:
     1. reset释放数据库连接（Windows下必须先释放才能删除库文件）
-    2. 删除演示库文件
+    2. 短退避重试删除演示库文件——后台线程/连接句柄的释放可能慢于 reset，
+       直接 unlink 在 -n 8 高负载下会抛 WinError 32（Day64-fix2 P2）
 
   参数:
     monkeypatch (pytest.MonkeyPatch): pytest内置monkeypatch fixture
+    tmp_path (Path): pytest 用例级临时目录（xdist 下按 worker 分片）
 
   返回:
     Generator[Path]: yield演示库文件路径
   """
-  monkeypatch.setenv("TM_DB_SQLITE_PATH", "output/test_case_manager_cli_demo.db")
+  db_path = tmp_path / DEMO_DB_NAME
+  monkeypatch.setenv("TM_DB_SQLITE_PATH", str(db_path))
   DatabaseSession.reset()
   DatabaseSession.init_db()
-  yield DEMO_DB
+  yield db_path
   DatabaseSession.reset()
-  if DEMO_DB.exists():
-    DEMO_DB.unlink()
+  _unlink_with_retry(db_path)
 
 
 @allure.feature("用例调度管理")

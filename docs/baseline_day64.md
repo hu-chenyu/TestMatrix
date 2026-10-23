@@ -206,6 +206,15 @@ Day63 定位的四条根因，逐条对照今日状态：
    "3 轮取中位"的原因；第六节的靶值判定只采用曲线那 3 轮，不与验收轮混算。
    后续 Day64-fix 复核又跑 3 轮（59.13 / 59.43 / 57.24s，全部 1645 passed / 0 failed），
    计数与耗时另记，不并入本节 9 轮口径。
+   **caveat（Day64-fix2 补充）**：这 3 轮全绿只代表"独立环境、顺序执行"的结论，
+   不等于并发复核下同样稳定——多份全量同时跑（多 AI 并行复核）时因 CPU 争抢会出现偶发失败，
+   单轮失败率约 **25%**，失败点集中在三处已知时序敏感位置：`test_day62_full_chain_integration.py`
+   的批次轮询预算（Day64-fix 已放大到 60s）、`tests/api_demo/test_case_manager_cli_demo.py`
+   的**共用固定路径库**（xdist 把单文件内的用例也分发到多 worker，多进程同时 `init_db()`
+   会在 `create_all` 的"先查后建"上撞车，实测 `-n 8` 稳定出现 5 个
+   `table test_cases already exists`；Day64-fix2 已改为每用例 `tmp_path` 独立库 + 删库短退避重试）、
+   `tests/test_conftest_hooks.py` 的嵌套 pytest 探针目录命名（挂账 Day65 统一治理）。
+   CI 的 `-n 4` 口径是单 job、无并行复核负载，不受该现象影响。
 3. **一处口径不一致（登记，未改）**：`tests/conftest.py` 的 `busy_timeout` 注释称
    "`-n N` 并发下多个 worker 进程各持一条连接写同一个文件库"，与实际不符——
    xdist 给每个 worker 下发独立 basetemp，会话库按 worker 分片，跨 worker 不共享文件。

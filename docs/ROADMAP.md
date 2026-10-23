@@ -32,7 +32,7 @@
 
 ### 第四阶段：深度能力 🔄
 
-- **真实 pytest 执行引擎**：subprocess 同步执行已落地（超时控制 / cwd·env 隔离 / 退出码映射 / cp936 解码 / source_ref 追踪）；pytest 钩子与自定义插件、xdist 并发、模拟/真实双模式切换均已交付（Day55-58）
+- **真实 pytest 执行引擎**：subprocess 同步执行已落地（超时控制 / cwd·env 隔离 / 退出码映射 / cp936 解码 / source_ref 追踪）；pytest 钩子与自定义插件、xdist 并发、模拟/真实双模式切换均已交付（Day53-58）
 - **Flaky 用例治理**：检测 / 标注 / 隔离专项，不依赖 reruns 藏问题
 - **AST 精准回归脚本**：覆盖映射 + import 拓扑 + 影响面反查，脚本级实验
 
