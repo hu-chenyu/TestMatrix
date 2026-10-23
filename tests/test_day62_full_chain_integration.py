@@ -80,8 +80,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRATCH_DIRNAME = f"day62_scratch-{int(time.time() * 1e6)}-{os.getpid()}"
 
 # 轮询参数: 真实单条用例（含 pytest 启动开销约 1.5s）实测 2-4s，
-# 3 条用例的批次留足预算；120 × 0.25s = 30s 上界，离实测值一个量级。
-POLL_MAX_ATTEMPTS = 120
+# 3 条用例的批次留足预算；240 × 0.25s = 60s 上界。
+# 预算放大到 60s 的原因（Day64-fix P2）：-n 8 高并发下 8 个 worker 争抢 CPU，
+# 后台批次线程的实际推进速度可能降至空载的 1/3 以内，30s 预算会在
+# "用例本身没问题、只是没排上 CPU"时误报超时；60s 仍远小于任何非终态挂死的量级，
+# 不会掩盖真正的编排缺陷。
+POLL_MAX_ATTEMPTS = 240
 POLL_INTERVAL_SECONDS = 0.25
 
 # 各用例的模块名（模块筛选是隔离两个并发布次的唯一手段，故显式命名）

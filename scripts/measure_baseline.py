@@ -135,6 +135,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -1805,7 +1806,7 @@ def environment_info() -> dict[str, Any]:
     无
 
   返回:
-    dict[str, Any]: 机器/解释器/pytest/SQLite 版本
+    dict[str, Any]: 机器/解释器/pytest/pytest-xdist/SQLite 版本
   """
   return {
     "os": f"{platform.system()} {platform.release()} {platform.version()}",
@@ -1814,9 +1815,29 @@ def environment_info() -> dict[str, Any]:
     "cpu_count": os.cpu_count(),
     "python": sys.version.split()[0],
     "pytest": pytest.__version__,
+    "pytest_xdist": _distribution_version("pytest-xdist"),
     "sqlite": sqlite3.sqlite_version,
     "measured_at": now_iso(),
   }
+
+
+def _distribution_version(distribution: str) -> str:
+  """
+  读取已安装发行包的版本号（测量环境留痕用）
+
+  参数:
+    distribution (str): 发行包名（如 "pytest-xdist"）
+
+  返回:
+    str: 版本号；未安装或元数据不可读时返回 "unavailable"
+
+  异常:
+    无（版本留痕失败不得让测量脚本中断）
+  """
+  try:
+    return metadata.version(distribution)
+  except (metadata.PackageNotFoundError, OSError, ValueError):
+    return "unavailable"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
