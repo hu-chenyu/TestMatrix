@@ -1121,7 +1121,7 @@ def test_packaging_metadata_whitelists_only_plugin_package(
   ), build_system["requires"]
 
   project = pyproject["project"]
-  assert project["name"] == "TestMatrix"
+  assert project["name"] == "testopshub"
   assert project["version"] == plugin.PLUGIN_VERSION
   assert probe_run.report()["plugin"]["version"] == plugin.PLUGIN_VERSION
 
