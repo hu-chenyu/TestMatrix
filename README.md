@@ -1,11 +1,11 @@
-# TestMatrix 测试可信度治理工具
+# TestMatrix 测试可信度治理平台
 
 [![CI](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/) [![tests 1645](https://img.shields.io/badge/tests-1645%20passed-brightgreen)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml) [![coverage 99.13%](https://img.shields.io/badge/coverage-99.13%25-brightgreen)](https://github.com/hu-chenyu/TestMatrix/actions/workflows/ci.yml)
 
 > **你的平台绿了，你确定是真绿吗？**
 >
-> TestMatrix 是一个面向互联网接口自动化测试的**测试可信度治理**工具：用例管理 →
-> 调度执行 → 报告分析 → Web 可视化 → 通知推送 → CI/CD，Python 全栈自建、
+> TestMatrix 是一个面向互联网接口自动化测试的**全链路效能平台**，以**测试可信度治理**为核心差异化：用例管理 →
+> 调度执行 → 报告分析 → Web 可视化 → 通知推送 → CI/CD 完整闭环，Python 全栈自建、
 > 单机可跑、零外部依赖起步。核心不是"跑得多快"，而是"跑完的结论能不能信"。
 >
 > **全项目方法论：约束下量化质量 → 门禁决策**——每个优化阶段产出可复现的前后对比数据，每个能力边界写进 KNOWN_LIMITATIONS。
