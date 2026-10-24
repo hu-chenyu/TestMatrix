@@ -396,7 +396,7 @@ class TestCasesImportApi:
     }, "落库用例编号应与导入数据完全一致"
 
   # ------------------------------------------------------------------
-  # 高级场景
+  # 复杂场景
   # ------------------------------------------------------------------
   def test_import_excel_with_sheet_name(
     self, import_client: FlaskClient, tmp_path: Path
