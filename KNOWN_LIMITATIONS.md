@@ -35,7 +35,7 @@ SQLite 本地库的 schema 迁移当前通过 `src/db/migration.py` 重建库方
 全新 clone 用户首次运行 `init_db()` 自动建表。
 后续如引入迁移工具（Alembic）再改用轻量 ALTER 迁移（当前未排期）。
 
-## 6. Windows 本地全量 pytest 的两例时序敏感问题（1 例已修复 + 2 项观察/挂账）
+## 6. Windows 本地全量 pytest 的三类时序敏感问题（1 类已修复 + 2 项观察/挂账）
 
 ### 6.1 allure 目录竞态（已修复，Day53 commit 93a78dd）
 
