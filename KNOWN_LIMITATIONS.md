@@ -5,7 +5,7 @@
 ## 1. 任务队列默认单 worker 串行
 
 刻意取舍（个人项目 + SQLite 写锁），队列消费层不做多 worker 并发。
-执行并发由 pytest-xdist（`-n`，并发执行规划中）承担，队列层再做消费多 worker 是第二套并发，
+执行并发由 pytest-xdist（`-n`，Day58 已交付，CI `-n 4` / 本地 `-n 8`）承担，队列层再做消费多 worker 是第二套并发，
 两套并发 + SQLite 写锁会制造复杂度。详见 `task_queue.py` 注释。
 
 ## 2. 串口 / Telnet 为模拟验证（无真机）
@@ -35,36 +35,44 @@ SQLite 本地库的 schema 迁移当前通过 `src/db/migration.py` 重建库方
 全新 clone 用户首次运行 `init_db()` 自动建表。
 后续如引入迁移工具（Alembic）再改用轻量 ALTER 迁移（当前未排期）。
 
-## 6. Windows 本地全量 pytest 偶发 allure 目录竞态（时序敏感 flake）
+## 6. Windows 本地全量 pytest 的两例时序敏感问题（1 例已修复 + 2 项观察/挂账）
 
-**现象**：Windows 本机全量运行时，`tests/test_day44_bugfix_demo.py::test_real_subprocess_failed`
+### 6.1 allure 目录竞态（已修复，Day53 commit 93a78dd）
+
+**原现象**：Windows 本机全量运行时，`tests/test_day44_bugfix_demo.py::test_real_subprocess_failed`
 偶发判定为 `error` 而非 `failed`（嵌套 pytest 与外层 allure 写盘竞争固定目录
 `output/allure_results`，触发 `--clean-alluredir` 互删/互占 → INTERNALERROR，退出码 3 被归为 error）。
 
-**复现特征**：非确定性时序竞争——两次普通串行全量（无 `-n` 并行）实测 1 败（170.73s）
-1 绿（231.52s），与耗时无单调关系、与并行无关；CI（ubuntu-24.04）不受影响（文件系统
-时序差异）。嵌套 pytest 实际写入外层默认目录，per-run alluredir 覆盖疑似未生效
-（D53 首查项）。`pytest.ini` L36-37 已记录 WinError 145 已知问题与手动处置
-（删目录后重跑）。
+**修复**：v3.6 Day53 交付（conftest per-run 唯一 alluredir，消除嵌套 pytest 与外层
+会话的目录竞争）。修复后 CI（ubuntu-24.04）与 Windows 本机均未再复现该现象。
 
-**修复排期**：v3.6 Day53（conftest per-run 唯一 alluredir，消除嵌套 pytest 与外层
-会话的目录竞争；验收必须包含"嵌套 pytest 生效独立 alluredir、不清理外层目录 +
-Windows 本机连续 3 次全量 1473 全绿"）。在 D53 修复前，Windows 本地全量以串行
-执行为准，偶发失败重跑即可；不得因此调整 CI 基线或测试数。
+### 6.2 teardown 删库 WinError 32 噪声（观察项，Day64 登记）
 
-**同族另一例（缓存基准穿透用例，四轮全量实跑 1 红 3 绿）**：
-`tests/test_benchmark_cache_demo.py:358`
+**现象**：Windows 本机 `-n 8` 全量偶发 `UserWarning: 测试库文件仍被占用，未删除`
+（`WinError 32`，路径为 `popen-gwN` 下的临时库），不影响通过率（0 failed）。
+
+**机制**（Day64 基线报告第八节）：fixture teardown 已是 `DatabaseSession.reset() 先、
+`safe_unlink(db_path)` 后；真问题是两步之间还有事件通道/输出通道复位与环境变量还原，
+后台 daemon 批次线程可能在该窗口内调用 `get_engine()` 重新建出指向同一文件的引擎并持有
+句柄，unlink 遂命中 `WinError 32`。可行方向是"删前确认执行线程已收尾"（join/等终态）
+或"删失败后短退避重试"。
+
+**处置**：不阻断 CI、不调整测试数基线；tests/ 禁改日不动，挂账待后续统一治理。
+
+### 6.3 缓存基准穿透用例 TTL 边界 flaky（未收敛，挂账 Flaky 治理专项）
+
+`tests/test_benchmark_cache_demo.py` 的
 `test_runner_penetration_empty_result_and_invalidation` 在 Windows 全量套件中偶发失败
-（失败轮 1 failed / 1472），**单测隔离连跑 5/5 全绿**，其余三轮全量全绿。
-机理是 fakeredis 单例 `cache_client` 与同类 TTL 用例共享状态，叠加全量套件的用例执行
-顺序，偶发落在 TTL 边界上。Linux CI 不受影响（未复现）。
+（历史四轮全量实跑 1 红 3 绿），**单测隔离连跑 5/5 全绿**。机理是 fakeredis 单例
+`cache_client` 与同类 TTL 用例共享状态，叠加全量套件的用例执行顺序，偶发落在 TTL
+边界上。Linux CI 不受影响（未复现）。
 
-该用例自身有**两处自相矛盾的注释**：`L364` docstring 声明"此处不等待 sleep"，
-`L369` 注释却写"TTL 子场景会 sleep 1.5s"——这正是后人无法据代码复现判断的直接原因，
-两处均需订正（订正本身应作为该 flaky 的修复动作之一，否则重跑仍无法定位）。
+该用例早前"两处自相矛盾的注释"（docstring 声明"此处不等待 sleep"、另一处注释写
+"TTL 子场景会 sleep 1.5s"）中，docstring 侧已订正为"此处不等待 sleep"；当前注释
+不再自相矛盾，但 flaky 根因（fakeredis 单例共享 + 执行顺序）未消除。
 
-处置与上条同口径：**不阻断 CI、不调整测试数基线、不加重跑掩盖**，挂 Flaky 治理专项
-与 D53 同批处理。这也是本项目"禁 flaky"铁律下已登记的第 2 例未收敛项。
+处置口径：**不阻断 CI、不调整测试数基线、不加重跑掩盖**，挂 Flaky 治理专项
+（Day115-119）统一处理。这也是本项目"禁 flaky"铁律下已登记的未收敛项。
 
 ## 7. Web 层无鉴权（单机 / 受信网络定位）
 

@@ -47,7 +47,7 @@ def queue_client(monkeypatch: pytest.MonkeyPatch) -> TaskQueueClient:
 @pytest.mark.api
 @pytest.mark.regression
 class TestQueueAckChain:
-  """队列三个方法的端到端契约（后端在实现内部，对外只有行为）"""
+  """队列的三个方法的端到端契约（后端在实现内部，对外只有行为）"""
 
   def test_enqueue_dequeue_ack_chain(self, queue_client: TaskQueueClient) -> None:
     """

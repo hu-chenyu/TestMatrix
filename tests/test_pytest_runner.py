@@ -1467,7 +1467,7 @@ def _own_popen_calls(spawner: SequencedSpawner) -> list[tuple[list[str], dict[st
     包括 conftest/插件钩子、同 worker 内其他测试遗留的守护线程
     （`subprocess.run` 内部同样按模块全局名查找 Popen）、xdist 自身调用。
     在 `-n 8` 高并发下这些"外来调用"会让全局计数虚高，`len(...) == N`
-    断言因此间歇失败（复核实测 实测约 8% 触发率，属 pytest.ini 禁 flaky 铁律
+    断言因此间歇失败（复核实测约 8% 触发率，属 pytest.ini 禁 flaky 铁律
     的范围）。断言该断的是"**本用例**起过几次子进程"，不是"补丁窗口内
     全进程起过几次子进程"。
 

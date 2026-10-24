@@ -69,6 +69,11 @@ from src.web.routes.executions import EXECUTOR_MODE_ENV_KEY
 
 from tests.db_cleanup import safe_unlink
 
+# 全文件标记 slow（Day64-audit-fix）：本文件每条用例都要起真实 pytest 子进程，
+# 是全仓最慢的一档，登记 slow 后可用 `-m "not slow"` 跑快速通道；
+# CI 与每日验收仍执行全量（不加 -m 过滤），标记只做分类不改行为。
+pytestmark = pytest.mark.slow
+
 # 项目根（本文件位于 tests/ 下，向上一级为项目根）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
